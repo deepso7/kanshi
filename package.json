@@ -1,0 +1,28 @@
+{
+  "name": "kanshi",
+  "version": "0.0.1",
+  "description": "",
+  "keywords": [],
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node --watch --env-file=.env src/index.ts",
+    "check": "ultracite check",
+    "fix": "ultracite fix"
+  },
+  "dependencies": {
+    "@effect/platform-node": "0.108.0",
+    "effect": "4.0.0-beta.101"
+  },
+  "devDependencies": {
+    "@effect/language-service": "0.87.1",
+    "@total-typescript/ts-reset": "0.6.1",
+    "@types/node": "26.1.1",
+    "oxfmt": "0.60.0",
+    "oxlint": "1.75.0",
+    "typescript": "7.0.2",
+    "ultracite": "7.9.4"
+  }
+}
