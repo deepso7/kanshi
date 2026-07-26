@@ -8,21 +8,31 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "dev": "node --watch --env-file=.env src/index.ts",
+    "dev": "alchemy dev",
+    "tb:deploy": "tinybird deploy",
+    "cf:deploy": "alchemy deploy",
+    "deploy": "pnpm tb:deploy && pnpm cf:deploy",
+    "destroy": "alchemy destroy",
     "check": "ultracite check",
     "fix": "ultracite fix"
   },
   "dependencies": {
-    "@effect/platform-node": "0.108.0",
+    "@effect/platform-node": "4.0.0-beta.101",
+    "@effect/sql-d1": "4.0.0-beta.101",
+    "@tinybirdco/sdk": "0.0.82",
+    "alchemy": "2.0.0-beta.64",
     "effect": "4.0.0-beta.101"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "5.20260724.1",
     "@effect/language-service": "0.87.1",
+    "@effect/vitest": "4.0.0-beta.101",
     "@total-typescript/ts-reset": "0.6.1",
     "@types/node": "26.1.1",
     "oxfmt": "0.60.0",
     "oxlint": "1.75.0",
     "typescript": "7.0.2",
-    "ultracite": "7.9.4"
+    "ultracite": "7.9.4",
+    "vitest": "4.1.10"
   }
 }
