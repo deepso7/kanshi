@@ -21,6 +21,7 @@ const UrlValidationReason = Schema.Literals([
   "blocked_hostname",
   "credentials_not_allowed",
   "dns_lookup_failed",
+  "dns_resolver_failed",
   "invalid_url",
   "invalid_webhook",
   "no_public_address",
@@ -216,7 +217,7 @@ const queryDns = Effect.fn("Url.queryDns")(function* queryDnsEffect(
       () =>
         new UrlValidationError({
           hostname,
-          reason: "dns_lookup_failed",
+          reason: "dns_resolver_failed",
         })
     )
   );

@@ -3,10 +3,12 @@ import * as Schema from "effect/Schema";
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
 export const CheckErrorKind = Schema.Literals([
+  "blocked",
   "connection",
   "dns",
   "network",
   "redirect",
+  "response_too_large",
   "timeout",
   "tls",
 ]);
