@@ -198,6 +198,9 @@ const request = Effect.fn("Probe.request")(function* requestEffect(
       Effect.provideService(FetchHttpClient.RequestInit, {
         redirect: "manual",
       }),
+      // Target URLs can contain sensitive query parameters; do not put the
+      // full URL into the HttpClient span attributes.
+      Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
       Effect.mapError(
         (error) => new TargetProbeError({ kind: classifyHttpError(error) })
       )

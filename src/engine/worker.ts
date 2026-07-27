@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import { FetchHttpClient, HttpServerResponse } from "effect/unstable/http";
 
-import { Database } from "../db/client.ts";
+import { DatabaseClient, makeDatabaseClient } from "../db/client.ts";
 import { runEngine } from "./engine.ts";
 
 export default class EngineWorker extends Cloudflare.Worker<EngineWorker>()(
@@ -13,8 +13,7 @@ export default class EngineWorker extends Cloudflare.Worker<EngineWorker>()(
     main: import.meta.url,
   },
   Effect.gen(function* EngineWorkerInit() {
-    const database = yield* Database;
-    yield* Cloudflare.D1.QueryDatabase(database);
+    const databaseClient = yield* makeDatabaseClient;
 
     const baseUrl = yield* Config.string("TINYBIRD_URL");
     const appendToken = yield* Config.redacted("TINYBIRD_APPEND_TOKEN");
@@ -25,7 +24,7 @@ export default class EngineWorker extends Cloudflare.Worker<EngineWorker>()(
         appendToken: Redacted.value(appendToken),
         baseUrl,
         readToken: Redacted.value(readToken),
-      })
+      }).pipe(Effect.provideService(DatabaseClient, databaseClient))
     );
 
     return {

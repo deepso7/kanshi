@@ -188,6 +188,8 @@ const sendWebhook = Effect.fn("Alerts.sendWebhook")(function* sendWebhookEffect(
     Effect.provideService(FetchHttpClient.RequestInit, {
       redirect: "manual",
     }),
+    // Incoming webhook tokens live in the URL path.
+    Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
     Effect.flatMap(HttpClientResponse.filterStatusOk),
     Effect.timeoutOption(deliveryRequestTimeoutMs)
   );

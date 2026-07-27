@@ -7,11 +7,18 @@ import {
 } from "effect/unstable/http";
 import type { UrlParams } from "effect/unstable/http";
 
-export interface TinybirdClientConfig {
+export interface TinybirdAppendConfig {
   readonly baseUrl: string;
   readonly appendToken: string;
+}
+
+export interface TinybirdReadConfig {
+  readonly baseUrl: string;
   readonly readToken: string;
 }
+
+export interface TinybirdClientConfig
+  extends TinybirdAppendConfig, TinybirdReadConfig {}
 
 export type TinybirdDatasource = "check_manifest" | "checks";
 export type TinybirdEndpoint = "monitor_history" | "monitor_uptime";
@@ -32,7 +39,7 @@ export class TinybirdRowsQuarantined extends Schema.TaggedErrorClass<TinybirdRow
 
 export const appendRows = Effect.fn("TinybirdClient.appendRows")(
   function* appendRowsEffect(
-    config: TinybirdClientConfig,
+    config: TinybirdAppendConfig,
     datasource: TinybirdDatasource,
     rows: readonly Readonly<Record<string, unknown>>[]
   ) {
@@ -91,7 +98,7 @@ export const appendRows = Effect.fn("TinybirdClient.appendRows")(
 
 export const queryEndpoint = Effect.fn("TinybirdClient.queryEndpoint")(
   function* queryEndpointEffect<S extends Schema.Constraint>(
-    config: TinybirdClientConfig,
+    config: TinybirdReadConfig,
     endpoint: TinybirdEndpoint,
     params: UrlParams.Input,
     schema: S
