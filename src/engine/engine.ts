@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 
 import { probe } from "../domain/probe.ts";
 import type { TinybirdClientConfig } from "../tinybird/client.ts";
+import { deliverPendingAlerts } from "./alerts.ts";
 import type { ClaimedMonitor } from "./scheduler.ts";
 import { claimMonitors, selectDueMonitors } from "./scheduler.ts";
 import { commitCheck } from "./state.ts";
@@ -104,5 +105,13 @@ export const runEngine = Effect.fn("Engine.run")(function* runEngineEffect(
       concurrency,
       discard: true,
     }
+  );
+
+  yield* deliverPendingAlerts().pipe(
+    Effect.catchTag("DatabaseError", (error) =>
+      Effect.logError("Alert delivery batch failed", {
+        operation: error.operation,
+      })
+    )
   );
 });
