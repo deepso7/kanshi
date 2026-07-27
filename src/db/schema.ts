@@ -25,6 +25,9 @@ export const monitors = sqliteTable(
     failureThreshold: integer("failure_threshold").notNull().default(2),
     successThreshold: integer("success_threshold").notNull().default(1),
     enabled: integer({ mode: "boolean" }).notNull().default(true),
+    allowHttp: integer("allow_http", { mode: "boolean" })
+      .notNull()
+      .default(false),
     revision: integer().notNull().default(1),
     status: text({ enum: ["unknown", "up", "down"] })
       .notNull()
@@ -60,6 +63,7 @@ export const monitors = sqliteTable(
       sql`${table.successThreshold} between 1 and 10`
     ),
     check("monitors_enabled", sql`${table.enabled} in (0, 1)`),
+    check("monitors_allow_http", sql`${table.allowHttp} in (0, 1)`),
     check("monitors_status", sql`${table.status} in ('unknown', 'up', 'down')`),
     index("monitors_due").on(table.enabled, table.deletedAt, table.nextCheckAt),
   ]
