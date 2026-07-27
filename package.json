@@ -9,6 +9,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "alchemy dev",
+    "db:push": "drizzle-kit push",
     "tb:deploy": "tinybird deploy",
     "cf:deploy": "alchemy deploy",
     "deploy": "pnpm tb:deploy && pnpm cf:deploy",
@@ -21,6 +22,7 @@
     "@effect/sql-d1": "4.0.0-beta.101",
     "@tinybirdco/sdk": "0.0.82",
     "alchemy": "2.0.0-beta.64",
+    "drizzle-orm": "1.0.0-rc.4",
     "effect": "4.0.0-beta.101"
   },
   "devDependencies": {
@@ -29,6 +31,7 @@
     "@effect/vitest": "4.0.0-beta.101",
     "@total-typescript/ts-reset": "0.6.1",
     "@types/node": "26.1.1",
+    "drizzle-kit": "1.0.0-rc.4",
     "oxfmt": "0.60.0",
     "oxlint": "1.75.0",
     "typescript": "7.0.2",
