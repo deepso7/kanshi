@@ -9,7 +9,11 @@ import type {
   TinybirdClientConfig,
   TinybirdDatasource,
 } from "../tinybird/client.ts";
-import { appendRows, TinybirdRowsQuarantined } from "../tinybird/client.ts";
+import {
+  appendRows,
+  formatDateTime64,
+  TinybirdRowsQuarantined,
+} from "../tinybird/client.ts";
 
 export interface CheckManifestInput {
   readonly checkId: string;
@@ -89,12 +93,12 @@ export const ingestCheckManifest = Effect.fn("Tinybird.ingestCheckManifest")(
     const enqueuedAt = yield* Clock.currentTimeMillis;
     yield* append(config, "check_manifest", {
       check_id: input.checkId,
-      enqueued_at: new Date(enqueuedAt).toISOString(),
+      enqueued_at: formatDateTime64(enqueuedAt),
       failure_quorum: input.failureQuorum,
       monitor_id: input.monitorId,
       regions_expected: input.regionsExpected,
       revision: input.revision,
-      scheduled_at: new Date(input.scheduledAt).toISOString(),
+      scheduled_at: formatDateTime64(input.scheduledAt),
     });
   }
 );
@@ -108,14 +112,14 @@ export const ingestCheckSample = Effect.fn("Tinybird.ingestCheckSample")(
     yield* append(config, "checks", {
       check_id: input.result.checkId,
       error_kind: input.result.errorKind,
-      ingested_at: new Date(ingestedAt).toISOString(),
+      ingested_at: formatDateTime64(ingestedAt),
       latency_ms: input.result.latencyMs,
       monitor_id: input.monitorId,
       ok: input.result.ok ? 1 : 0,
-      probed_at: new Date(input.result.probedAt).toISOString(),
+      probed_at: formatDateTime64(input.result.probedAt),
       region: "auto",
       revision: input.revision,
-      scheduled_at: new Date(input.scheduledAt).toISOString(),
+      scheduled_at: formatDateTime64(input.scheduledAt),
       status: input.result.status,
     });
   }

@@ -2,9 +2,11 @@ import { and, asc, eq, exists, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import { DatabaseClient } from "../db/client.ts";
 import { alertChannels, incidents, monitors, relations } from "../db/schema.ts";
+import { Monitor } from "../domain/monitor.ts";
 import { DatabaseError, MonitorNotFound } from "../domain/errors.ts";
 import {
   UrlValidationError,
@@ -29,6 +31,12 @@ const mapDatabaseError =
   (cause: unknown): DatabaseError =>
     new DatabaseError({ cause, operation });
 
+// HttpApi encodes Schema.Class via encode(), which requires a class instance —
+// plain drizzle rows fail with Expected kanshi/domain/Monitor.
+const toMonitor = (row: unknown) =>
+  Schema.decodeUnknownEffect(Monitor)(row).pipe(
+    Effect.mapError(mapDatabaseError("monitors.decode"))
+  );
 const validateMonitorUrl = Effect.fn("Api.Monitors.validateUrl")(
   function* validateMonitorUrlEffect(input: string, allowHttp: boolean) {
     const result = yield* validateProbeUrl(input, { allowHttp }).pipe(
@@ -47,12 +55,13 @@ const validateMonitorUrl = Effect.fn("Api.Monitors.validateUrl")(
 export const listMonitors = Effect.fn("Api.Monitors.list")(
   function* listMonitorsEffect() {
     const { db } = yield* DatabaseClient;
-    return yield* db
+    const rows = yield* db
       .select()
       .from(monitors)
       .where(isNull(monitors.deletedAt))
       .orderBy(asc(monitors.createdAt))
       .pipe(Effect.mapError(mapDatabaseError("monitors.list")));
+    return yield* Effect.forEach(rows, toMonitor);
   }
 );
 
@@ -66,7 +75,9 @@ export const getMonitor = Effect.fn("Api.Monitors.get")(
       .limit(1)
       .pipe(Effect.mapError(mapDatabaseError("monitors.get")));
 
-    return monitor ?? (yield* new MonitorNotFound({ monitorId: id }));
+    return monitor
+      ? yield* toMonitor(monitor)
+      : yield* new MonitorNotFound({ monitorId: id });
   }
 );
 
@@ -123,7 +134,7 @@ export const createMonitor = Effect.fn("Api.Monitors.create")(
       try: () => statement,
     });
 
-    return created ?? null;
+    return created === undefined ? null : yield* toMonitor(created);
   }
 );
 
@@ -195,7 +206,9 @@ export const updateMonitor = Effect.fn("Api.Monitors.update")(
         catch: mapDatabaseError("monitors.update"),
         try: () => update,
       });
-      return updated ?? (yield* new MonitorNotFound({ monitorId: id }));
+      return updated
+        ? yield* toMonitor(updated)
+        : yield* new MonitorNotFound({ monitorId: id });
     }
 
     const closeIncident = db
@@ -228,7 +241,10 @@ export const updateMonitor = Effect.fn("Api.Monitors.update")(
       catch: mapDatabaseError("monitors.disable"),
       try: () => db.batch([update, closeIncident]),
     });
-    return results[0][0] ?? (yield* new MonitorNotFound({ monitorId: id }));
+    const disabled = results[0][0];
+    return disabled
+      ? yield* toMonitor(disabled)
+      : yield* new MonitorNotFound({ monitorId: id });
   }
 );
 

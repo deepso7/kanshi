@@ -23,6 +23,10 @@ export interface TinybirdClientConfig
 export type TinybirdDatasource = "check_manifest" | "checks";
 export type TinybirdEndpoint = "monitor_history" | "monitor_uptime";
 
+/** ClickHouse DateTime64(3) — Tinybird rejects ISO-8601 with `T` / trailing `Z`. */
+export const formatDateTime64 = (ms: number): string =>
+  new Date(ms).toISOString().slice(0, -1).replace("T", " ");
+
 const IngestResponse = Schema.Struct({
   quarantined_rows: Schema.Int,
   successful_rows: Schema.Int,

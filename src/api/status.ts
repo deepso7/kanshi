@@ -8,7 +8,7 @@ import { DatabaseClient } from "../db/client.ts";
 import { incidents, monitors } from "../db/schema.ts";
 import { DatabaseError, MonitorNotFound } from "../domain/errors.ts";
 import type { TinybirdReadConfig } from "../tinybird/client.ts";
-import { queryEndpoint } from "../tinybird/client.ts";
+import { formatDateTime64, queryEndpoint } from "../tinybird/client.ts";
 import { HistoryRow, KanshiApi, UptimeRow } from "./spec.ts";
 
 const getLiveStatus = Effect.fn("Api.Status.live")(
@@ -76,7 +76,10 @@ const parseRange = (
     duration <= 0 ||
     duration > 31 * 24 * 60 * 60 * 1000
     ? undefined
-    : { end: end.toISOString(), start: start.toISOString() };
+    : {
+        end: formatDateTime64(end.getTime()),
+        start: formatDateTime64(start.getTime()),
+      };
 };
 
 const analyticsError = (error: unknown) =>
