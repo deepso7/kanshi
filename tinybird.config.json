@@ -1,0 +1,6 @@
+{
+  "include": ["src/tinybird/datasources.ts", "src/tinybird/pipes.ts"],
+  "token": "${TINYBIRD_TOKEN}",
+  "baseUrl": "${TINYBIRD_URL}",
+  "devMode": "branch"
+}
