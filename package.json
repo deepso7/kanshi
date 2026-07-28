@@ -14,6 +14,7 @@
     "cf:deploy": "alchemy deploy",
     "deploy": "pnpm tb:deploy && pnpm cf:deploy",
     "destroy": "alchemy destroy",
+    "test:integ": "bun test test/integ.test.ts",
     "check": "ultracite check",
     "fix": "ultracite fix"
   },
@@ -29,8 +30,10 @@
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260724.1",
     "@effect/language-service": "0.87.1",
+    "@effect/platform-bun": "4.0.0-beta.101",
     "@effect/vitest": "4.0.0-beta.101",
     "@total-typescript/ts-reset": "0.6.1",
+    "@types/bun": "1.3.14",
     "@types/node": "26.1.1",
     "drizzle-kit": "1.0.0-rc.4",
     "oxfmt": "0.60.0",

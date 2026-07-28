@@ -24,6 +24,13 @@ import { DatabaseError } from "../domain/errors.ts";
 import type { WebhookKind } from "../domain/url.ts";
 import { UrlValidationError, validateWebhookUrl } from "../domain/url.ts";
 
+export interface AlertDeliveryOptions {
+  readonly validateWebhook?: (
+    input: string,
+    kind: WebhookKind
+  ) => Effect.Effect<URL, unknown, HttpClient.HttpClient>;
+}
+
 const deliveryBatchSize = 20;
 const deliveryConcurrency = 5;
 const deliveryLeaseMs = 30_000;
@@ -174,9 +181,13 @@ const messageFor = (delivery: ClaimedDelivery): string =>
     : `🟢 ${delivery.monitorName} recovered\n${delivery.monitorUrl}\nIncident started: ${new Date(delivery.startedAt).toISOString()}`;
 
 const sendWebhook = Effect.fn("Alerts.sendWebhook")(function* sendWebhookEffect(
-  delivery: ClaimedDelivery
+  delivery: ClaimedDelivery,
+  options: AlertDeliveryOptions
 ) {
-  const url = yield* validateWebhookUrl(delivery.webhookUrl, delivery.kind);
+  const url = yield* (options.validateWebhook ?? validateWebhookUrl)(
+    delivery.webhookUrl,
+    delivery.kind
+  );
   const client = yield* HttpClient.HttpClient;
   const payload =
     delivery.kind === "slack"
@@ -284,12 +295,15 @@ const finalizeDelivery = Effect.fn("Alerts.finalize")(
 );
 
 const deliverClaimed = Effect.fn("Alerts.deliverClaimed")(
-  function* deliverClaimedEffect(delivery: ClaimedDelivery) {
+  function* deliverClaimedEffect(
+    delivery: ClaimedDelivery,
+    options: AlertDeliveryOptions
+  ) {
     return yield* Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* AlertDeliveryHandoff() {
         const attempt = yield* restore(
           delivery.channelEnabled
-            ? sendWebhook(delivery)
+            ? sendWebhook(delivery, options)
             : Effect.fail(new Error("channel_disabled"))
         ).pipe(Effect.result);
         const now = yield* Clock.currentTimeMillis;
@@ -321,7 +335,7 @@ const deliverClaimed = Effect.fn("Alerts.deliverClaimed")(
 );
 
 export const deliverPendingAlerts = Effect.fn("Alerts.deliverPending")(
-  function* deliverPendingAlertsEffect() {
+  function* deliverPendingAlertsEffect(options: AlertDeliveryOptions = {}) {
     const startedAt = yield* Clock.currentTimeMillis;
     const candidates = yield* selectClaimableDeliveries(startedAt);
     let claimedCount = 0;
@@ -346,7 +360,7 @@ export const deliverPendingAlerts = Effect.fn("Alerts.deliverPending")(
       yield* Effect.forEach(
         claimed,
         (delivery) =>
-          deliverClaimed(delivery).pipe(
+          deliverClaimed(delivery, options).pipe(
             Effect.catchTag("DatabaseError", (error) =>
               Effect.logError("Failed to finalize alert delivery", {
                 channelId: delivery.channelId,

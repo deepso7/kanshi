@@ -27,7 +27,7 @@
 
     "rootDir": ".",
 
-    "types": ["node"],
+    "types": ["bun", "node"],
 
     "plugins": [
       {

@@ -3,21 +3,26 @@ import * as Effect from "effect/Effect";
 
 import { probe } from "../domain/probe.ts";
 import type { TinybirdClientConfig } from "../tinybird/client.ts";
+import type { AlertDeliveryOptions } from "./alerts.ts";
 import { deliverPendingAlerts } from "./alerts.ts";
 import type { ClaimedMonitor } from "./scheduler.ts";
 import { claimMonitors, selectDueMonitors } from "./scheduler.ts";
 import { commitCheck } from "./state.ts";
 import { ingestCheckManifest, ingestCheckSample } from "./tinybird.ts";
 
-export interface EngineOptions {
+export interface EngineOptions extends AlertDeliveryOptions {
   readonly batchSize?: number;
+  readonly beforeProbe?: (
+    monitor: ClaimedMonitor
+  ) => Effect.Effect<void, never, never>;
   readonly concurrency?: number;
 }
 
 const runClaimedMonitor = Effect.fn("Engine.runClaimedMonitor")(
   function* runClaimedMonitorEffect(
     tinybird: TinybirdClientConfig,
-    monitor: ClaimedMonitor
+    monitor: ClaimedMonitor,
+    options: EngineOptions
   ) {
     const checkId = crypto.randomUUID();
 
@@ -29,6 +34,9 @@ const runClaimedMonitor = Effect.fn("Engine.runClaimedMonitor")(
       revision: monitor.revision,
       scheduledAt: monitor.nextCheckAt,
     });
+    if (options.beforeProbe) {
+      yield* options.beforeProbe(monitor);
+    }
 
     const result = yield* probe({
       allowHttp: monitor.allowHttp,
@@ -100,14 +108,16 @@ export const runEngine = Effect.fn("Engine.run")(function* runEngineEffect(
   // oxlint-disable-next-line unicorn/no-array-for-each -- this is Effect's bounded concurrent traversal
   yield* Effect.forEach(
     claimedMonitors,
-    (monitor) => runClaimedMonitor(tinybird, monitor),
+    (monitor) => runClaimedMonitor(tinybird, monitor, options),
     {
       concurrency,
       discard: true,
     }
   );
 
-  yield* deliverPendingAlerts().pipe(
+  yield* deliverPendingAlerts({
+    validateWebhook: options.validateWebhook,
+  }).pipe(
     Effect.catchTag("DatabaseError", (error) =>
       Effect.logError("Alert delivery batch failed", {
         operation: error.operation,
