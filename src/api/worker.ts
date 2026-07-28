@@ -8,6 +8,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { DatabaseClient, makeDatabaseClient } from "../db/client.ts";
@@ -49,7 +50,13 @@ export default class ApiWorker extends Cloudflare.Worker<ApiWorker>()(
       Layer.provide([Etag.layer, HttpPlatformStub, Path.layer]),
       HttpRouter.toHttpEffect,
       Effect.map((httpEffect) =>
-        httpEffect.pipe(Effect.provideService(DatabaseClient, databaseClient))
+        httpEffect.pipe(
+          Effect.provideService(DatabaseClient, databaseClient),
+          Effect.catchIf(
+            (error) => error.reason._tag === "RouteNotFound",
+            () => Effect.succeed(HttpServerResponse.empty({ status: 404 }))
+          )
+        )
       )
     );
 
