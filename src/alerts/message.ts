@@ -14,16 +14,40 @@ export interface AlertIncident {
   readonly startedAt: number;
 }
 
+/** A watchdog "not being checked" episode. */
+export interface AlertEpisode {
+  readonly id: string;
+  readonly intervalSeconds: number;
+  /** The monitor's last check when the episode opened. */
+  readonly lastCheckedAt: number | null;
+  readonly resolvedAt: number | null;
+  readonly startedAt: number;
+}
+
+export type WatchdogMessageTag =
+  | "CheckedAgain"
+  | "NotChecked"
+  | "NotCheckedResolved";
+
 /**
  * What a channel is told. `DownRecovered` is a `down` alert sent after the
  * incident already recovered ("was down for Xm, recovered"); the separate
- * recovery alert is then skipped.
+ * recovery alert is then skipped. The watchdog's `NotChecked`,
+ * `NotCheckedResolved` and `CheckedAgain` mirror `Down`, `DownRecovered`
+ * and `Recovered` for a monitor that is not being checked at all.
  */
 export type AlertMessage =
   | {
       readonly _tag: "Down" | "DownRecovered" | "Recovered";
       readonly idempotencyKey: string;
       readonly incident: AlertIncident;
+      readonly monitor: AlertMonitor;
+      readonly sentAt: number;
+    }
+  | {
+      readonly _tag: WatchdogMessageTag;
+      readonly episode: AlertEpisode;
+      readonly idempotencyKey: string;
       readonly monitor: AlertMonitor;
       readonly sentAt: number;
     }
@@ -66,6 +90,10 @@ export const formatDuration = (ms: number): string => {
 const outageMs = (incident: AlertIncident, now: number): number =>
   (incident.resolvedAt ?? now) - incident.startedAt;
 
+/** From the last check before the episode to its end (or `now`). */
+const uncheckedMs = (episode: AlertEpisode, now: number): number =>
+  (episode.resolvedAt ?? now) - (episode.lastCheckedAt ?? episode.startedAt);
+
 export interface AlertText {
   /** One line: what happened. */
   readonly title: string;
@@ -100,6 +128,35 @@ export const alertText = (message: AlertMessage): AlertText => {
         title: `${message.monitor.name} is up again after ${duration}`,
       };
     }
+    case "NotChecked": {
+      const last =
+        message.episode.lastCheckedAt === null
+          ? "never"
+          : `${formatDuration(message.sentAt - message.episode.lastCheckedAt)} ago`;
+      const every = formatDuration(message.episode.intervalSeconds * 1000);
+      return {
+        body: `Last check: ${last} (expected every ${every})\n${message.monitor.url}`,
+        title: `monitor ${message.monitor.name} is not being checked`,
+      };
+    }
+    case "NotCheckedResolved": {
+      const duration = formatDuration(
+        uncheckedMs(message.episode, message.sentAt)
+      );
+      return {
+        body: message.monitor.url,
+        title: `monitor ${message.monitor.name} was not checked for ${duration}, checks resumed`,
+      };
+    }
+    case "CheckedAgain": {
+      const duration = formatDuration(
+        uncheckedMs(message.episode, message.sentAt)
+      );
+      return {
+        body: message.monitor.url,
+        title: `monitor ${message.monitor.name} is being checked again after ${duration}`,
+      };
+    }
     case "Test": {
       return {
         body: "If you can read this, alerts reach this channel.",
@@ -132,6 +189,22 @@ export const webhookPayload = (message: AlertMessage) => {
       title: text.title,
     };
   }
+  if ("episode" in message) {
+    return {
+      episode: {
+        ...message.episode,
+        durationMs: uncheckedMs(message.episode, message.sentAt),
+      },
+      event: message._tag === "NotChecked" ? "not_checked" : "checked",
+      id: message.idempotencyKey,
+      incident: null,
+      monitor: message.monitor,
+      recovered: message._tag !== "NotChecked",
+      sentAt: message.sentAt,
+      text: `${text.title}\n${text.body}`,
+      title: text.title,
+    };
+  }
   return {
     event: message._tag === "Recovered" ? "up" : "down",
     id: message.idempotencyKey,
@@ -152,7 +225,8 @@ const discordMaxLength = 2000;
 
 const ntfyPriority = (message: AlertMessage): string => {
   switch (message._tag) {
-    case "Down": {
+    case "Down":
+    case "NotChecked": {
       return "high";
     }
     case "Test": {
@@ -168,6 +242,9 @@ const ntfyTags = (message: AlertMessage): string => {
   switch (message._tag) {
     case "Down": {
       return "rotating_light";
+    }
+    case "NotChecked": {
+      return "warning";
     }
     case "Test": {
       return "test_tube";
