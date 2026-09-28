@@ -12,7 +12,8 @@
     "deploy": "alchemy deploy",
     "destroy": "alchemy destroy",
     "check": "ultracite check",
-    "fix": "ultracite fix"
+    "fix": "ultracite fix",
+    "test": "vitest run"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-rc.117",
