@@ -841,8 +841,8 @@ config.updatedAt) > 2 × interval + 2 min` (**deviation**: the plan
 
 - `/login` takes the API token (timing-safe compare) and sets
   `kanshi_session=<expiresAt>.<hex HMAC-SHA256>`; the HMAC key is derived
-  from the token, the message is the expiry. `HttpOnly; Secure;
-  SameSite=Strict; Path=/; Max-Age=30d`. Verification uses
+  from the token, the message is the expiry. Attributes: `HttpOnly`,
+  `Secure`, `SameSite=Strict`, `Path=/`, `Max-Age` 30 days. Verification uses
   `crypto.subtle.verify` (constant time) and checks the expiry. No state
   is stored: rotating `KANSHI_API_TOKEN` logs everyone out.
   **Deviation/addition:** sessions expire after 30 days.
