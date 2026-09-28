@@ -542,3 +542,129 @@ URL(...).toString()` after defaulting to `https://`). Phase 7 sync must
   and the test result's `error`.
 - Phase 7: channel config (`ChannelDefinition`) is already in
   `defineConfig`; diff URLs by `urlHash` as described above.
+
+## Phase 4 (history)
+
+### Layout
+
+- `src/monitor/history.ts`: the pure rules. UTC days, `expectedSamples`,
+  `periodChange`, `rollupDay`, `percentile`, `isPartial`, `daysToRollUp`,
+  `checksPruneBefore`, `incidentsPruneBefore`, `nextMaintenanceTime`,
+  `reportDays`, `uptimeReport`. `src/domain/history.ts`: API schemas
+  (`Check`, `Incident`, `IncidentWithAlerts`, `DailyRollup`, `UptimeDay`,
+  `UptimeReport`). The storage `CheckRow`/`IncidentRow` derive from them.
+- Monitor migration `"3_history"`: `enabled_periods` (id, started_at,
+  ended_at, interval_seconds), `daily_rollups` (day, counted, up, down,
+  expected REAL, p50, p95) and an index on `incidents.resolved_at`. It
+  backfills existing monitors: an open period from `created_at` if enabled,
+  and `next_maintenance_at = now`. Phase 5+ should use `"4_..."`.
+
+### Counted samples
+
+Verified against phase 2 (unit tests in `monitor.test.ts`, integration in
+`core.test.ts` and `history.test.ts`): a scheduled success is counted; a
+scheduled failure is stored uncounted and its confirm is counted; while
+already `down` a scheduled failure is counted directly (phase-2
+deviation); manual checks and a confirm after a manual failure are never
+counted. A slot whose check was discarded (stale generation, expired
+in-flight) or whose pending confirm was cleared by an edit has no sample;
+it shows up as a shortfall against `expected`.
+
+### Decisions
+
+- **Days are UTC.** The status page can label them; per-monitor time zones
+  are out of scope.
+- **Expected** = enabled time that day / interval in force, from the
+  `enabled_periods` log (configure opens one if enabled; disable closes;
+  enable opens; an interval edit while enabled closes and opens; delete
+  wipes everything). Stored as a real rounded to two decimals, not
+  rounded to slots. A day is `partial` when `counted < 0.8 × expected`; a
+  day with nothing expected is never partial.
+- **Latency** p50/p95 use the nearest-rank method over **successful**
+  counted samples only (a timeout's latency is the timeout, not a
+  measurement). Uptime is `up / counted` in percent (three decimals), null
+  without samples.
+- **Maintenance** is a step in the alarm after `deliver`, due at
+  `nextMaintenanceAt` = 00:05 UTC daily (`initialState` sets it, so a new
+  monitor's alarm includes it; disabled monitors keep a daily alarm, so
+  `alarmAt` is no longer null for them). One transaction: roll up each
+  closed day after `rolledUpThrough` (from the creation day when null, at
+  most 31 days per run; if more remain, `nextMaintenanceAt = now`), write
+  the advanced watermark and the next time, then prune. A run that fails
+  postpones itself one hour instead of spinning the alarm.
+- **Retention.** Raw checks: before `min(end of watermark day, start of
+today − 30 days)`, so nothing that is not rolled up is ever pruned.
+  `enabled_periods` that ended by the end of the watermark day. Incidents:
+  **resolved more than 90 days ago** and with no unresolved notification
+  or pending outbox row; then every `notifications`, `incident_recipients`
+  and `outbox` row whose incident is gone (alert rows live and die with
+  their incident; this closes the phase-3 open issue). Open incidents are
+  never pruned. `daily_rollups` are not pruned (one small row per day;
+  365/year per monitor).
+- **Reads.** `uptime(days)` covers the last `days` days through today,
+  not before the creation day. Days at or before the watermark come from
+  `daily_rollups` (`live: false`); today and any closed day maintenance
+  has not reached yet are computed on read from raw checks (`live: true`),
+  with `expected` accruing only up to now.
+- **Registry 24h uptime: not added.** Keeping it in the summary would mean
+  a query over a day of checks on every check commit (17k rows at 5s), or
+  a second rolling aggregate. The dashboard (phase 6) calls
+  `GET /api/monitors/:id/uptime?days=1` (or `checks?since=`) per monitor
+  instead.
+
+### API
+
+- `GET /api/monitors/:id/checks?since&limit`: checks with `at >= since`
+  (epoch ms, default 0), newest first, `limit` 1..1000 (default 100).
+  Includes uncounted and manual checks with `kind` and `counted`.
+- `GET /api/monitors/:id/uptime?days`: `days` 1..365 (default 90).
+  `{ counted, up, expected, uptimePercent, days: [{ day, counted, up,
+down, expected, p50, p95, partial, uptimePercent, live }] }`, oldest
+  first, today last.
+- `GET /api/monitors/:id/incidents?limit`: newest first, `limit` 1..500
+  (default 50); each incident carries `alerts` (its outbox rows: event,
+  channel, state, attempts, lastError, ...).
+- All three 404 for a monitor that is not `active` in the Registry, and 400
+  on out-of-range or non-numeric query parameters.
+
+### Dev mode and tests
+
+- `POST /_dev/monitors/:id/maintain?now=<ms>` runs maintenance as of
+  `now` (default: the current time) whether due or not and returns
+  `{ rolledUp, rolledUpThrough, nextMaintenanceAt, pruned: { checks,
+incidents, periods } }` (404 JSON for an unknown monitor). A future
+  `now` simulates time passing: the watermark and `nextMaintenanceAt` move
+  into the future, so later real checks of those days are never rolled up.
+  Use it on throwaway monitors only.
+- Unit: `test/unit/history.test.ts` (days, maintenance time,
+  percentiles, expected across config changes and day boundaries, period
+  changes, rollups, partial flag, report assembly, watermark, cap and
+  retention cut-offs). The SQL of rollup/prune is covered by integration.
+- Integration: `test/integ/history.test.ts` on stage `integ-history`
+  (down/up cycle, the three endpoints, then maintain at +1 day, +40 days,
+  +100 days). The suite now takes about 4 minutes.
+
+### Commands (end of phase 4)
+
+- `pnpm exec tsc --noEmit -p .`: pass
+- `pnpm check`: pass
+- `pnpm test`: pass (99 tests)
+- `pnpm test:integ`: pass (15 tests)
+
+Commit `0158818` (maintenance) made disabled monitors keep an alarm; the
+alerts integration test that expected `alarmAt` null was updated one
+commit later (`cb3dfdb`), so `pnpm test:integ` fails at `0158818` and
+`3d169d7` only on that assertion.
+
+### For later phases
+
+- Phase 5: the watchdog's `ensureAlarm()` already includes maintenance. A
+  monitor whose `nextMaintenanceAt` is far in the past (e.g. alarms lost)
+  catches up on its next alarm; nothing else is needed.
+- Phase 6: the dashboard's 24h uptime and sparkline come from
+  `uptime?days=1` and `checks?since=<now-24h>&limit=...`; the detail page
+  uses `uptime?days=90` (grey for `partial`, empty for `uptimePercent:
+null`) and `incidents`. The status page's Cache API entry can hold the
+  `uptime` response.
+- Rollups are never recomputed: a day rolled up is final even if a late
+  config-log fix would change its `expected`.
