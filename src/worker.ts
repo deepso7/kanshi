@@ -18,6 +18,10 @@ import { KanshiApi } from "./api/spec.ts";
 import { makeDevRoutes } from "./dev/routes.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
+import { runWatchdog } from "./watchdog/run.ts";
+
+/** The watchdog's Cron Trigger. */
+export const watchdogCron = "*/5 * * * *";
 
 // Workers have no file system; the API never serves files.
 const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
@@ -32,8 +36,9 @@ const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
 });
 
 /**
- * The single Kanshi Worker: the `/api` HttpApi and, in the dev stage, the
- * `/_dev/*` fixtures. It hosts the Monitor and Registry Durable Objects.
+ * The single Kanshi Worker: the `/api` HttpApi, the watchdog cron and, in
+ * the dev stage, the `/_dev/*` fixtures. It hosts the Monitor and Registry
+ * Durable Objects.
  *
  * Config (read at deploy time and bound to the Worker):
  * - `KANSHI_API_TOKEN` bearer token for `/api` (required)
@@ -61,6 +66,17 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
     );
     const monitors = yield* Monitor;
     const registries = yield* Registry;
+
+    yield* Cloudflare.Workers.cron(watchdogCron, () =>
+      Effect.suspend(() =>
+        runWatchdog({ monitors, registries }, Date.now())
+      ).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("watchdog run failed", cause)
+        ),
+        Effect.asVoid
+      )
+    );
 
     const api = HttpApiBuilder.layer(KanshiApi).pipe(
       Layer.provide([
@@ -92,5 +108,8 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
         });
       }),
     };
-  }).pipe(Effect.provide(MonitorLive.pipe(Layer.provideMerge(RegistryLive))))
+  }).pipe(
+    Effect.provide(Cloudflare.Workers.CronEventSourceLive),
+    Effect.provide(MonitorLive.pipe(Layer.provideMerge(RegistryLive)))
+  )
 ) {}

@@ -207,6 +207,11 @@ export class Monitor extends Cloudflare.DurableObject<
     destroy: () => Effect.Effect<void, never, RuntimeContext>;
     /** Recompute and set the alarm from persisted state. */
     ensureAlarm: () => Effect.Effect<number | null, never, RuntimeContext>;
+    /**
+     * Dev stage: delete the alarm without touching state, as if it had been
+     * lost. Only the watchdog's `ensureAlarm()` brings it back.
+     */
+    devClearAlarm: () => Effect.Effect<void, never, RuntimeContext>;
     alarm: (
       info?: Cloudflare.AlarmInvocationInfo
     ) => Effect.Effect<void, never, RuntimeContext>;
@@ -867,6 +872,8 @@ export const MonitorLive = Monitor.make(
           withSql(recentChecks(query)).pipe(Effect.orDie),
         configure,
         destroy,
+        devClearAlarm: () =>
+          alarmLock.withPermits(1)(state.storage.deleteAlarm()),
         ensureAlarm: () => rearm,
         incidents,
         maintain: (now: number) =>

@@ -1,10 +1,14 @@
+import type { RuntimeContext } from "alchemy";
 import * as Effect from "effect/Effect";
+import type * as HttpBody from "effect/unstable/http/HttpBody";
+import type * as HttpServerError from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import type { Monitor } from "../monitor/monitor.ts";
 import type { Registry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
+import { runWatchdog } from "../watchdog/run.ts";
 
 export interface DevDeps {
   readonly monitors: Effect.Success<typeof Monitor>;
@@ -19,6 +23,57 @@ const statusParam = (value: string | null, fallback: number): number => {
 };
 
 const maxDelayMs = 60_000;
+
+const nowParam = (url: URL): number => {
+  const value = Number(url.searchParams.get("now") ?? Number.NaN);
+  return Number.isFinite(value) ? value : Date.now();
+};
+
+type Method = "ANY" | "GET" | "POST";
+
+interface RouteInput {
+  /** The `:name` segments of the pattern, in order. */
+  readonly params: readonly string[];
+  readonly request: HttpServerRequest.HttpServerRequest;
+  readonly url: URL;
+}
+
+/**
+ * Match `segments` against a pattern like `monitors/:id/maintain`; a
+ * trailing `*` matches any rest. Returns the `:name` values, or null.
+ */
+const matchPattern = (
+  pattern: string,
+  segments: readonly string[]
+): readonly string[] | null => {
+  const parts = pattern.split("/");
+  const rest = parts.at(-1) === "*";
+  const fixed = rest ? parts.slice(0, -1) : parts;
+  if (
+    segments.length < fixed.length ||
+    (!rest && segments.length > fixed.length)
+  ) {
+    return null;
+  }
+  const params: string[] = [];
+  for (const [index, part] of fixed.entries()) {
+    const segment = segments[index] ?? "";
+    if (part.startsWith(":")) {
+      params.push(segment);
+    } else if (part !== segment) {
+      return null;
+    }
+  }
+  return params;
+};
+
+const param = (input: RouteInput, index = 0): string =>
+  input.params[index] ?? "";
+
+const methodMatches = (method: Method, actual: string): boolean =>
+  method === "ANY" ||
+  actual === method ||
+  (method === "GET" && actual === "HEAD");
 
 const monitorNotFound = () =>
   HttpServerResponse.json(
@@ -39,6 +94,14 @@ const monitorNotFound = () =>
  *   alert rows (notifications, recipients, outbox)
  * - `POST /_dev/monitors/:id/maintain?now=<ms>` run maintenance (rollups,
  *   retention) as of `now` (default: the current time), due or not
+ * - `POST /_dev/monitors/:id/clear-alarm` delete the monitor's alarm (as if
+ *   lost); only the watchdog brings it back
+ * - `POST /_dev/registry/:id/mark-deleting` mark a row `deleting` without
+ *   deleting the monitor (a stuck delete)
+ * - `POST /_dev/registry/:id/rewind` forget a row's summary (lost pushes)
+ * - `POST /_dev/watchdog?now=<ms>` run the watchdog now, with `now` as its
+ *   clock (default: the current time), and return its report;
+ *   `GET /_dev/watchdog` lists its episodes and alert rows
  */
 /** `GET /_dev/target?status=&delay=&body=` */
 const target = (url: URL) =>
@@ -140,11 +203,9 @@ export const makeDevRoutes = (deps: DevDeps) => {
 
   const maintain = (id: string, url: URL) =>
     Effect.gen(function* maintainRoute() {
-      const nowParam = Number(url.searchParams.get("now") ?? Number.NaN);
-      const now = Number.isFinite(nowParam) ? nowParam : Date.now();
       return yield* deps.monitors
         .getByName(id)
-        .maintain(now)
+        .maintain(nowParam(url))
         .pipe(
           Effect.flatMap((result) => HttpServerResponse.json(result)),
           Effect.catchTags({
@@ -154,40 +215,92 @@ export const makeDevRoutes = (deps: DevDeps) => {
         );
     });
 
+  const registryAction = (id: string, action: string) =>
+    Effect.gen(function* registryActionRoute() {
+      if (action === "mark-deleting") {
+        const marked = yield* registry().markDeleting(id, null);
+        return yield* HttpServerResponse.json({ marked });
+      }
+      if (action === "rewind") {
+        const rewound = yield* registry().devRewindSummary(id);
+        return yield* HttpServerResponse.json({ rewound });
+      }
+      return HttpServerResponse.empty({ status: 404 });
+    });
+
+  const clearAlarm = (id: string) =>
+    Effect.gen(function* clearAlarmRoute() {
+      const monitor = deps.monitors.getByName(id);
+      yield* monitor.devClearAlarm();
+      return yield* HttpServerResponse.json(yield* monitor.status());
+    });
+
+  const routes: readonly (readonly [
+    Method,
+    string,
+    (
+      input: RouteInput
+    ) => Effect.Effect<
+      HttpServerResponse.HttpServerResponse,
+      HttpBody.HttpBodyError | HttpServerError.HttpServerError,
+      RuntimeContext
+    >,
+  ])[] = [
+    ["ANY", "target", ({ url }) => target(url)],
+    [
+      "ANY",
+      "target/flip/:name",
+      (input) => flip(input.request.method, input.url, param(input)),
+    ],
+    ["POST", "webhook/*", ({ request, url }) => webhook(request, url)],
+    [
+      "GET",
+      "events",
+      () => Effect.flatMap(registry().devEvents(), HttpServerResponse.json),
+    ],
+    [
+      "GET",
+      "registry",
+      () => Effect.flatMap(registry().list(), HttpServerResponse.json),
+    ],
+    [
+      "POST",
+      "registry/:id/:action",
+      (input) => registryAction(param(input), param(input, 1)),
+    ],
+    [
+      "GET",
+      "watchdog",
+      () =>
+        Effect.flatMap(registry().watchdogAlerts(100), HttpServerResponse.json),
+    ],
+    [
+      "POST",
+      "watchdog",
+      ({ url }) =>
+        Effect.flatMap(
+          runWatchdog(deps, nowParam(url)),
+          HttpServerResponse.json
+        ),
+    ],
+    ["GET", "monitors/:id", (input) => monitorDetail(param(input))],
+    [
+      "POST",
+      "monitors/:id/maintain",
+      (input) => maintain(param(input), input.url),
+    ],
+    ["POST", "monitors/:id/clear-alarm", (input) => clearAlarm(param(input))],
+  ];
+
   return Effect.gen(function* devRoutes() {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = new URL(request.url, "http://internal");
-    const [area, first, second] = url.pathname
-      .split("/")
-      .filter(Boolean)
-      .slice(1);
-    const get = request.method === "GET" || request.method === "HEAD";
-
-    if (area === "target" && first === undefined) {
-      return yield* target(url);
-    }
-    if (area === "target" && first === "flip" && second !== undefined) {
-      return yield* flip(request.method, url, second);
-    }
-    if (area === "webhook" && request.method === "POST") {
-      return yield* webhook(request, url);
-    }
-    if (area === "events" && get) {
-      return yield* HttpServerResponse.json(yield* registry().devEvents());
-    }
-    if (area === "registry" && get) {
-      return yield* HttpServerResponse.json(yield* registry().list());
-    }
-    if (area === "monitors" && first !== undefined && get) {
-      return yield* monitorDetail(first);
-    }
-    if (
-      area === "monitors" &&
-      first !== undefined &&
-      second === "maintain" &&
-      request.method === "POST"
-    ) {
-      return yield* maintain(first, url);
+    const segments = url.pathname.split("/").filter(Boolean).slice(1);
+    for (const [method, pattern, handle] of routes) {
+      const params = matchPattern(pattern, segments);
+      if (params !== null && methodMatches(method, request.method)) {
+        return yield* handle({ params, request, url });
+      }
     }
     return HttpServerResponse.empty({ status: 404 });
   });

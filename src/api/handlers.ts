@@ -29,6 +29,12 @@ export interface ApiDeps {
 
 /** Dev stage only: delay between `registry.begin` and `configure`. */
 export const devConfigureDelayHeader = "x-kanshi-dev-configure-delay";
+/**
+ * Dev stage only: stop after `configure`, leaving the row `creating` (a
+ * create that died before `activate`; the watchdog finishes it). The
+ * reply is the usual 201 with the configured monitor.
+ */
+export const devSkipActivateHeader = "x-kanshi-dev-skip-activate";
 
 const notFound = (id: string) =>
   new NotFound({ message: `monitor ${id} not found` });
@@ -175,6 +181,9 @@ export const makeMonitorsHandlers = (deps: ApiDeps) => {
               )
             );
 
+          if (deps.devMode && request.headers[devSkipActivateHeader] === "1") {
+            return toResponse({ public: isPublic }, snapshot);
+          }
           const activated = yield* registry().activate(id, opId);
           if (!activated) {
             return yield* new Conflict({
