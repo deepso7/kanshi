@@ -18,6 +18,8 @@ import { KanshiApi } from "./api/spec.ts";
 import { makeDevRoutes } from "./dev/routes.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
+import { makeChannelService } from "./service/channels.ts";
+import { makeMonitorService } from "./service/monitors.ts";
 import { runWatchdog } from "./watchdog/run.ts";
 
 /** The watchdog's Cron Trigger. */
@@ -78,10 +80,18 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
       )
     );
 
+    const monitorService = makeMonitorService({
+      devMode,
+      monitors,
+      quota,
+      registries,
+    });
+    const channelService = makeChannelService({ devMode, registries });
+
     const api = HttpApiBuilder.layer(KanshiApi).pipe(
       Layer.provide([
-        makeMonitorsHandlers({ devMode, monitors, quota, registries }),
-        makeChannelsHandlers({ devMode, registries }),
+        makeMonitorsHandlers(monitorService),
+        makeChannelsHandlers(channelService),
       ]),
       Layer.provide(ApiAuthLive),
       Layer.provide(bearerTokenValidatorLayer(apiToken)),
