@@ -190,6 +190,7 @@ const dashboardRow = (row: DashboardRow, now: number): Html => {
         ><strong>${entry.summary.name}</strong></a
       >
       ${entry.public && html` <span class="badge">public</span>`}
+      ${entry.managed && html` <span class="badge">config</span>`}
       ${
         entry.watch.episodeId !== null &&
         html` <span class="badge warn">not checked</span>`
@@ -421,6 +422,7 @@ export const monitorPage = (data: MonitorDetailData): Html => {
                 ? html`<span class="badge">public</span>`
                 : html`<span class="badge">private</span>`
             }
+            ${monitor.managed && html`<span class="badge">managed by config</span>`}
             <a
               class="mono"
               href="${safeHref(monitor.url)}"
@@ -700,6 +702,14 @@ const channelPicker = (
   </div>
 </fieldset>`;
 
+/** Shown where a managed (config sync) resource can be edited. */
+const managedWarning = (kind: "channel" | "monitor"): Html =>
+  html`<div class="flash warn" role="note">
+    This ${kind} is managed by config (<span class="mono">kanshi.config.ts</span
+    >). The next <span class="mono">kanshi sync</span> overwrites changes made
+    here; edit the config instead.
+  </div>`;
+
 export const monitorFormPage = (data: MonitorFormData): Html => {
   const { values } = data;
   const isNew = data.monitor === null;
@@ -712,6 +722,7 @@ export const monitorFormPage = (data: MonitorFormData): Html => {
         <a href="${isNew ? "/" : action}">Cancel</a>
       </div>
       ${flashBox(data.error === null ? null : { kind: "error", text: data.error })}
+      ${data.monitor?.managed === true && managedWarning("monitor")}
       <form method="post" action="${action}" class="panel stack">
         <div class="grid">
           ${textField("name", "Name", values.name, { required: true })}
@@ -897,6 +908,7 @@ const channelRow = (channel: ChannelView, data: ChannelsData): Html => {
     ${failed !== null && flashBox({ kind: "error", text: failed.message })}
     <details ${failed !== null && html`open`}>
       <summary class="small">Edit</summary>
+      ${channel.managed && managedWarning("channel")}
       <form
         method="post"
         action="${path}"

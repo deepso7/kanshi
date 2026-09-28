@@ -23,6 +23,7 @@ import {
   monitorCreateFromForm,
   monitorPatchFromForm,
 } from "../../src/ui/forms.ts";
+import { channelsPage } from "../../src/ui/pages.ts";
 import { statusPage } from "../../src/ui/status-page.ts";
 
 const day = (
@@ -324,5 +325,32 @@ describe("public status", () => {
     assert.include(markup, "Open incidents");
     assert.include(markup, "1h");
     assert.strictEqual(count(markup, 'class="status-monitor"'), 2);
+  });
+});
+
+describe("managed resources", () => {
+  const channel = (key: string, managed: boolean) => ({
+    createdAt: 0,
+    id: `id-${key}`,
+    key,
+    kind: "webhook" as const,
+    managed,
+    maskedUrl: "https://hooks.example.com/****",
+    name: key,
+    updatedAt: 0,
+  });
+
+  it("marks config-managed channels and warns on their edit form", () => {
+    const markup = channelsPage({
+      channels: [
+        { ...channel("from-config", true), urlHash: "a" },
+        { ...channel("by-hand", false), urlHash: "b" },
+      ],
+      flash: null,
+      formError: null,
+      testResult: null,
+    }).value;
+    assert.strictEqual(count(markup, "managed by config</span>"), 1);
+    assert.strictEqual(count(markup, "The next <span"), 1);
   });
 });
