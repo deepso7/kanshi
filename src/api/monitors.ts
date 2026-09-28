@@ -6,8 +6,8 @@ import * as Schema from "effect/Schema";
 
 import { DatabaseClient } from "../db/client.ts";
 import { alertChannels, incidents, monitors, relations } from "../db/schema.ts";
-import { Monitor } from "../domain/monitor.ts";
 import { DatabaseError, MonitorNotFound } from "../domain/errors.ts";
+import { Monitor } from "../domain/monitor.ts";
 import {
   UrlValidationError,
   validateProbeUrl,
@@ -241,7 +241,7 @@ export const updateMonitor = Effect.fn("Api.Monitors.update")(
       catch: mapDatabaseError("monitors.disable"),
       try: () => db.batch([update, closeIncident]),
     });
-    const disabled = results[0][0];
+    const [[disabled]] = results;
     return disabled
       ? yield* toMonitor(disabled)
       : yield* new MonitorNotFound({ monitorId: id });
