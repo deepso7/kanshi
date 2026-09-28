@@ -668,3 +668,148 @@ null`) and `incidents`. The status page's Cache API entry can hold the
   `uptime` response.
 - Rollups are never recomputed: a day rolled up is final even if a late
   config-log fix would change its `expected`.
+
+## Phase 5 (watchdog and reconciliation)
+
+### Layout
+
+- `src/watchdog/rules.ts`: the pure rules. `needsStatus`, `decide(row,
+status, now)` (`Wait | Activate | Abandon | Destroy | Refresh | Skip`),
+  `staleThresholdMs`, `lastSignOfLife`, `isStale`, `observe`,
+  `watchTransition` (stale counter and episode changes `open | resolve |
+close | none`) and the constants (`creatingGraceMs` 5m, `staleGraceMs`
+  2m, `staleRunsToAlert` 2, `watchdogConcurrency` 8, `episodeRetentionMs`
+  30d).
+- `src/watchdog/run.ts`: `runWatchdog(deps, now)`, shared by the cron and
+  the dev route. Returns a `WatchdogReport` (one `RowReport` per row).
+- `src/registry/watchdog-store.ts`: Registry migration `"3_watchdog"`
+  (`monitors.stale_runs`, `monitors.stale_episode_id`,
+  `watchdog_episodes`, `watchdog_outbox`) and its SQL. Phase 6+ Registry
+  changes should use `"4_..."`.
+- `src/alerts/message.ts`: `NotChecked`, `NotCheckedResolved`,
+  `CheckedAgain` messages.
+- `src/worker.ts`: `Cloudflare.Workers.cron(watchdogCron, ...)` with
+  `Cloudflare.Workers.CronEventSourceLive` (alchemy attaches the trigger
+  at deploy time and registers the `scheduled` listener).
+
+### What a run does
+
+`registry.list()`, then every row independently (`Effect.forEach`,
+concurrency 8, each row's failure caught, logged and reported as
+`action: "Error"`):
+
+- `creating` younger than 5 minutes: nothing (`Wait`). Older: `status()`;
+  configured and not tombstoned → `activate(id, opId)`; otherwise →
+  `markDeleting(id, opId)` (only that operation's `creating` row) →
+  `destroy()` → `remove()`. The tombstone makes a delayed `configure`
+  fail, so the create answers 409 and nothing is armed (tested).
+- `deleting`: `destroy()` then `remove()`, whatever its age (both
+  idempotent, so racing an API delete is harmless).
+- `active`: `status()`, then three independent steps (a failure of one is
+  reported and the others still run): `ensureAlarm()`,
+  `upsertSummary(id, summary, state.summaryRevision)` (same revision
+  rule as pushes, so it converges disabled monitors too and never
+  overwrites a newer push), and `registry.observe(id, observation, now)`.
+- Afterwards: `pruneWatchdog(now - 30d)` and the Registry's own
+  `ensureAlarm()`.
+
+### Decisions
+
+- **Stale** = enabled and `now - max(lastCheckedAt, config.createdAt,
+config.updatedAt) > 2 × interval + 2 min` (**deviation**: the plan
+  only names `lastCheckedAt`). A never-checked monitor counts from its
+  creation, and every edit (which resets the schedule) restarts the
+  clock, so a re-enabled monitor with an old `lastCheckedAt` is not
+  flagged before it had a chance to run.
+- **Counter**: `stale_runs` counts consecutive stale runs; any fresh or
+  disabled run resets it. The second consecutive stale run opens an
+  **episode** (`watchdog-<uuid>`) and queues one `down` row per channel
+  (all channels, as the plan says, not the monitor's selection). While the
+  episode is open nothing else is sent. A fresh run resolves it
+  (`recovered`) and queues an `up` row for every channel that got a
+  `down` row. Disabling closes it (`disabled`) silently; deleting the
+  monitor closes it (`deleted`) in `remove()`. "Consecutive" means
+  consecutive runs; there is no minimum spacing, so a dev run and the
+  cron count the same.
+- **Delivery (at-least-once)**: a Registry-side outbox driven by a new
+  **Registry alarm** (`alarm = min(sendable nextAttemptAt)`, recomputed
+  after every change, like the Monitor). The outbox has the Monitor's
+  outbox shape (`incident_id` holds the episode id) so it reuses
+  `outboxDecision`, `dueOutbox`, `outboxDueAt`, `afterAttempt`,
+  `skipped` and `deliver`: 8 attempts with backoff, 4xx permanent, the
+  recovery only after the channel's `down` was delivered, a `down` still
+  pending when the episode resolves goes out as "was not checked for Xm,
+  checks resumed" and its `up` is skipped, and a `down` of an episode
+  closed by disable/delete is skipped. Channels are local to the Registry,
+  so opening/resolving an episode fans out in the same transaction with no
+  RPC. At most 25 rows per alarm run. Idempotency key:
+  `<episode>:<down|up>:<channel>`.
+- **Messages**: "Kanshi: monitor X is not being checked" (body: last
+  check age and expected interval, URL), "monitor X is being checked
+  again after Xm", "monitor X was not checked for Xm, checks resumed".
+  Webhook body: `event: "not_checked" | "checked"`, `episode` (with
+  `durationMs`), `incident: null`. ntfy priority `high`, tag `warning`.
+- `activate(id, opId)` is now **idempotent**: it also succeeds when that
+  operation's row is already `active`, so a create request that finishes
+  after the watchdog activated its row still answers 201.
+- An `active` row whose monitor is tombstoned or unconfigured is only
+  logged and reported (`Skip`); the watchdog does not guess a repair.
+- `now` (dev) is the run's clock for the `creating` age, staleness and
+  episode timestamps; queued alert rows are always due at the real time so
+  the Registry alarm sends them immediately. Durations in those messages
+  then read "0s".
+- **Cron failure semantics**: alchemy's cron event source swallows handler
+  failures, so Cloudflare never retries a run; the next one comes 5
+  minutes later. Nothing in a run needs retrying within it.
+- Resolved episodes and their rows are pruned 30 days after resolution
+  (only when none of their rows is pending), at the end of each run.
+
+### Dev mode and tests
+
+- `POST /_dev/watchdog?now=<ms>` runs the watchdog (default now) and
+  returns the report; `GET /_dev/watchdog` lists recent episodes and their
+  alert rows.
+- `POST /_dev/monitors/:id/clear-alarm` deletes a monitor's alarm (a lost
+  alarm); `POST /_dev/registry/:id/mark-deleting` marks a row `deleting`
+  without deleting the monitor (a stuck delete); `POST
+/_dev/registry/:id/rewind` sets a row's summary to name `(stale)`,
+  status `unknown`, revision 0 (lost pushes); the create header
+  `x-kanshi-dev-skip-activate: 1` stops after `configure` (a create that
+  died before `activate`). `GET /_dev/registry` rows now include
+  `watch: { staleRuns, episodeId }`.
+- Locally the cron also runs for real every 5 minutes, and can be fired
+  with `POST /cdn-cgi/handler/scheduled?cron=<encodeURIComponent("*/5 * * * *")>` (tested).
+- The dev router is now a route table (`routes` in `src/dev/routes.ts`).
+- Unit: `test/unit/watchdog.test.ts` (decisions for every lifecycle,
+  threshold and reference time, counter/dedup sequences, message text and
+  payloads).
+- Integration: `test/integ/watchdog.test.ts` on stage `integ-watchdog`
+  (about 25s): lost alarm restored and checks resume, stuck create
+  activated, stuck create removed with the late configure rejected, stuck
+  delete finished, cron trigger, rewound summary of a disabled monitor
+  converges (and a second run does not rewrite it), not-being-checked
+  alert sent once to the dev sink (third stale run deduplicated), then one
+  recovery. The suite takes about 3.5 minutes.
+
+### Commands (end of phase 5)
+
+- `pnpm exec tsc --noEmit -p .`: pass
+- `pnpm check`: pass
+- `pnpm test`: pass (119 tests)
+- `pnpm test:integ`: pass (22 tests)
+
+### Open issues and for later phases
+
+- The integration stages also get the real 5-minute cron. A real run that
+  lands between the two `now = +1h` runs of the not-being-checked test
+  would reset the counter and fail it (a window of milliseconds every 5
+  minutes).
+- The Registry is a singleton that now also sends watchdog alerts. While a
+  delivery awaits `fetch` (10s timeout, at most 25 per alarm run) other
+  Registry calls interleave, so it does not block the API, but a very
+  large backlog is spread over several alarm runs.
+- Episodes are visible only through `/_dev/watchdog` and the report; phase
+  6 could show an open episode on the dashboard (the Registry row already
+  carries `watch.episodeId`).
+- A Registry row whose monitor lost its config (active + unconfigured) is
+  reported, not repaired.
