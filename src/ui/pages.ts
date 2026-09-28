@@ -612,7 +612,7 @@ export interface MonitorFormData {
   readonly devMode: boolean;
   readonly error: string | null;
   /** Null for a new monitor. */
-  readonly monitor: Pick<MonitorResponse, "id" | "name"> | null;
+  readonly monitor: Pick<MonitorResponse, "id" | "managed" | "name"> | null;
   readonly values: MonitorFormValues;
 }
 

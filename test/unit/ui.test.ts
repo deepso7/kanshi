@@ -328,23 +328,23 @@ describe("public status", () => {
   });
 });
 
-describe("managed resources", () => {
-  const channel = (key: string, managed: boolean) => ({
-    createdAt: 0,
-    id: `id-${key}`,
-    key,
-    kind: "webhook" as const,
-    managed,
-    maskedUrl: "https://hooks.example.com/****",
-    name: key,
-    updatedAt: 0,
-  });
+const channelView = (key: string, managed: boolean) => ({
+  createdAt: 0,
+  id: `id-${key}`,
+  key,
+  kind: "webhook" as const,
+  managed,
+  maskedUrl: "https://hooks.example.com/****",
+  name: key,
+  updatedAt: 0,
+});
 
+describe("managed resources", () => {
   it("marks config-managed channels and warns on their edit form", () => {
     const markup = channelsPage({
       channels: [
-        { ...channel("from-config", true), urlHash: "a" },
-        { ...channel("by-hand", false), urlHash: "b" },
+        { ...channelView("from-config", true), urlHash: "a" },
+        { ...channelView("by-hand", false), urlHash: "b" },
       ],
       flash: null,
       formError: null,

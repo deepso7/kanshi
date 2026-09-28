@@ -6,7 +6,12 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import { requestIsSameOrigin, tokenMatches } from "../api/auth.ts";
-import type { BadRequest, Conflict, NotFound } from "../api/spec.ts";
+import type {
+  BadRequest,
+  Conflict,
+  MonitorResponse,
+  NotFound,
+} from "../api/spec.ts";
 import { matchPattern } from "../http/route.ts";
 import type { Registry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
@@ -320,7 +325,7 @@ export const makeUiRoutes = (deps: UiDeps) => {
 
   const monitorFormError = (
     input: RouteInput,
-    monitor: { readonly id: string; readonly name: string } | null,
+    monitor: Pick<MonitorResponse, "id" | "managed" | "name"> | null,
     message: string
   ) =>
     deps.channels.list().pipe(
