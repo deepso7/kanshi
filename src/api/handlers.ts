@@ -10,7 +10,15 @@ import type { Monitor } from "../monitor/monitor.ts";
 import type { Registry, RegistryEntry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
 import type { MonitorListItem, MonitorResponse } from "./spec.ts";
-import { BadRequest, Conflict, KanshiApi, NotFound } from "./spec.ts";
+import {
+  BadRequest,
+  Conflict,
+  KanshiApi,
+  NotFound,
+  defaultChecksLimit,
+  defaultIncidentsLimit,
+  defaultUptimeDays,
+} from "./spec.ts";
 
 export interface ApiDeps {
   readonly devMode: boolean;
@@ -238,6 +246,32 @@ export const makeMonitorsHandlers = (deps: ApiDeps) => {
             );
           return toResponse(entry, snapshot);
         })
+      )
+      .handle("checks", ({ params, query }) =>
+        activeEntry(params.id).pipe(
+          Effect.andThen(
+            monitor(params.id).checks({
+              limit: query.limit ?? defaultChecksLimit,
+              since: query.since,
+            })
+          )
+        )
+      )
+      .handle("uptime", ({ params, query }) =>
+        activeEntry(params.id).pipe(
+          Effect.andThen(
+            monitor(params.id)
+              .uptime(query.days ?? defaultUptimeDays)
+              .pipe(Effect.mapError(() => notFound(params.id)))
+          )
+        )
+      )
+      .handle("incidents", ({ params, query }) =>
+        activeEntry(params.id).pipe(
+          Effect.andThen(
+            monitor(params.id).incidents(query.limit ?? defaultIncidentsLimit)
+          )
+        )
       )
   );
 };

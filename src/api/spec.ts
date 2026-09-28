@@ -10,6 +10,7 @@ import {
   ChannelPatchInput,
   ChannelView,
 } from "../domain/channel.ts";
+import { Check, IncidentWithAlerts, UptimeReport } from "../domain/history.ts";
 import {
   MonitorCreateInput,
   MonitorPatchInput,
@@ -59,6 +60,27 @@ export type MonitorListItem = typeof MonitorListItem.Type;
 
 const MonitorIdParams = Schema.Struct({ id: Schema.NonEmptyString });
 
+/** An optional integer query parameter within bounds. */
+const intParam = (minimum: number, maximum: number) =>
+  Schema.optionalKey(
+    Schema.FiniteFromString.check(
+      Schema.isInt(),
+      Schema.isBetween({ maximum, minimum })
+    )
+  );
+
+export const defaultChecksLimit = 100;
+export const defaultIncidentsLimit = 50;
+export const defaultUptimeDays = 90;
+
+/** `since`: epoch ms (inclusive); `limit`: newest first, 1..1000. */
+const ChecksQuery = Schema.Struct({
+  limit: intParam(1, 1000),
+  since: intParam(0, Number.MAX_SAFE_INTEGER),
+});
+const UptimeQuery = Schema.Struct({ days: intParam(1, 365) });
+const IncidentsQuery = Schema.Struct({ limit: intParam(1, 500) });
+
 const monitorsGroup = HttpApiGroup.make("monitors")
   .add(
     HttpApiEndpoint.get("list", "/", {
@@ -89,6 +111,24 @@ const monitorsGroup = HttpApiGroup.make("monitors")
       error: [Conflict, NotFound],
       params: MonitorIdParams,
       success: MonitorResponse.pipe(HttpApiSchema.status(202)),
+    }),
+    HttpApiEndpoint.get("checks", "/:id/checks", {
+      error: NotFound,
+      params: MonitorIdParams,
+      query: ChecksQuery,
+      success: Schema.Array(Check),
+    }),
+    HttpApiEndpoint.get("uptime", "/:id/uptime", {
+      error: NotFound,
+      params: MonitorIdParams,
+      query: UptimeQuery,
+      success: UptimeReport,
+    }),
+    HttpApiEndpoint.get("incidents", "/:id/incidents", {
+      error: NotFound,
+      params: MonitorIdParams,
+      query: IncidentsQuery,
+      success: Schema.Array(IncidentWithAlerts),
     })
   )
   .prefix("/api/monitors")
