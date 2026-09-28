@@ -25,6 +25,13 @@ export interface Reply {
   readonly status: number;
 }
 
+/** A raw reply: redirects are not followed. */
+export interface RawReply {
+  readonly headers: Headers;
+  readonly status: number;
+  readonly text: string;
+}
+
 export interface Detail {
   readonly checks: readonly CheckRow[];
   readonly incidents: readonly IncidentRow[];
@@ -99,6 +106,43 @@ export const setup = (stage: string) => {
     } satisfies Reply;
   });
 
+  /**
+   * A request without the bearer token and without following redirects,
+   * for the dashboard and the status page. `form` is sent url-encoded.
+   */
+  const raw = Effect.fn("Test.raw")(function* rawRequest(
+    method: Method,
+    path: string,
+    options: {
+      readonly form?: Readonly<Record<string, string>>;
+      readonly headers?: Readonly<Record<string, string>>;
+    } = {}
+  ) {
+    const { url } = yield* stack;
+    const response = yield* Effect.promise(() =>
+      fetch(`${url}${path}`, {
+        body:
+          options.form === undefined
+            ? undefined
+            : new URLSearchParams(options.form).toString(),
+        headers: {
+          ...(options.form === undefined
+            ? {}
+            : { "content-type": "application/x-www-form-urlencoded" }),
+          ...options.headers,
+        },
+        method,
+        redirect: "manual",
+      })
+    );
+    const text = yield* Effect.promise(() => response.text());
+    return {
+      headers: response.headers,
+      status: response.status,
+      text,
+    } satisfies RawReply;
+  });
+
   const detail = <D extends Detail = Detail>(id: string) =>
     send("GET", `/_dev/monitors/${id}`).pipe(
       Effect.map((reply) => reply.body as D)
@@ -128,6 +172,7 @@ export const setup = (stage: string) => {
     create,
     detail,
     devUrl,
+    raw,
     registryRows,
     send,
     setFlip,

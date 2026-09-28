@@ -183,15 +183,17 @@ const run = (
   isPost: boolean
 ) =>
   Effect.gen(function* runRoute() {
-    if (isPost && !requestIsSameOrigin(input.request)) {
-      return htmlResponse(forbiddenPage(), 403);
-    }
+    // Read the body even when the post is rejected: answering with an
+    // unread request body makes some proxies reset the connection.
     const form: FormFields = isPost
       ? yield* input.request.urlParamsBody.pipe(
           Effect.map((params) => params.params),
           Effect.orElseSucceed((): FormFields => [])
         )
       : [];
+    if (isPost && !requestIsSameOrigin(input.request)) {
+      return htmlResponse(forbiddenPage(), 403);
+    }
     return yield* handle({ ...input, form }).pipe(
       Effect.catchTags({
         BadRequest: (error) =>
