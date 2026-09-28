@@ -3,14 +3,40 @@ import type { RuntimeContext } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import type { DeliveryResult } from "../alerts/delivery.ts";
+import { deliver } from "../alerts/delivery.ts";
+import type { WatchdogMessageTag } from "../alerts/message.ts";
+import { alertRequest, idempotencyKey } from "../alerts/message.ts";
+import type { OutboxEntry } from "../domain/alert.ts";
 import type { ChannelTarget, ChannelView } from "../domain/channel.ts";
 import { ChannelKind, maskUrl } from "../domain/channel.ts";
 import { MonitorStatus } from "../domain/monitor.ts";
 import type { ChannelSelection, MonitorSummary } from "../domain/monitor.ts";
+import {
+  afterAttempt,
+  dueOutbox,
+  outboxDecision,
+  outboxDueAt,
+  skipped,
+} from "../monitor/outbox.ts";
 import { openDurableSql } from "../storage/sqlite.ts";
+import type { WatchObservation } from "../watchdog/rules.ts";
 import { KeyTaken, QuotaExceeded, registryErrors } from "./errors.ts";
+import type { Episode, ObserveResult } from "./watchdog-store.ts";
+import {
+  closeMonitorEpisode,
+  observeMonitor,
+  pruneEpisodes,
+  readEpisode,
+  readWatchdogPair,
+  readWatchdogWork,
+  recentWatchdogAlerts,
+  watchdogMigration,
+  writeWatchdogOutbox,
+} from "./watchdog-store.ts";
 
 /** The singleton Registry object's name. */
 export const registryName = "registry";
@@ -30,6 +56,8 @@ const EntryRow = Schema.Struct({
   name: Schema.String,
   opId: Schema.String,
   public: Schema.BooleanFromBit,
+  staleEpisodeId: Schema.NullOr(Schema.String),
+  staleRuns: Schema.Number,
   status: MonitorStatus,
   summaryRevision: Schema.Number,
   updatedAt: Schema.Number,
@@ -46,7 +74,31 @@ export interface RegistryEntry {
   readonly summary: MonitorSummary;
   readonly summaryRevision: number;
   readonly updatedAt: number;
+  /** The watchdog's stale counter and open "not being checked" episode. */
+  readonly watch: {
+    readonly episodeId: string | null;
+    readonly staleRuns: number;
+  };
 }
+
+/** Watchdog episodes and their alert rows, for the dev inspector. */
+export interface WatchdogAlertsView {
+  readonly episodes: readonly Episode[];
+  readonly outbox: readonly OutboxEntry[];
+}
+
+/** Watchdog alert rows attempted per alarm run; the rest re-arm now. */
+const deliveriesPerRun = 25;
+
+/** The watchdog message for an outbox decision about an episode. */
+const watchdogMessage: Record<
+  "Down" | "DownRecovered" | "Recovered",
+  WatchdogMessageTag
+> = {
+  Down: "NotChecked",
+  DownRecovered: "NotCheckedResolved",
+  Recovered: "CheckedAgain",
+};
 
 export interface BeginInput {
   readonly id: string;
@@ -121,7 +173,10 @@ export class Registry extends Cloudflare.DurableObject<
       KeyTaken | QuotaExceeded,
       RuntimeContext
     >;
-    /** `creating` -> `active`, only for the operation that began it. */
+    /**
+     * `creating` -> `active`, only for the operation that began it.
+     * Idempotent: true if that operation's row is already active.
+     */
     activate: (
       id: string,
       opId: string
@@ -198,6 +253,34 @@ export class Registry extends Cloudflare.DurableObject<
     missingChannels: (
       ids: readonly string[]
     ) => Effect.Effect<readonly string[], never, RuntimeContext>;
+    /**
+     * Record a watchdog observation of an active monitor: advance its stale
+     * counter and open (alerting every channel), resolve or close its
+     * "not being checked" episode. `at` is the watchdog run's clock.
+     */
+    observe: (
+      id: string,
+      observation: WatchObservation,
+      at: number
+    ) => Effect.Effect<ObserveResult, never, RuntimeContext>;
+    /** Drop episodes resolved before `before` with nothing left to send. */
+    pruneWatchdog: (
+      before: number
+    ) => Effect.Effect<number, never, RuntimeContext>;
+    watchdogAlerts: (
+      limit: number
+    ) => Effect.Effect<WatchdogAlertsView, never, RuntimeContext>;
+    /**
+     * Dev stage: forget a monitor's summary (name "(stale)", status
+     * unknown, revision 0), as if every push had been lost.
+     */
+    devRewindSummary: (
+      id: string
+    ) => Effect.Effect<boolean, never, RuntimeContext>;
+    /** Delivers the watchdog's alerts; re-armed from the outbox. */
+    alarm: (
+      info?: Cloudflare.AlarmInvocationInfo
+    ) => Effect.Effect<void, never, RuntimeContext>;
   }
 >()("Registry", { errors: registryErrors }) {}
 
@@ -251,6 +334,7 @@ const migrations = SqliteMigrator.fromRecord({
       value INTEGER NOT NULL
     )`;
   }),
+  "3_watchdog": watchdogMigration,
 });
 
 const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
@@ -270,6 +354,7 @@ const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
   },
   summaryRevision: row.summaryRevision,
   updatedAt: row.updatedAt,
+  watch: { episodeId: row.staleEpisodeId, staleRuns: row.staleRuns },
 });
 
 const decodeEntries = (rows: readonly unknown[]) =>
@@ -283,6 +368,40 @@ export const RegistryLive = Registry.make(
 
     return Effect.gen(function* RegistryInstance() {
       const sql = yield* openDurableSql(state, migrations);
+      // Serialises alarm updates so the last one written is computed from
+      // the latest committed state.
+      const alarmLock = yield* Semaphore.make(1);
+
+      const withSql = <A, E>(
+        effect: Effect.Effect<A, E, SqlClient.SqlClient>
+      ) => Effect.provideService(effect, SqlClient.SqlClient, sql);
+      /** Run `effect` in one storage transaction; SQL errors are defects. */
+      const transact = <A, E>(
+        effect: Effect.Effect<A, E, SqlClient.SqlClient>
+      ) =>
+        withSql(sql.withTransaction(effect)).pipe(
+          Effect.catchTag("SqlError", Effect.die)
+        );
+
+      /** The alarm is due when the earliest sendable watchdog alert is. */
+      const rearm = alarmLock
+        .withPermits(1)(
+          Effect.gen(function* rearmEffect() {
+            const work = yield* withSql(readWatchdogWork);
+            const at = outboxDueAt(work);
+            yield* at === null
+              ? state.storage.deleteAlarm()
+              : state.storage.setAlarm(at);
+            return at;
+          })
+        )
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("failed to set the registry alarm", cause).pipe(
+              Effect.as(null)
+            )
+          )
+        );
 
       const get = (id: string) =>
         sql`SELECT * FROM monitors WHERE id = ${id}`.pipe(
@@ -331,8 +450,12 @@ export const RegistryLive = Registry.make(
 
       const activate = (id: string, opId: string) =>
         sql<{ id: string }>`UPDATE monitors
-          SET lifecycle = 'active', updated_at = ${Date.now()}
-          WHERE id = ${id} AND lifecycle = 'creating' AND op_id = ${opId}
+          SET lifecycle = 'active',
+              updated_at = CASE lifecycle
+                WHEN 'creating' THEN ${Date.now()} ELSE updated_at END
+          WHERE id = ${id}
+            AND lifecycle IN ('creating', 'active')
+            AND op_id = ${opId}
           RETURNING id`.pipe(
           Effect.map((rows) => rows.length === 1),
           Effect.orDie
@@ -457,8 +580,126 @@ export const RegistryLive = Registry.make(
           Effect.orDie
         );
 
+      /** Decide, and possibly send, one watchdog alert row. */
+      const sendOne = (due: OutboxEntry) =>
+        Effect.gen(function* sendOneEffect() {
+          const pair = yield* withSql(
+            readWatchdogPair(due.incidentId, due.event, due.channelId)
+          );
+          const { entry } = pair;
+          if (entry === null) {
+            return;
+          }
+          const episode = yield* withSql(readEpisode(entry.incidentId));
+          const decision = outboxDecision(entry, pair.down, episode);
+          if (decision._tag === "Done" || decision._tag === "Wait") {
+            return;
+          }
+          if (decision._tag === "Skip" || episode === null) {
+            const reason =
+              decision._tag === "Skip"
+                ? decision.reason
+                : "episode no longer exists";
+            yield* transact(
+              writeWatchdogOutbox(skipped(entry, reason, Date.now()))
+            );
+            return;
+          }
+          const target = yield* getChannel(entry.channelId);
+          if (target === null) {
+            const gone: DeliveryResult = {
+              _tag: "Failed",
+              error: "channel deleted",
+              permanent: true,
+              status: null,
+            };
+            yield* transact(
+              writeWatchdogOutbox(afterAttempt(entry, gone, false, Date.now()))
+            );
+            return;
+          }
+          const result = yield* deliver(
+            alertRequest(target.kind, target.url, {
+              _tag: watchdogMessage[decision.message],
+              episode: {
+                id: episode.id,
+                intervalSeconds: episode.intervalSeconds,
+                lastCheckedAt: episode.lastCheckedAt,
+                resolvedAt: episode.resolvedAt,
+                startedAt: episode.startedAt,
+              },
+              idempotencyKey: idempotencyKey(
+                entry.incidentId,
+                entry.event,
+                entry.channelId
+              ),
+              monitor: {
+                id: episode.monitorId,
+                name: episode.monitorName,
+                url: episode.monitorUrl,
+              },
+              sentAt: Date.now(),
+            })
+          );
+          if (result._tag === "Failed") {
+            yield* Effect.logWarning(
+              `watchdog alert ${entry.incidentId}:${entry.event} to ${entry.channelId} failed: ${result.error}`
+            );
+          }
+          yield* transact(
+            writeWatchdogOutbox(
+              afterAttempt(
+                entry,
+                result,
+                decision.message === "DownRecovered",
+                Date.now()
+              )
+            )
+          );
+        });
+
+      const alarm = (_info?: Cloudflare.AlarmInvocationInfo) =>
+        Effect.gen(function* alarmEffect() {
+          const work = yield* withSql(readWatchdogWork).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logError("reading watchdog alerts failed", cause).pipe(
+                Effect.as([] as readonly OutboxEntry[])
+              )
+            )
+          );
+          const due = dueOutbox(work, Date.now()).slice(0, deliveriesPerRun);
+          for (const entry of due) {
+            yield* sendOne(entry).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError(
+                  `watchdog alert ${entry.incidentId}:${entry.event} failed`,
+                  cause
+                )
+              )
+            );
+          }
+          yield* rearm;
+        }).pipe(Effect.withSpan("Registry.alarm"));
+
+      const observe = (id: string, observation: WatchObservation, at: number) =>
+        Effect.gen(function* observeEffect() {
+          const result = yield* transact(
+            observeMonitor(id, observation, at, Date.now())
+          );
+          if (result.change !== "none") {
+            yield* rearm;
+          }
+          if (result.change === "open") {
+            yield* Effect.logWarning(
+              `monitor ${observation.name} (${id}) is not being checked`
+            );
+          }
+          return result;
+        });
+
       return {
         activate,
+        alarm,
         begin,
         bumpDevCounter: (name: string) =>
           sql<{ value: number }>`INSERT INTO dev_counters (name, value)
@@ -504,6 +745,15 @@ export const RegistryLive = Registry.make(
             ),
             Effect.orDie
           ),
+        devRewindSummary: (id: string) =>
+          sql<{ id: string }>`UPDATE monitors
+            SET name = '(stale)', status = 'unknown', last_checked_at = NULL,
+                summary_revision = 0, updated_at = ${Date.now()}
+            WHERE id = ${id}
+            RETURNING id`.pipe(
+            Effect.map((rows) => rows.length === 1),
+            Effect.orDie
+          ),
         get,
         getFlip: (name: string) =>
           sql<{
@@ -530,6 +780,8 @@ export const RegistryLive = Registry.make(
               return [...new Set(ids)].filter((id) => !existing.has(id));
             })
           ),
+        observe,
+        pruneWatchdog: (before: number) => transact(pruneEpisodes(before)),
         recipients,
         recordDevEvent: (kind: string, detail: unknown) =>
           sql<{ id: number }>`INSERT INTO dev_events (at, kind, detail)
@@ -539,10 +791,12 @@ export const RegistryLive = Registry.make(
             Effect.orDie
           ),
         remove: (id: string) =>
-          sql`DELETE FROM monitors WHERE id = ${id}`.pipe(
-            Effect.asVoid,
-            Effect.orDie
-          ),
+          transact(
+            Effect.gen(function* removeTx() {
+              yield* closeMonitorEpisode(id, Date.now());
+              yield* sql`DELETE FROM monitors WHERE id = ${id}`;
+            })
+          ).pipe(Effect.andThen(rearm), Effect.asVoid),
         setFlip,
         setPublic: (id: string, isPublic: boolean) =>
           sql<{ id: string }>`UPDATE monitors
@@ -554,6 +808,8 @@ export const RegistryLive = Registry.make(
           ),
         updateChannel,
         upsertSummary,
+        watchdogAlerts: (limit: number) =>
+          withSql(recentWatchdogAlerts(limit)).pipe(Effect.orDie),
       };
     });
   })
