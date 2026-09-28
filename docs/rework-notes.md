@@ -312,3 +312,122 @@ No blockers found. Constraints to carry into phase 2:
 3. Declare `alarm` in the DO shape so tsc checks it.
 4. Cross-DO RPC transport failures are untyped. Handle them with
    `catchCause`.
+
+## Phase 2 (core)
+
+### Layout
+
+- `src/domain/`: pure domain code shared by everything. `monitor.ts`
+  (config/state/summary schemas), `monitor-input.ts` (create/patch input
+  schemas, defaults, stage-dependent validation), `url.ts` (target URL
+  rules), `expected-status.ts`, `probe.ts`.
+- `src/monitor/`: the Monitor DO. `machine.ts` (`evaluate`), `cycle.ts`
+  (check cycle and `nextAlarmAt`, all pure), `reset.ts` (reset rules,
+  pure), `storage.ts` (migrations and typed table access), `errors.ts`
+  (RPC errors), `monitor.ts` (the DO class and its implementation).
+- `src/registry/`: the Registry DO (`registry.ts`) and its RPC errors.
+- `src/storage/sqlite.ts`: `openDurableSql(state, migrations)`, shared by
+  both DOs.
+- `src/api/`: `spec.ts` (HttpApi spec and error classes), `handlers.ts`
+  (create/delete flows over both DOs), `auth.ts` (unchanged).
+- `src/dev/routes.ts`: `/_dev/*` fixtures. `src/worker.ts`: the single
+  Worker, hosting both DOs. `src/config.ts`: `defineConfig` for
+  `kanshi.dev.config.ts` (phase 7 grows it). `scripts/seed.ts`: `pnpm seed`.
+
+### Adding tables and migrations
+
+- Each DO has a `SqliteMigrator.fromRecord` record (`src/monitor/storage.ts`,
+  `src/registry/registry.ts`). Add a new `"<n>_<name>"` entry for every
+  schema change; never edit an applied one. Migrations run on the next
+  activation of each object. Phase 3 should add e.g. `"2_alerts"`
+  (notifications, incident_recipients, outbox) to the Monitor and
+  `"2_channels"` to the Registry; phase 4 `"3_history"` (daily_rollups).
+- The SQL client maps snake_case columns to camelCase rows and
+  `sql.insert` keys (`transformResultNames`/`transformQueryNames`). Row
+  schemas decode JSON/bit columns (`Schema.fromJsonString`,
+  `Schema.BooleanFromBit`), see `ConfigRow`/`StateRow`.
+- Group writes with `transact(...)` in `monitor.ts` (one
+  `sql.withTransaction`, `SqlError` becomes a defect). No `fetch` or RPC
+  inside it.
+- `destroy()` deletes every row and keeps the tombstone. **Deviation:** the
+  plan says drop the tables; deleting rows keeps the schema so later
+  migrations still apply to tombstoned objects.
+
+### Alarm
+
+- `nextAlarmAt(config, state, extra)` in `cycle.ts` takes an `extra` list
+  of due times: phase 3 passes the earliest unresolved notification retry
+  and pending outbox `nextAttemptAt`, phase 4 sets `nextMaintenanceAt`.
+- `rearm` recomputes from storage under a semaphore, so the last alarm
+  written always comes from the latest committed state. Every mutating RPC
+  and the alarm handler end with it.
+- The alarm handler runs steps (`expire`, `check`) wrapped in `logged(step)`
+  (errors are logged, later steps and `rearm` still run). Add phase 3/4
+  steps the same way, before the final `rearm`. It runs at most one check
+  per invocation; a further due check re-arms for now.
+- `ensureAlarm()` and `status()` exist for the phase 5 watchdog.
+
+### Check cycle decisions
+
+- A failure that is not a confirm schedules a confirm 5s later and is
+  stored uncounted; the confirm is fed to the state machine. **Deviation:**
+  when the monitor is already `down`, a scheduled failure is counted and
+  fed directly (there is nothing to confirm), so a down target is probed
+  once per slot, not twice.
+- A confirm after a manual failure is fed but not counted (it is not a
+  slot sample). `state.nextSlotAt` keeps the slot after a pending confirm;
+  `state.confirmCounted` says whether the confirm stands in for a slot.
+- `runNow()` stores the request time; any check that starts at or after it
+  clears it, so repeated requests collapse into one and a request made
+  during an in-flight check gets its own check afterwards.
+- Incident ids are the id of the check that opened them.
+- The probe retries once, immediately, on "Network connection lost" (a
+  pooled keep-alive connection closed by the target). Found in local dev:
+  the Node dev gateway's 5s keep-alive timeout matched the 5s interval and
+  every third check failed.
+
+### RPC errors
+
+- RPC errors are `Schema.TaggedError` classes declared on the DO class
+  (`{ errors: monitorErrors }`, `{ errors: registryErrors }`). Callers get
+  real instances back, so `Effect.catchTags` works across RPC (verified).
+- Transport failures (`RpcCallError`) are not in the stub's typed error
+  channel. In the API they surface as 500s; inside DOs, wrap cross-DO calls
+  that must not fail the caller in `Effect.catchCause` (see `pushSummary`).
+
+### API and dev mode
+
+- Routes are under `/api/monitors` (the old API was at `/monitors`). Create
+  returns 201, `POST /:id/check` 202, errors are JSON
+  `{ "_tag": "NotFound" | "BadRequest" | "Conflict", "message" }` with
+  404/400/409. The list is the Registry's cached summaries (active rows
+  only). `public` is accepted on create/patch and stored in the Registry.
+- Defaults changed: expected status `2xx` (was 200), failure threshold 1
+  (was 2). The `allowHttp` flag is gone (http is allowed, https is the
+  default for URLs without a scheme).
+- `DELETE` works on a row in any lifecycle, so it also retries a stuck
+  delete and can cancel a create in progress.
+- Worker config (read at deploy time and bound): `KANSHI_API_TOKEN`
+  (required, from `.env`), `KANSHI_DEV_MODE`, `KANSHI_MONITOR_QUOTA`
+  (default 100). The main stack sets `KANSHI_DEV_MODE` from the stage
+  (`dev` only, see `devStages` in `alchemy.run.ts`); the test stack sets it
+  explicitly.
+- Dev mode: `/_dev/target`, `/_dev/target/flip/:name` (GET: 200/503, POST
+  `?up=true|false` or toggle), `/_dev/webhook?fail=500` + `GET
+/_dev/events`, `GET /_dev/registry` (all rows), `GET /_dev/monitors/:id`
+  (raw status, checks, incidents); 5s intervals and loopback targets; the
+  `x-kanshi-dev-configure-delay` header on create (used by the race test).
+  Flip targets and dev events live in the Registry (`dev_flips`,
+  `dev_events`).
+
+### Running
+
+- `pnpm dev`: `alchemy dev --stage dev` with placeholder Cloudflare
+  credentials, on port 1337. Needs `KANSHI_API_TOKEN` in `.env`.
+- `pnpm seed`: creates the monitors in `kanshi.dev.config.ts` whose key
+  does not exist yet (waits up to 30s for the stack). Uses
+  `KANSHI_API_TOKEN` and `KANSHI_URL`.
+- `pnpm test`: vitest unit tests in `test/unit`.
+- `pnpm test:integ`: `bun test test/integ`, the Worker run locally by
+  `Test.make({ dev: true })` on stage `integ` with real alarms (~60s). Do
+  not run it while `pnpm dev` is up (both use port 1337).
