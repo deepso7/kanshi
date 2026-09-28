@@ -9,9 +9,11 @@
   "main": "index.js",
   "scripts": {
     "dev": "CLOUDFLARE_ACCOUNT_ID=00000000000000000000000000000000 CLOUDFLARE_API_TOKEN=local-dev-placeholder alchemy dev --stage dev",
-    "seed": "bun scripts/seed.ts",
+    "seed": "bun scripts/kanshi.ts sync --config kanshi.dev.config.ts --url http://localhost:1337 --adopt --wait 30",
+    "kanshi": "bun scripts/kanshi.ts",
     "deploy": "alchemy deploy",
     "destroy": "alchemy destroy",
+    "typecheck": "tsc --noEmit -p .",
     "test": "vitest run",
     "test:integ": "CLOUDFLARE_ACCOUNT_ID=00000000000000000000000000000000 CLOUDFLARE_API_TOKEN=local-dev-placeholder bun test test/integ",
     "check": "ultracite check",

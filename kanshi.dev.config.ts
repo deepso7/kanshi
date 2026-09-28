@@ -1,7 +1,9 @@
-// Channels and monitors created by `pnpm seed` against the local dev stack
-// (`pnpm dev`). Monitors probe the dev stage's own `/_dev/target` fixtures;
-// channels post to its `/_dev/webhook` sink (recorded in `GET /_dev/events`
-// and printed to the console). Monitors use every channel by default.
+// The dev stack's config, applied by `pnpm seed` (`kanshi sync` against
+// http://localhost:1337 with --adopt, so resources created by older seeds
+// are taken over). Monitors probe the dev stage's own `/_dev/target`
+// fixtures; channels post to its `/_dev/webhook` sink (recorded in
+// `GET /_dev/events` and printed to the console). Monitors use every
+// channel by default.
 import { defineConfig } from "./src/config.ts";
 
 const dev = "http://localhost:1337/_dev";
@@ -26,12 +28,14 @@ export default defineConfig({
       intervalSeconds: 10,
       key: "dev-ok",
       name: "Always up",
+      public: true,
       url: `${dev}/target`,
     },
     {
       intervalSeconds: 10,
       key: "dev-flip",
       name: "Flip target (POST /_dev/target/flip/demo to toggle)",
+      public: true,
       url: `${dev}/target/flip/demo`,
     },
     {
