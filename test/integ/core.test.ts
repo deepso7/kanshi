@@ -44,6 +44,39 @@ test(
     expect((yield* send("DELETE", `/api/monitors/${monitor.id}`)).status).toBe(
       204
     );
+
+    // HEAD cannot check a body: rejected on create and on the merged
+    // config of a patch; a rejected patch changes nothing, `public` included.
+    const headKeyword = yield* send("POST", "/api/monitors", {
+      body: {
+        bodyContains: "ok",
+        method: "HEAD",
+        name: "head",
+        url: yield* devUrl("/target"),
+      },
+    });
+    expect(headKeyword.status).toBe(400);
+    const keyword = yield* create({
+      bodyContains: "ok",
+      enabled: false,
+      url: yield* devUrl("/target"),
+    });
+    const toHead = yield* send("PATCH", `/api/monitors/${keyword.id}`, {
+      body: { method: "HEAD" },
+    });
+    expect(toHead.status).toBe(400);
+    const toHeadPublic = yield* send("PATCH", `/api/monitors/${keyword.id}`, {
+      body: { method: "HEAD", public: true },
+    });
+    expect(toHeadPublic.status).toBe(400);
+    const unchanged = yield* send("GET", `/api/monitors/${keyword.id}`);
+    expect(unchanged.body).toMatchObject({ method: "GET", public: false });
+    const cleared = yield* send("PATCH", `/api/monitors/${keyword.id}`, {
+      body: { bodyContains: null, method: "HEAD", public: true },
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body).toMatchObject({ method: "HEAD", public: true });
+    yield* send("DELETE", `/api/monitors/${keyword.id}`);
   }),
   { timeout: 60_000 }
 );

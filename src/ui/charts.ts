@@ -82,7 +82,10 @@ const sparkWidth = 120;
 const sparkHeight = 28;
 const sparkPad = 2;
 
-/** SVG path of the latency line; gaps (no successful check) break it. */
+/**
+ * SVG path of the latency line; gaps (no successful check) break it, and a
+ * bucket with no known neighbour is drawn as a dot.
+ */
 export const sparklinePath = (
   buckets: readonly RecentBucket[],
   width = sparkWidth,
@@ -98,14 +101,17 @@ export const sparklinePath = (
   const y = (value: number) =>
     sparkPad + (height - 2 * sparkPad) * (1 - value / max);
   let path = "";
-  let drawing = false;
   for (const [index, value] of values.entries()) {
-    if (value === null) {
-      drawing = false;
-    } else {
+    if (value !== null) {
+      const drawing = index > 0 && values[index - 1] !== null;
+      const isolated = !drawing && (values[index + 1] ?? null) === null;
       const command = drawing ? "L" : "M";
       path += `${command}${(index * step).toFixed(1)} ${y(value).toFixed(1)}`;
-      drawing = true;
+      // A lone point is a zero-length segment: the round linecap draws it
+      // as a dot, where a bare `M` would draw nothing.
+      if (isolated) {
+        path += "h0";
+      }
     }
   }
   return path;

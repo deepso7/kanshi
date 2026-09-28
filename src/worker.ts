@@ -16,7 +16,7 @@ import { makeChannelsHandlers } from "./api/channels.ts";
 import { makeMonitorsHandlers } from "./api/handlers.ts";
 import { makePublicHandlers } from "./api/public.ts";
 import { KanshiApi } from "./api/spec.ts";
-import { makeDevRoutes } from "./dev/routes.ts";
+import { isLoopbackHost, makeDevRoutes } from "./dev/routes.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
 import { makeChannelService } from "./service/channels.ts";
@@ -47,7 +47,7 @@ const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
  *
  * Config (read at deploy time and bound to the Worker):
  * - `KANSHI_API_TOKEN` bearer token for `/api` (required)
- * - `KANSHI_DEV_MODE` set by the stack for the dev stage
+ * - `KANSHI_DEV_MODE` set by the stack for the dev stage run locally
  * - `KANSHI_MONITOR_QUOTA` maximum number of monitors (default 100)
  */
 export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
@@ -131,7 +131,13 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
           if (pathname === "/api" || pathname.startsWith("/api/")) {
             return yield* apiOr404;
           }
-          if (devMode && pathname.startsWith("/_dev/")) {
+          // Dev fixtures are unauthenticated: local dev only, and only for
+          // requests addressed to a loopback host.
+          if (
+            devMode &&
+            pathname.startsWith("/_dev/") &&
+            isLoopbackHost(request.headers.host)
+          ) {
             return yield* dev;
           }
           return yield* ui;

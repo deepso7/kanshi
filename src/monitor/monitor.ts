@@ -63,6 +63,7 @@ import {
   afterAttempt,
   deferred,
   dueNotifications,
+  deliverDue,
   dueOutbox,
   notificationFailed,
   notificationsDueAt,
@@ -135,9 +136,6 @@ export interface ChecksQuery {
 
 /** How long a failed maintenance run waits before the next try. */
 const maintenanceRetryMs = 60 * 60 * 1000;
-
-/** Outbox rows attempted per alarm run; the rest re-arm immediately. */
-const deliveriesPerRun = 25;
 
 export interface UpdateOptions {
   readonly devMode: boolean;
@@ -728,15 +726,18 @@ export const MonitorLive = Monitor.make(
           );
         });
 
+      /**
+       * Bounded by `deliveryLimits` (concurrency, rows and time per run);
+       * rows left over stay due and the alarm re-arms for them at once.
+       */
       const deliverStep = Effect.gen(function* deliverStepEffect() {
         const live = yield* withSql(loadLive);
         const { outbox } = yield* withSql(readAlertWork);
-        const due = dueOutbox(outbox, Date.now()).slice(0, deliveriesPerRun);
-        for (const entry of due) {
-          yield* logged(`deliver ${entry.incidentId}:${entry.event}`)(
+        yield* deliverDue(dueOutbox(outbox, Date.now()), (entry) =>
+          logged(`deliver ${entry.incidentId}:${entry.event}`)(
             sendOne(entry, live.config)
-          );
-        }
+          ).pipe(Effect.asVoid)
+        );
       });
 
       /**
@@ -868,6 +869,8 @@ export const MonitorLive = Monitor.make(
       const alarm = (_info?: Cloudflare.AlarmInvocationInfo) =>
         Effect.gen(function* alarmEffect() {
           yield* logged("expire")(expireStep);
+          // Checks run before delivery, which is bounded in time, so slow
+          // alert channels cannot delay them.
           yield* logged("check")(checkStep);
           yield* logged("notify")(notifyStep);
           yield* logged("deliver")(deliverStep);

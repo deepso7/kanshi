@@ -101,7 +101,8 @@ hour (30s doubling to 30m, 8 attempts); 4xx responses other than
 
 All routes except `/api/public/*` need `Authorization: Bearer
 $KANSHI_API_TOKEN` (or the dashboard session). Errors are JSON
-`{ "_tag", "message" }` with 400, 404 or 409.
+`{ "_tag", "message" }` with 400, 404 or 409, or 503 (`Unavailable`) when a
+`PATCH` was only partly applied: retry it.
 
 | Route                                                      | What                                     |
 | ---------------------------------------------------------- | ---------------------------------------- |
@@ -125,7 +126,9 @@ pnpm seed   # kanshi sync of kanshi.dev.config.ts to the dev stack
 `pnpm dev` needs only `KANSHI_API_TOKEN` in `.env` (it uses placeholder
 Cloudflare credentials; no account or network). Durable Object data persists
 in `.alchemy/local/` across restarts. The dev stage allows 5-second
-intervals and `http://localhost` targets and webhooks, and adds fixtures:
+intervals and `http://localhost` targets and webhooks, and adds fixtures
+(only when run locally by `alchemy dev`, and only for requests to a loopback
+host):
 
 - `/_dev/target?status=500&delay=2000&body=...`: a fake target.
 - `/_dev/target/flip/:name`: a target that is up or down; `POST

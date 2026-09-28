@@ -1,13 +1,13 @@
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
-import { BadRequest, Conflict, NotFound } from "../api/spec.ts";
+import { BadRequest, Conflict, NotFound, Unavailable } from "../api/spec.ts";
 import type { MonitorListItem, MonitorResponse } from "../api/spec.ts";
 import type {
   MonitorCreateInput,
   MonitorPatchInput,
 } from "../domain/monitor-input.ts";
-import { buildConfig } from "../domain/monitor-input.ts";
+import { buildConfig, patchConfig } from "../domain/monitor-input.ts";
 import type { ChannelSelection, MonitorSnapshot } from "../domain/monitor.ts";
 import { summaryOf } from "../domain/monitor.ts";
 import { initialState } from "../monitor/cycle.ts";
@@ -51,10 +51,17 @@ const toListItem = (entry: RegistryEntry): MonitorListItem => ({
   public: entry.public,
 });
 
+/** The patch's fields other than `public`, if any. */
+const withoutPublic = (patch: MonitorPatchInput): MonitorPatchInput | null => {
+  const { public: _public, ...rest } = patch;
+  return Object.keys(rest).length > 0 ? rest : null;
+};
+
 /**
  * The monitor operations shared by the `/api` handlers and the dashboard:
  * the create and delete flows over the Registry and the Monitor objects,
- * and the reads. Failures are the API's `BadRequest | Conflict | NotFound`.
+ * and the reads. Failures are the API's `BadRequest | Conflict | NotFound`
+ * (and `Unavailable` for a partly applied update).
  */
 export const makeMonitorService = (deps: MonitorServiceDeps) => {
   const registry = () => deps.registries.getByName(registryName);
@@ -158,21 +165,29 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
       const snapshot = yield* monitor(id)
         .configure(config)
         .pipe(
-          Effect.catchCause((cause) =>
-            // Abandon the create; if the row is no longer ours, a
-            // concurrent delete already cleaned up.
-            removeMonitor(id, opId).pipe(
-              Effect.ignore,
-              Effect.andThen(Effect.logWarning("create failed", cause)),
-              Effect.andThen(
-                Effect.fail(
-                  new Conflict({
-                    message: `monitor ${id} was deleted while being created`,
-                  })
-                )
-              )
+          // Any failure abandons the create through the normal delete path
+          // (tombstone, then drop the row), so nothing is left armed or
+          // orphaned. If the row is no longer ours, a concurrent delete
+          // already cleaned up.
+          Effect.onError((cause) =>
+            Effect.logWarning("create failed", cause).pipe(
+              Effect.andThen(removeMonitor(id, opId)),
+              Effect.ignoreCause({
+                log: true,
+                message: "create cleanup failed",
+              })
             )
-          )
+          ),
+          // Only a tombstone means a concurrent delete won the race.
+          Effect.catchTag("MonitorTombstoned", () =>
+            Effect.fail(
+              new Conflict({
+                message: `monitor ${id} was deleted while being created`,
+              })
+            )
+          ),
+          // Anything else is a server error (500).
+          Effect.catchTag("MonitorIdMismatch", (error) => Effect.die(error))
         );
 
       if (deps.devMode && options.skipActivate === true) {
@@ -197,39 +212,87 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
     });
 
   /**
-   * Apply a patch to the monitor, then write `managed` and `public`
-   * synchronously to the Registry (the list and config sync read `managed`
-   * there), so the status page stops showing a monitor made private as soon
-   * as this returns.
+   * Apply a patch. The writes, in order:
+   *
+   * 1. `public` to the Registry, first: the Registry owns it (the status
+   *    page reads it there), and making a monitor private must take effect
+   *    even if the rest of the update fails.
+   * 2. The monitor's configuration (a transaction in the Monitor object).
+   * 3. `managed` to the Registry (the list and config sync read it there).
+   *
+   * Every write is idempotent (it sets values, and the configuration is
+   * validated against the merged result), so retrying a request that
+   * failed after step 1 converges; such a failure is `Unavailable` (503)
+   * and tells the client to retry. A patch that would be rejected is
+   * checked before step 1, so a 400 changes nothing.
    */
   const update = (id: string, patch: MonitorPatchInput) =>
     Effect.gen(function* updateMonitor() {
       const entry = yield* activeEntry(id);
       yield* checkChannels(patch.channels);
-      const snapshot = yield* monitor(id)
-        .update(patch, { devMode: deps.devMode })
-        .pipe(
-          Effect.catchTags({
-            InvalidMonitorInput: (error) =>
-              Effect.fail(new BadRequest({ message: error.message })),
-            MonitorNotConfigured: () => Effect.fail(notFound(id)),
-            MonitorTombstoned: () => Effect.fail(notFound(id)),
-          })
-        );
-      if (patch.managed !== undefined && patch.managed !== entry.managed) {
-        const updated = yield* registry().setManaged(id, patch.managed);
+      const rest = withoutPublic(patch);
+      const changesPublic =
+        patch.public !== undefined && patch.public !== entry.public;
+
+      if (changesPublic && rest !== null) {
+        const current = yield* monitor(id)
+          .snapshot()
+          .pipe(Effect.mapError(() => notFound(id)));
+        const checked = patchConfig(current.config, rest, {
+          devMode: deps.devMode,
+          now: Date.now(),
+        });
+        if (Result.isFailure(checked)) {
+          return yield* new BadRequest({ message: checked.failure });
+        }
+      }
+
+      if (changesPublic) {
+        const updated = yield* registry().setPublic(id, patch.public === true);
         if (!updated) {
           return yield* notFound(id);
         }
       }
-      if (patch.public !== undefined && patch.public !== entry.public) {
-        const updated = yield* registry().setPublic(id, patch.public);
-        if (!updated) {
-          return yield* notFound(id);
+
+      const applyRest = Effect.gen(function* applyRestEffect() {
+        const snapshot = yield* monitor(id)
+          .update(rest ?? {}, { devMode: deps.devMode })
+          .pipe(
+            Effect.catchTags({
+              InvalidMonitorInput: (error) =>
+                Effect.fail(new BadRequest({ message: error.message })),
+              MonitorNotConfigured: () => Effect.fail(notFound(id)),
+              MonitorTombstoned: () => Effect.fail(notFound(id)),
+            })
+          );
+        if (patch.managed !== undefined && patch.managed !== entry.managed) {
+          const updated = yield* registry().setManaged(id, patch.managed);
+          if (!updated) {
+            return yield* notFound(id);
+          }
         }
-        return toResponse({ public: patch.public }, snapshot);
-      }
-      return toResponse(entry, snapshot);
+        return snapshot;
+      });
+
+      const snapshot = changesPublic
+        ? yield* applyRest.pipe(
+            Effect.catchDefect((defect) =>
+              Effect.logError(
+                "update failed after setting public",
+                defect
+              ).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new Unavailable({
+                      message: `monitor ${id}: public was set to ${String(patch.public)} but the other changes may not have been applied; retry the request`,
+                    })
+                  )
+                )
+              )
+            )
+          )
+        : yield* applyRest;
+      return toResponse({ public: patch.public ?? entry.public }, snapshot);
     });
 
   const remove = (id: string) =>

@@ -16,6 +16,7 @@ import type {
   ChannelRefs,
   Current,
   CurrentMonitor,
+  Desired,
   Plan,
   Step,
 } from "./plan.ts";
@@ -157,13 +158,11 @@ const toCurrentMonitor = (monitor: MonitorResponse): CurrentMonitor => {
 /**
  * Channels and monitors as the API reports them. The full configuration
  * is only read for managed monitors and for monitors whose key is in the
- * config (the rest are only checked for key collisions).
+ * config (the rest are only checked for key collisions), and for every
+ * monitor when a managed channel is about to be deleted (its users must
+ * be known).
  */
-const loadCurrent = (
-  api: Api,
-  wantedKeys: ReadonlySet<string>,
-  waitSeconds: number
-) =>
+const loadCurrent = (api: Api, desired: Desired, waitSeconds: number) =>
   Effect.gen(function* loadCurrentEffect() {
     const listed = yield* api
       .read("GET /api/monitors", "/api/monitors", Schema.Array(MonitorListItem))
@@ -179,10 +178,17 @@ const loadCurrent = (
       "/api/channels",
       Schema.Array(ChannelView)
     );
+    const wantedKeys = new Set(desired.monitors.map((monitor) => monitor.key));
+    const wantedChannels = new Set(
+      desired.channels.map((channel) => channel.key)
+    );
+    const deletesChannels = channels.some(
+      (channel) => channel.managed && !wantedChannels.has(channel.key)
+    );
     const monitors = yield* Effect.forEach(
       listed,
       (item) =>
-        item.managed || wantedKeys.has(item.key)
+        deletesChannels || item.managed || wantedKeys.has(item.key)
           ? api
               .read(
                 `GET /api/monitors/${item.id}`,
@@ -326,11 +332,7 @@ export const sync = Effect.fn("kanshi.sync")(function* syncEffect(
   }
   const { desired } = resolved;
   const api = yield* makeApi(options);
-  const current = yield* loadCurrent(
-    api,
-    new Set(desired.monitors.map((monitor) => monitor.key)),
-    options.waitSeconds ?? 0
-  );
+  const current = yield* loadCurrent(api, desired, options.waitSeconds ?? 0);
   const plan = diff(desired, current, { adopt: options.adopt ?? false });
   if (plan.errors.length > 0) {
     return yield* configErrors(plan.errors);

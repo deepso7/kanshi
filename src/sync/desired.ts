@@ -8,7 +8,7 @@ import type {
 } from "../config.ts";
 import { checkChannelUrl, hashUrl } from "../domain/channel.ts";
 import { parseExpectedStatus } from "../domain/expected-status.ts";
-import { monitorDefaults } from "../domain/monitor-input.ts";
+import { checkMethodBody, monitorDefaults } from "../domain/monitor-input.ts";
 import { checkTargetUrl, describeUrlRejection } from "../domain/url.ts";
 import type { Desired, DesiredChannel, DesiredMonitor } from "./plan.ts";
 
@@ -45,7 +45,14 @@ const resolveMonitor = (
   const expectedStatus = parseExpectedStatus(
     monitor.expectedStatus ?? monitorDefaults.expectedStatus
   );
-  if (Result.isFailure(url) || Result.isFailure(expectedStatus)) {
+  const method = monitor.method ?? monitorDefaults.method;
+  const bodyContains = monitor.bodyContains ?? monitorDefaults.bodyContains;
+  const methodBody = checkMethodBody(method, bodyContains);
+  if (
+    Result.isFailure(url) ||
+    Result.isFailure(expectedStatus) ||
+    Result.isFailure(methodBody)
+  ) {
     return Result.fail([
       ...(Result.isFailure(url)
         ? [`monitor "${monitor.key}": ${url.failure}`]
@@ -55,11 +62,14 @@ const resolveMonitor = (
             `monitor "${monitor.key}": expectedStatus: ${expectedStatus.failure}`,
           ]
         : []),
+      ...(Result.isFailure(methodBody)
+        ? [`monitor "${monitor.key}": ${methodBody.failure}`]
+        : []),
     ]);
   }
   const channelRefs = monitor.channels ?? monitorDefaults.channels;
   return Result.succeed({
-    bodyContains: monitor.bodyContains ?? monitorDefaults.bodyContains,
+    bodyContains,
     channels: channelRefs === "all" ? "all" : [...new Set(channelRefs)],
     enabled: monitor.enabled ?? monitorDefaults.enabled,
     expectedStatus: expectedStatus.success,
@@ -67,7 +77,7 @@ const resolveMonitor = (
       monitor.failureThreshold ?? monitorDefaults.failureThreshold,
     intervalSeconds: monitor.intervalSeconds ?? monitorDefaults.intervalSeconds,
     key: monitor.key,
-    method: monitor.method ?? monitorDefaults.method,
+    method,
     name: monitor.name,
     public: monitor.public ?? monitorDefaults.public,
     successThreshold:

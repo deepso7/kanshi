@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import { ChannelCreateInput, ChannelPatchInput } from "../domain/channel.ts";
 import {
+  checkMethodBody,
   MonitorCreateInput,
   MonitorPatchInput,
 } from "../domain/monitor-input.ts";
@@ -107,11 +108,28 @@ const checkTimeout = (form: FormFields): Result.Result<void, string> => {
     : Result.fail("Timeout: must be between 1 and 30 seconds");
 };
 
+/**
+ * The form holds every field, so its method and keyword are the final
+ * ones; say it with the form's labels (the service checks it again).
+ */
+const checkFormMethodBody = (form: FormFields): Result.Result<void, string> =>
+  checkMethodBody(
+    first(form, "method") === "HEAD" ? "HEAD" : "GET",
+    first(form, "bodyContains") || null
+  ).pipe(
+    Result.mapError(
+      () => "Body contains: only works with GET (a HEAD response has no body)"
+    )
+  );
+
+const checkMonitorForm = (form: FormFields): Result.Result<void, string> =>
+  checkTimeout(form).pipe(Result.flatMap(() => checkFormMethodBody(form)));
+
 /** The new-monitor form as API input. */
 export const monitorCreateFromForm = (
   form: FormFields
 ): Result.Result<MonitorCreateInput, string> =>
-  checkTimeout(form).pipe(
+  checkMonitorForm(form).pipe(
     Result.flatMap(() =>
       decode(
         MonitorCreateInput,
@@ -127,7 +145,7 @@ export const monitorCreateFromForm = (
 export const monitorPatchFromForm = (
   form: FormFields
 ): Result.Result<MonitorPatchInput, string> =>
-  checkTimeout(form).pipe(
+  checkMonitorForm(form).pipe(
     Result.flatMap(() =>
       decode(MonitorPatchInput, withoutUndefined(monitorFields(form)))
     )

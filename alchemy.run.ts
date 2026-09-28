@@ -11,7 +11,12 @@ import * as Effect from "effect/Effect";
 
 import Kanshi from "./src/worker.ts";
 
-/** Stages that get dev mode: `/_dev/*` fixtures, 5s intervals, localhost. */
+/**
+ * Stages that get dev mode: `/_dev/*` fixtures, 5s intervals, localhost.
+ * Only when the Worker runs locally (`alchemy dev`): `alchemy deploy
+ * --stage dev` to Cloudflare deploys without dev mode. The Worker also
+ * serves `/_dev/*` only to requests for a loopback host.
+ */
 export const devStages = new Set(["dev"]);
 
 export default Alchemy.Stack(
@@ -22,13 +27,15 @@ export default Alchemy.Stack(
   },
   Effect.gen(function* KanshiStack() {
     const stage = yield* Alchemy.Stage;
+    // "local" only under `alchemy dev` (and not forced remote).
+    const local = (yield* Alchemy.ProviderMode.defaultProviderMode) === "local";
     const config = yield* ConfigProvider.ConfigProvider;
     const worker = yield* Kanshi.pipe(
       Effect.provideService(
         ConfigProvider.ConfigProvider,
         ConfigProvider.orElse(
           ConfigProvider.fromUnknown({
-            KANSHI_DEV_MODE: String(devStages.has(stage)),
+            KANSHI_DEV_MODE: String(local && devStages.has(stage)),
           }),
           config
         )

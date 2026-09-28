@@ -17,6 +17,7 @@ import { MonitorStatus } from "../domain/monitor.ts";
 import type { ChannelSelection, MonitorSummary } from "../domain/monitor.ts";
 import {
   afterAttempt,
+  deliverDue,
   dueOutbox,
   outboxDecision,
   outboxDueAt,
@@ -86,9 +87,6 @@ export interface WatchdogAlertsView {
   readonly episodes: readonly Episode[];
   readonly outbox: readonly OutboxEntry[];
 }
-
-/** Watchdog alert rows attempted per alarm run; the rest re-arm now. */
-const deliveriesPerRun = 25;
 
 /** The watchdog message for an outbox decision about an episode. */
 const watchdogMessage: Record<
@@ -674,17 +672,18 @@ export const RegistryLive = Registry.make(
               )
             )
           );
-          const due = dueOutbox(work, Date.now()).slice(0, deliveriesPerRun);
-          for (const entry of due) {
-            yield* sendOne(entry).pipe(
+          // Bounded like the Monitor's outbox: rows left over stay due and
+          // the alarm re-arms for them at once.
+          yield* deliverDue(dueOutbox(work, Date.now()), (entry) =>
+            sendOne(entry).pipe(
               Effect.catchCause((cause) =>
                 Effect.logError(
                   `watchdog alert ${entry.incidentId}:${entry.event} failed`,
                   cause
                 )
               )
-            );
-          }
+            )
+          );
           yield* rearm;
         }).pipe(Effect.withSpan("Registry.alarm"));
 

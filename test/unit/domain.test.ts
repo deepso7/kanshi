@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
+import { isLoopbackHost } from "../../src/dev/routes.ts";
 import {
   matchesExpectedStatus,
   parseExpectedStatus,
@@ -112,6 +113,29 @@ describe("target URL rules", () => {
   });
 });
 
+describe("dev routes host guard", () => {
+  it("accepts only loopback Host headers", () => {
+    for (const host of [
+      "localhost:1337",
+      "127.0.0.1",
+      "[::1]:1337",
+      "LOCALHOST",
+    ]) {
+      assert.isTrue(isLoopbackHost(host), host);
+    }
+    for (const host of [
+      undefined,
+      "",
+      "kanshi.example.workers.dev",
+      "localhost.example.com",
+      "10.0.0.1",
+      "bad host",
+    ]) {
+      assert.isFalse(isLoopbackHost(host), String(host));
+    }
+  });
+});
+
 describe("monitor input", () => {
   const options = { devMode: false, now: 1000 };
 
@@ -152,6 +176,46 @@ describe("monitor input", () => {
     );
     assert.strictEqual(patched.expectedStatus, "204");
     assert.strictEqual(patched.name, "New");
+  });
+
+  it("rejects bodyContains with HEAD, on the merged config", () => {
+    const headError =
+      "bodyContains: cannot be used with method HEAD (a HEAD response has no body)";
+    assert.deepStrictEqual(
+      buildConfig(
+        "m1",
+        {
+          bodyContains: "ok",
+          method: "HEAD",
+          name: "Site",
+          url: "example.com",
+        },
+        options
+      ),
+      Result.fail(headError)
+    );
+    const withKeyword = Result.getOrThrow(
+      buildConfig(
+        "m1",
+        { bodyContains: "ok", name: "Site", url: "example.com" },
+        options
+      )
+    );
+    // Only the method changes: the stored keyword makes it invalid.
+    assert.deepStrictEqual(
+      patchConfig(withKeyword, { method: "HEAD" }, options),
+      Result.fail(headError)
+    );
+    // Clearing the keyword in the same patch is fine.
+    const head = Result.getOrThrow(
+      patchConfig(withKeyword, { bodyContains: null, method: "HEAD" }, options)
+    );
+    assert.strictEqual(head.method, "HEAD");
+    // And a keyword cannot be added to a HEAD monitor.
+    assert.deepStrictEqual(
+      patchConfig(head, { bodyContains: "ok" }, options),
+      Result.fail(headError)
+    );
   });
 });
 

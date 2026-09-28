@@ -11,6 +11,7 @@ import type {
   Conflict,
   MonitorResponse,
   NotFound,
+  Unavailable,
 } from "../api/spec.ts";
 import { matchPattern } from "../http/route.ts";
 import type { Registry } from "../registry/registry.ts";
@@ -60,7 +61,7 @@ export interface UiDeps {
   readonly status: StatusService;
 }
 
-type ServiceError = BadRequest | Conflict | NotFound;
+type ServiceError = BadRequest | Conflict | NotFound | Unavailable;
 
 /** Headers on every HTML page: never cached, never framed. */
 const pageHeaders = {
@@ -206,6 +207,8 @@ const run = (
         Conflict: (error) =>
           Effect.succeed(errorPage(409, "Conflict", error.message)),
         NotFound: () => Effect.succeed(htmlResponse(notFoundPage(true), 404)),
+        Unavailable: (error) =>
+          Effect.succeed(errorPage(503, "Please try again", error.message)),
       })
     );
   });
@@ -566,11 +569,14 @@ export const makeUiRoutes = (deps: UiDeps) => {
     }
     const route = find(privateRoutes, request.method, segments);
     const signedIn = yield* hasSession(request);
-    if (route === null) {
-      return htmlResponse(notFoundPage(signedIn), 404);
-    }
-    if (!signedIn) {
-      return seeOther("/login");
+    if (route === null || !signedIn) {
+      // Rejected without running a handler: still read the body (see `run`).
+      if (isPost) {
+        yield* request.arrayBuffer.pipe(Effect.ignore);
+      }
+      return route === null
+        ? htmlResponse(notFoundPage(signedIn), 404)
+        : seeOther("/login");
     }
     return yield* run(
       route.handle,

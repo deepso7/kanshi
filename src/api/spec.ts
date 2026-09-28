@@ -41,6 +41,16 @@ export class Conflict extends Schema.TaggedError<Conflict>()(
   { httpApiStatus: 409 }
 ) {}
 
+/**
+ * The request was only partly applied and failed; retrying it is safe (its
+ * writes are idempotent) and completes it.
+ */
+export class Unavailable extends Schema.TaggedError<Unavailable>()(
+  "Unavailable",
+  { message: Schema.String },
+  { httpApiStatus: 503 }
+) {}
+
 /** A monitor's configuration, its `public` flag and its current state. */
 export const MonitorResponse = Schema.Struct({
   ...MonitorConfig.fields,
@@ -98,7 +108,7 @@ const monitorsGroup = HttpApiGroup.make("monitors")
       success: MonitorResponse,
     }),
     HttpApiEndpoint.patch("update", "/:id", {
-      error: [BadRequest, NotFound],
+      error: [BadRequest, NotFound, Unavailable],
       params: MonitorIdParams,
       payload: MonitorPatchInput.pipe(HttpApiSchema.asJson()),
       success: MonitorResponse,
@@ -156,7 +166,7 @@ const channelsGroup = HttpApiGroup.make("channels")
       success: ChannelView.pipe(HttpApiSchema.status(201)),
     }),
     HttpApiEndpoint.patch("update", "/:id", {
-      error: [BadRequest, NotFound],
+      error: [BadRequest, NotFound, Unavailable],
       params: ChannelIdParams,
       payload: ChannelPatchInput.pipe(HttpApiSchema.asJson()),
       success: ChannelView,

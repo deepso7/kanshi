@@ -58,6 +58,13 @@ test(
     const home = yield* raw("GET", "/");
     expect(home.status).toBe(303);
     expect(home.headers.get("location")).toBe("/login");
+    // A signed-out form post is redirected too (its body is read first).
+    const signedOutPost = yield* raw("POST", "/monitors", {
+      form: { name: "x".repeat(64 * 1024), url: "example.com" },
+      headers: { origin: own },
+    });
+    expect(signedOutPost.status).toBe(303);
+    expect(signedOutPost.headers.get("location")).toBe("/login");
     const login = yield* raw("GET", "/login");
     expect(login.status).toBe(200);
     expect(login.text).toContain('name="token"');

@@ -756,7 +756,7 @@ export const monitorFormPage = (data: MonitorFormData): Html => {
             }
           )}
           ${textField("bodyContains", "Body contains", values.bodyContains, {
-            hint: "Optional keyword the response must contain.",
+            hint: "Optional keyword the response must contain (GET only).",
           })}
         </div>
         <div class="grid">

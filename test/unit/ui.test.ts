@@ -89,7 +89,16 @@ describe("sparkline", () => {
       24
     );
     // max 100 at the top (pad 2), 0 at the bottom (24 - 2).
-    assert.strictEqual(path, "M0.0 2.0L10.0 12.0M30.0 22.0");
+    assert.strictEqual(path, "M0.0 2.0L10.0 12.0M30.0 22.0h0");
+    assert.strictEqual(sparklinePath([bucket(null), bucket(null)]), "");
+  });
+
+  it("draws an isolated bucket as a zero-length segment", () => {
+    assert.strictEqual(
+      sparklinePath([bucket(null), bucket(100), bucket(null)], 20, 24),
+      "M10.0 2.0h0"
+    );
+    assert.strictEqual(sparklinePath([bucket(100)], 20, 24), "M0.0 2.0h0");
     assert.strictEqual(sparklinePath([bucket(null), bucket(null)]), "");
   });
 
@@ -242,6 +251,19 @@ describe("forms", () => {
         )
       ),
       Result.fail("Name: Expected a value with a length of at least 1")
+    );
+    const headWithKeyword = monitorForm().map(
+      ([key, value]) => [key, key === "bodyContains" ? "ok" : value] as const
+    );
+    const headError =
+      "Body contains: only works with GET (a HEAD response has no body)";
+    assert.deepStrictEqual(
+      monitorCreateFromForm(headWithKeyword),
+      Result.fail(headError)
+    );
+    assert.deepStrictEqual(
+      monitorPatchFromForm(headWithKeyword),
+      Result.fail(headError)
     );
   });
 

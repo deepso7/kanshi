@@ -1,4 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 
 import { backoffMs, maxAttempts } from "../../src/alerts/delivery.ts";
 import type { Notification, OutboxEntry } from "../../src/domain/alert.ts";
@@ -7,6 +10,8 @@ import { initialState, nextAlarmAt } from "../../src/monitor/cycle.ts";
 import {
   afterAttempt,
   deferred,
+  deliverDue,
+  deliveryGroups,
   dueNotifications,
   dueOutbox,
   notificationFailed,
@@ -342,4 +347,65 @@ describe("alarm computation with alert work", () => {
       t0 + 60_000
     );
   });
+});
+
+describe("delivery per alarm run", () => {
+  it("groups rows per incident and channel, keeping their order", () => {
+    const down1 = row({ event: "down" });
+    const down2 = row({ channelId: "c2", event: "down" });
+    const up1 = row({ createdAt: t0 + 5, event: "up" });
+    const other = row({ event: "down", incidentId: "inc2" });
+    assert.deepStrictEqual(deliveryGroups([down1, down2, up1, other]), [
+      [down1, up1],
+      [down2],
+      [other],
+    ]);
+  });
+
+  it.effect(
+    "bounds concurrency and stops starting attempts after the budget",
+    () =>
+      Effect.gen(function* budgetTest() {
+        const rows = Array.from({ length: 12 }, (_, index) =>
+          row({
+            channelId: `c${String(index).padStart(2, "0")}`,
+            event: "down",
+          })
+        );
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const fiber = yield* deliverDue(
+          rows,
+          () =>
+            Effect.gen(function* slowAttempt() {
+              inFlight += 1;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              yield* Effect.sleep("10 seconds");
+              inFlight -= 1;
+            }),
+          { budgetMs: 15_000, concurrency: 5, rowsPerRun: 25 }
+        ).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("1 minute");
+        const attempted = yield* Fiber.join(fiber);
+        // Five start at 0s, five at 10s; at 20s the budget is spent.
+        assert.strictEqual(maxInFlight, 5);
+        assert.deepStrictEqual(attempted, rows.slice(0, 10));
+      })
+  );
+
+  it.effect("runs a group's rows in order and caps rows per run", () =>
+    Effect.gen(function* orderTest() {
+      const down = row({ event: "down" });
+      const up = row({ createdAt: t0 + 5, event: "up" });
+      const seen: OutboxEntry[] = [];
+      const attempted = yield* deliverDue(
+        [down, up, row({ channelId: "c2", event: "down" })],
+        (entry) => Effect.sync(() => seen.push(entry)).pipe(Effect.asVoid),
+        { budgetMs: 1000, concurrency: 5, rowsPerRun: 2 }
+      );
+      assert.deepStrictEqual(attempted, [down, up]);
+      assert.deepStrictEqual(seen, [down, up]);
+    })
+  );
 });

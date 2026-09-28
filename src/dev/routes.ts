@@ -5,6 +5,7 @@ import type * as HttpServerError from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
+import { isLoopback } from "../domain/url.ts";
 import { matchPattern } from "../http/route.ts";
 import type { Monitor } from "../monitor/monitor.ts";
 import type { Registry } from "../registry/registry.ts";
@@ -15,6 +16,19 @@ export interface DevDeps {
   readonly monitors: Effect.Success<typeof Monitor>;
   readonly registries: Effect.Success<typeof Registry>;
 }
+
+/**
+ * Whether a request's `Host` header names a loopback host. `/_dev/*` is
+ * only served to such requests, so a dev-mode Worker that somehow reached
+ * Cloudflare (whose hostnames are never loopback) still hides it.
+ */
+export const isLoopbackHost = (host: string | undefined): boolean => {
+  if (host === undefined || !URL.canParse(`http://${host}`)) {
+    return false;
+  }
+  const { hostname } = new URL(`http://${host}`);
+  return isLoopback(hostname.toLowerCase());
+};
 
 const statusParam = (value: string | null, fallback: number): number => {
   const status = Number(value ?? fallback);

@@ -309,6 +309,47 @@ describe("config diff", () => {
     ]);
   });
 
+  it("refuses to delete a channel a surviving monitor still lists", () => {
+    const current: Current = {
+      channels: [channelView("old"), channelView("other")],
+      monitors: [
+        // Unmanaged, outside the config: survives the sync.
+        currentMonitor("manual", {
+          channelIds: ["ch-old", "ch-other"],
+          managed: false,
+        }),
+        currentMonitor("manual2", { channelIds: ["ch-old"], managed: false }),
+        // Managed and dropped: deleted before the channel, so it is fine.
+        currentMonitor("gone", { channelIds: ["ch-other"] }),
+        currentMonitor("all", { managed: false }),
+      ],
+    };
+    const plan = diff(
+      { channels: [desiredChannel("other")], monitors: [] },
+      current
+    );
+    assert.deepStrictEqual(plan.errors, [
+      'channel "old" is not in the config but is still used by monitor(s) "manual", "manual2" (not managed by config sync); remove it from those monitors or keep the channel in the config',
+    ]);
+    assert.include(formatPlan(plan), "nothing was changed");
+
+    // Without the reference the delete goes ahead.
+    const unreferenced = diff(
+      { channels: [desiredChannel("other")], monitors: [] },
+      {
+        ...current,
+        monitors: current.monitors.filter(
+          (monitor) => !monitor.key.startsWith("manual")
+        ),
+      }
+    );
+    assert.deepStrictEqual(unreferenced.errors, []);
+    assert.deepStrictEqual(tags(unreferenced.steps), [
+      "DeleteMonitor gone",
+      "DeleteChannel old",
+    ]);
+  });
+
   it("orders creates and updates before deletes", () => {
     const current: Current = {
       channels: [channelView("old"), channelView("b", { name: "stale" })],
@@ -483,6 +524,13 @@ describe("config resolution", () => {
               name: "M",
               url: "https://10.0.0.1",
             },
+            {
+              bodyContains: "ok",
+              key: "h",
+              method: "HEAD",
+              name: "H",
+              url: "https://example.com",
+            },
           ],
         },
         {}
@@ -492,6 +540,7 @@ describe("config resolution", () => {
         'channel "b": url: alert channel URLs must use https',
         'monitor "m": url: private and reserved IP addresses are not allowed',
         'monitor "m": expectedStatus: invalid expected status "abc": use a code like 200 or a class like 2xx',
+        'monitor "h": bodyContains: cannot be used with method HEAD (a HEAD response has no body)',
       ]);
     })
   );

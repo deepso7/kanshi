@@ -58,8 +58,10 @@ export interface Desired {
 }
 
 /**
- * A monitor as the API reports it. `settings` (and `channels`, by **id**)
- * are only needed for managed monitors and adoption candidates.
+ * A monitor as the API reports it. `settings` are only needed for managed
+ * monitors and adoption candidates; `channels` (by **id**) for those, and
+ * for every other monitor when the sync deletes a channel (to refuse
+ * deleting a channel a surviving monitor still lists).
  */
 export interface CurrentMonitor {
   readonly channels?: ChannelRefs;
@@ -308,6 +310,41 @@ const diffMonitors = (
 };
 
 /**
+ * A managed channel dropped from the config must not be deleted while a
+ * monitor that survives the sync (one outside the config, e.g. created in
+ * the dashboard) still lists it. Monitors in the config are checked against
+ * the usable channel keys instead; managed monitors missing from the
+ * config are deleted first.
+ */
+const checkChannelDeletes = (
+  desired: Desired,
+  current: Current,
+  channelDeletes: readonly Step[],
+  errors: string[]
+) => {
+  const wanted = new Set(desired.monitors.map((monitor) => monitor.key));
+  const survivors = current.monitors.filter(
+    (monitor) => !monitor.managed && !wanted.has(monitor.key)
+  );
+  for (const step of channelDeletes) {
+    if (step._tag !== "DeleteChannel") {
+      continue;
+    }
+    const users = survivors.filter(
+      (monitor) =>
+        monitor.channels !== undefined &&
+        monitor.channels !== "all" &&
+        monitor.channels.includes(step.id)
+    );
+    if (users.length > 0) {
+      errors.push(
+        `channel "${step.key}" is not in the config but is still used by monitor(s) ${users.map((monitor) => `"${monitor.key}"`).join(", ")} (not managed by config sync); remove it from those monitors or keep the channel in the config`
+      );
+    }
+  }
+};
+
+/**
  * Diff the desired config against the API's current resources. Pure: the
  * caller resolves env vars, normalises URLs and hashes channel URLs first.
  */
@@ -326,6 +363,7 @@ export const diff = (
   }
   const channels = diffChannels(desired, current, opts, errors);
   const monitors = diffMonitors(desired, current, opts, errors);
+  checkChannelDeletes(desired, current, channels.deletes, errors);
   return {
     errors,
     steps: [

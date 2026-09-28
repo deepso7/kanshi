@@ -109,6 +109,22 @@ const checkExpectedStatus = (input: number | string) =>
     Result.mapError((message) => `expectedStatus: ${message}`)
   );
 
+/**
+ * A HEAD response has no body, so `bodyContains` could never match: the
+ * monitor would always be down with a keyword error. Checked on the final
+ * (built or merged) configuration, so a patch that only changes one of the
+ * two fields is caught too.
+ */
+export const checkMethodBody = (
+  method: MonitorConfig["method"],
+  bodyContains: string | null
+): Result.Result<void, string> =>
+  method === "HEAD" && bodyContains !== null
+    ? Result.fail(
+        "bodyContains: cannot be used with method HEAD (a HEAD response has no body)"
+      )
+    : Result.void;
+
 /** Build a new monitor's configuration (generation 0) from API input. */
 export const buildConfig = (
   id: string,
@@ -124,8 +140,11 @@ export const buildConfig = (
     const expectedStatus = yield* checkExpectedStatus(
       input.expectedStatus ?? monitorDefaults.expectedStatus
     );
+    const method = input.method ?? monitorDefaults.method;
+    const bodyContains = input.bodyContains ?? monitorDefaults.bodyContains;
+    yield* checkMethodBody(method, bodyContains);
     return {
-      bodyContains: input.bodyContains ?? monitorDefaults.bodyContains,
+      bodyContains,
       channels: normalizeChannels(input.channels ?? monitorDefaults.channels),
       createdAt: options.now,
       enabled: input.enabled ?? monitorDefaults.enabled,
@@ -137,7 +156,7 @@ export const buildConfig = (
       intervalSeconds,
       key: input.key ?? id,
       managed: input.managed ?? false,
-      method: input.method ?? monitorDefaults.method,
+      method,
       name: input.name,
       successThreshold:
         input.successThreshold ?? monitorDefaults.successThreshold,
@@ -181,12 +200,15 @@ export const patchConfig = (
       patch.expectedStatus === undefined
         ? config.expectedStatus
         : yield* checkExpectedStatus(patch.expectedStatus);
+    const method = patch.method ?? config.method;
+    const bodyContains =
+      patch.bodyContains === undefined
+        ? config.bodyContains
+        : patch.bodyContains;
+    yield* checkMethodBody(method, bodyContains);
     return {
       ...config,
-      bodyContains:
-        patch.bodyContains === undefined
-          ? config.bodyContains
-          : patch.bodyContains,
+      bodyContains,
       channels:
         patch.channels === undefined
           ? config.channels
@@ -196,7 +218,7 @@ export const patchConfig = (
       failureThreshold: patch.failureThreshold ?? config.failureThreshold,
       intervalSeconds,
       managed: patch.managed ?? config.managed,
-      method: patch.method ?? config.method,
+      method,
       name: patch.name ?? config.name,
       successThreshold: patch.successThreshold ?? config.successThreshold,
       timeoutMs: patch.timeoutMs ?? config.timeoutMs,

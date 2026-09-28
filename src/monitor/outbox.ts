@@ -1,3 +1,6 @@
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+
 import type { DeliveryResult } from "../alerts/delivery.ts";
 import { backoffMs, maxAttempts } from "../alerts/delivery.ts";
 import type { AlertEvent, Notification, OutboxEntry } from "../domain/alert.ts";
@@ -259,3 +262,76 @@ export const deferred = (
   nextAttemptAt: now + backoffMs(Math.max(1, entry.attempts)),
   updatedAt: now,
 });
+
+/**
+ * How much delivery one alarm run does. Rows past `rowsPerRun`, or not
+ * started within `budgetMs`, stay pending and due, so the re-armed alarm
+ * fires again at once; the check step runs before delivery, so slow
+ * channels cannot hold back checks.
+ */
+export interface DeliveryLimits {
+  /** Stop starting attempts after this long; in-flight ones finish. */
+  readonly budgetMs: number;
+  /** Attempts in flight at once. */
+  readonly concurrency: number;
+  readonly rowsPerRun: number;
+}
+
+export const deliveryLimits: DeliveryLimits = {
+  budgetMs: 30_000,
+  concurrency: 5,
+  rowsPerRun: 25,
+};
+
+/**
+ * Due rows grouped per (incident, channel), each group and the groups in
+ * `due` order. A group's rows run one after another (an `up` row reads
+ * the outcome of its `down` row); different groups can run concurrently.
+ */
+export const deliveryGroups = (
+  due: readonly OutboxEntry[]
+): readonly (readonly OutboxEntry[])[] => {
+  const groups = new Map<string, OutboxEntry[]>();
+  for (const entry of due) {
+    const group = groups.get(key(entry));
+    if (group === undefined) {
+      groups.set(key(entry), [entry]);
+    } else {
+      group.push(entry);
+    }
+  }
+  return [...groups.values()];
+};
+
+/**
+ * Attempt up to `rowsPerRun` of the due rows with bounded concurrency,
+ * starting no attempt once `budgetMs` has passed. `attempt` must not fail
+ * (it records its own outcome). Returns the rows attempted.
+ */
+export const deliverDue = <R>(
+  due: readonly OutboxEntry[],
+  attempt: (entry: OutboxEntry) => Effect.Effect<void, never, R>,
+  limits: DeliveryLimits = deliveryLimits
+): Effect.Effect<readonly OutboxEntry[], never, R> =>
+  Effect.gen(function* deliverDueEffect() {
+    const deadline = (yield* Clock.currentTimeMillis) + limits.budgetMs;
+    const attempted: OutboxEntry[] = [];
+    yield* Effect.forEach(
+      deliveryGroups(due.slice(0, limits.rowsPerRun)),
+      (group) =>
+        Effect.forEach(
+          group,
+          (entry) =>
+            Effect.gen(function* attemptWithinBudget() {
+              if ((yield* Clock.currentTimeMillis) >= deadline) {
+                return;
+              }
+              attempted.push(entry);
+              yield* attempt(entry);
+            }),
+          { discard: true }
+        ),
+      { concurrency: limits.concurrency, discard: true }
+    );
+    return attempted;
+  });
