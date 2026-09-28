@@ -22,6 +22,7 @@ import { Registry, RegistryLive } from "./registry/registry.ts";
 import { makeChannelService } from "./service/channels.ts";
 import { makeMonitorService } from "./service/monitors.ts";
 import { makeStatusService, workersHistoryCache } from "./service/status.ts";
+import { makeUiRoutes } from "./ui/routes.ts";
 import { runWatchdog } from "./watchdog/run.ts";
 
 /** The watchdog's Cron Trigger. */
@@ -107,6 +108,14 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
       HttpRouter.toHttpEffect
     );
     const dev = makeDevRoutes({ monitors, registries });
+    const ui = makeUiRoutes({
+      apiToken,
+      channels: channelService,
+      devMode,
+      monitors: monitorService,
+      registries,
+      status: statusService,
+    });
 
     return {
       fetch: Effect.map(api, (apiHttp) => {
@@ -119,10 +128,13 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
         return Effect.gen(function* route() {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const { pathname } = new URL(request.url, "http://internal");
+          if (pathname === "/api" || pathname.startsWith("/api/")) {
+            return yield* apiOr404;
+          }
           if (devMode && pathname.startsWith("/_dev/")) {
             return yield* dev;
           }
-          return yield* apiOr404;
+          return yield* ui;
         });
       }),
     };

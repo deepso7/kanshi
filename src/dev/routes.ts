@@ -5,6 +5,7 @@ import type * as HttpServerError from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
+import { matchPattern } from "../http/route.ts";
 import type { Monitor } from "../monitor/monitor.ts";
 import type { Registry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
@@ -37,35 +38,6 @@ interface RouteInput {
   readonly request: HttpServerRequest.HttpServerRequest;
   readonly url: URL;
 }
-
-/**
- * Match `segments` against a pattern like `monitors/:id/maintain`; a
- * trailing `*` matches any rest. Returns the `:name` values, or null.
- */
-const matchPattern = (
-  pattern: string,
-  segments: readonly string[]
-): readonly string[] | null => {
-  const parts = pattern.split("/");
-  const rest = parts.at(-1) === "*";
-  const fixed = rest ? parts.slice(0, -1) : parts;
-  if (
-    segments.length < fixed.length ||
-    (!rest && segments.length > fixed.length)
-  ) {
-    return null;
-  }
-  const params: string[] = [];
-  for (const [index, part] of fixed.entries()) {
-    const segment = segments[index] ?? "";
-    if (part.startsWith(":")) {
-      params.push(segment);
-    } else if (part !== segment) {
-      return null;
-    }
-  }
-  return params;
-};
 
 const param = (input: RouteInput, index = 0): string =>
   input.params[index] ?? "";
