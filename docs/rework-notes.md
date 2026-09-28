@@ -990,3 +990,127 @@ only; `952ea2c` fixes it.
   could add one).
 - Phase 7: the dashboard shows `managed` but does not stop editing a
   managed monitor or channel; `kanshi sync` will overwrite such edits.
+
+## Phase 7 (config as code, docs, cleanup)
+
+### Layout
+
+- `src/config.ts`: `defineConfig`, `env("NAME")` and the Schemas
+  `KanshiConfig`, `ChannelDefinition` (`key`, `kind`, `name`, `url`: string
+  or `{ env }`) and `MonitorDefinition` (the create input without
+  `managed`, `key` required, `channels` = `"all"` or channel **keys**).
+- `src/sync/desired.ts`: `resolveDesired(config, env)` reads env vars,
+  normalises URLs (`checkTargetUrl`, `checkChannelUrl`) and expected
+  statuses, applies `monitorDefaults` (now exported from
+  `src/domain/monitor-input.ts` and used by `buildConfig`) and hashes
+  channel URLs with the Worker's `hashUrl`. Reports every problem.
+- `src/sync/plan.ts`: the pure `diff(desired, current, { adopt })` ->
+  `{ errors, steps }` and `formatPlan`. `src/sync/sync.ts`: loads the
+  current state over the API, diffs, prints, applies. `scripts/kanshi.ts`:
+  the CLI (`node:util` `parseArgs`, config loaded with a dynamic import and
+  decoded with `onExcessProperty: "error"`).
+- `kanshi.config.ts` (example, channel URLs from env vars),
+  `.env.example`, `README.md`, `AGENTS.md` rewritten.
+
+### Sync rules
+
+- Reads `GET /api/channels`, `GET /api/monitors`, then
+  `GET /api/monitors/:id` (concurrency 8) only for managed monitors and
+  monitors whose key is in the config.
+- Steps run one at a time in this order: channel creates/updates, monitor
+  updates/creates (config order), monitor deletes, channel deletes. Channel
+  keys in a monitor are resolved to ids at apply time (created channels are
+  added to the map as they are created).
+- Only `managed` resources are updated or deleted. A config key that belongs
+  to an unmanaged resource is an error; **addition:** `--adopt` turns it
+  into an update with `managed: true`. `pnpm seed` passes `--adopt`, so dev
+  data created by the old seed (unmanaged) is taken over instead of failing.
+- Every owned monitor field is compared with the defaults applied, so a
+  field removed from the config is reset. Channels compare `kind`, `name`
+  and `urlHash`; a changed hash sends the new URL. Monitor channels compare
+  as sets of keys; an id of a deleted channel never matches.
+- A monitor may reference a dashboard-created channel by key. A key of a
+  managed channel that is not in the config (about to be deleted) is
+  "unknown".
+- Config errors (Schema, env vars, URL/expected-status rules, duplicate or
+  colliding keys, unknown channel keys) abort before any request that
+  changes something. Rules the client cannot know (dev-only 5s intervals,
+  quota) fail at the API; the run stops at the first failed step with "N of
+  M change(s) were applied", and a re-run converges.
+- `--wait <s>` retries only transport errors of the first request (the dev
+  stack may still be starting); `pnpm seed` uses 30.
+
+### API change
+
+`PATCH /api/monitors/:id` with `managed` now also updates the Registry row
+(new RPC `registry.setManaged`); before, only the Monitor's config changed
+and the list (which sync reads) kept the old flag.
+
+### Dashboard
+
+"config" badge in the dashboard list, "managed by config" in the monitor
+header (and settings, as before) and on channels, and a warning on the
+monitor edit form and the channel edit panel that the next sync overwrites
+edits. Editing is not blocked.
+
+### Cleanup
+
+- Tracked files contain no Tinybird, Drizzle, D1, engine or harness-worker
+  code or config. `drizzle-orm`, `drizzle-kit`, `@effect/sql-d1` and
+  `@effect/sql-pg` remain in the lockfile only as alchemy's (optional,
+  auto-installed) peers; the `pnpm-workspace.yaml` overrides keep them on
+  the same Effect version.
+- `@effect/platform-node` is **kept** (deviation from the task's "remove if
+  unused"): alchemy's CLI runs under Node (`#!/usr/bin/env node`) and loads
+  it as an optional peer for `alchemy dev`/`deploy` (`PlatformServices`,
+  `WorkerBridge`).
+- Scripts: `dev`, `seed`, `kanshi`, `deploy` / `destroy` (now
+  `--stage prod`), `typecheck` (new, `tsc --noEmit -p .`), `test`,
+  `test:integ`, `check`, `fix`. `scripts/seed.ts` is gone.
+- Deploy: `KANSHI_API_TOKEN` is read with `Config.Redacted`, which alchemy
+  deploys as a `secret_text` binding; the cron and both DO classes are
+  declared by the Worker. Not deployed to a real account in this phase.
+
+### Tests
+
+- Unit: `test/unit/sync.test.ts` (creates, no-op, field updates, reset to
+  default, URL hash change, channel set comparison and dangling ids,
+  dashboard channels by key, unknown keys, deletes and their order,
+  unmanaged left alone, key collision, adopt, duplicate keys, plan text,
+  env/normalisation/hash resolution, the example and dev configs decode)
+  and a managed-warning test in `test/unit/ui.test.ts`.
+- Integration: `test/integ/sync.test.ts` on stage `integ-sync` (about 7s):
+  create, re-run no-op, dry run, rotated URL and monitor changes, dashboard
+  edit reverted, deletes, collision error with nothing applied, adopt,
+  empty config deletes only managed resources, env and auth errors.
+- Manual: `pnpm dev`, `pnpm kanshi sync` (collision errors without
+  `--adopt`), `pnpm seed` (adopted, then "No changes."), `--help`, a bad
+  flag, a wrong token (401 message), missing env vars, an unreachable URL,
+  and the dashboard badges and warnings.
+
+### Commands (end of phase 7)
+
+- `pnpm typecheck`: pass
+- `pnpm check`: pass
+- `pnpm test`: pass (164 tests)
+- `pnpm test:integ`: pass (28 tests, about 3.7 minutes)
+
+Commit history caveats: `82c4e01` also removed `scripts/seed.ts` (it was
+staged), so `pnpm seed` points to a missing file until `d801bfb`; checks and
+tests pass there. `30ece7d` fails `pnpm typecheck` and `pnpm check`;
+`a3e7f62` fixes it.
+
+### Open issues
+
+- Sync is not transactional: a failure mid-run leaves a partial state that
+  the next run completes. Two syncs at once can race (e.g. both create the
+  same key; the second gets 409).
+- The CLI normalises with the dev-stage URL rules (loopback allowed); a
+  loopback URL in a production config fails at the API, not in the plan.
+- Deleting a managed channel does not edit monitors that still list it (as
+  before); sync only reports them as changed when they are in the config.
+- Renaming a key deletes and recreates the resource (history is lost).
+- `.alchemy/` deploy state is local to the deploying machine
+  (`Alchemy.localState()`).
+- The local `.env` (untracked) still has old `TINYBIRD_*` variables; they
+  are unused and can be deleted.
