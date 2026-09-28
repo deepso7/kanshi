@@ -73,14 +73,16 @@ export const staleThresholdMs = (intervalSeconds: number): number =>
   2 * intervalSeconds * 1000 + staleGraceMs;
 
 /**
- * The last time the monitor was known to be checked or (re)configured.
- * Every edit resets the check schedule, so it restarts the clock too.
+ * The last time the monitor was known to be checked, created, or had its
+ * check schedule restarted (enable or probe-affecting edit). Cosmetic edits
+ * (name, channels, public, managed) bump `updatedAt` but do not restart the
+ * schedule, so they must not restart the clock.
  */
 export const lastSignOfLife = (snapshot: MonitorSnapshot): number =>
   Math.max(
     snapshot.state.lastCheckedAt ?? 0,
     snapshot.config.createdAt,
-    snapshot.config.updatedAt
+    snapshot.state.scheduleResetAt
   );
 
 /** Enabled, and no check for more than two intervals plus two minutes. */

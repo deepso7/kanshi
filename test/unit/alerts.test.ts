@@ -5,6 +5,7 @@ import {
   backoffMs,
   classifyStatus,
   deliver,
+  errorBodyBytes,
   maxAttempts,
 } from "../../src/alerts/delivery.ts";
 import type { AlertMessage } from "../../src/alerts/message.ts";
@@ -231,6 +232,57 @@ describe("deliver", () => {
         permanent: false,
         status: null,
       });
+    })
+  );
+
+  it.effect(
+    "reads a bounded prefix of a failed response's body, then cancels it",
+    () =>
+      Effect.gen(function* boundedBodyTest() {
+        const chunk = new TextEncoder().encode("x".repeat(512));
+        let pulled = 0;
+        let cancelled = false;
+        // An endless body: `response.text()` would never return.
+        const endless = new ReadableStream<Uint8Array>({
+          cancel: () => {
+            cancelled = true;
+          },
+          pull: (controller) => {
+            pulled += 1;
+            controller.enqueue(chunk);
+          },
+        });
+        const result = yield* deliver(request, () =>
+          Promise.resolve(new Response(endless, { status: 500 }))
+        );
+        assert.deepStrictEqual(result, {
+          _tag: "Failed",
+          error: `HTTP 500: ${"x".repeat(200)}`,
+          permanent: false,
+          status: 500,
+        });
+        assert.isTrue(cancelled);
+        // The stream may pull ahead a chunk or two, never much more.
+        assert.isAtMost(pulled * chunk.byteLength, errorBodyBytes + 3 * 512);
+      })
+  );
+
+  it.effect("does not read the body of a delivered response", () =>
+    Effect.gen(function* deliveredBodyTest() {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        cancel: () => {
+          cancelled = true;
+        },
+        pull: (controller) => {
+          controller.enqueue(new Uint8Array(512));
+        },
+      });
+      const result = yield* deliver(request, () =>
+        Promise.resolve(new Response(body, { status: 200 }))
+      );
+      assert.deepStrictEqual(result, { _tag: "Delivered", status: 200 });
+      assert.isTrue(cancelled);
     })
   );
 });

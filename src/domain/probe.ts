@@ -59,7 +59,7 @@ const firstLine = (error: unknown): string =>
     ?.slice(0, 200) ?? "";
 
 /** Read at most `limit` bytes of a body, then cancel the rest. */
-const readBounded = async (
+export const readBounded = async (
   body: ReadableStream<Uint8Array> | null,
   limit: number
 ): Promise<Uint8Array> => {

@@ -23,7 +23,10 @@ export const isProbeAffecting = (
 ): boolean =>
   probeAffectingFields.some((field) => !sameValue(before[field], after[field]));
 
-/** Clears the in-flight check and any pending confirm; next check now. */
+/**
+ * Clears the in-flight check and any pending confirm; next check now. Stamps
+ * `scheduleResetAt`, which the watchdog measures staleness from.
+ */
 const restartChecks = (state: MonitorState, now: number): MonitorState => ({
   ...state,
   confirmCounted: false,
@@ -32,6 +35,7 @@ const restartChecks = (state: MonitorState, now: number): MonitorState => ({
   nextCheckAt: now,
   nextCheckKind: "scheduled",
   nextSlotAt: now,
+  scheduleResetAt: now,
   successStreak: 0,
 });
 

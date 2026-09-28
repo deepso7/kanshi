@@ -149,6 +149,15 @@ export const migrations = SqliteMigrator.fromRecord({
     yield* sql`UPDATE state SET next_maintenance_at = ${Date.now()}
       WHERE next_maintenance_at IS NULL`;
   }),
+  "4_schedule_reset": Effect.gen(function* scheduleResetMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    // When the check schedule last restarted. Existing monitors: the last
+    // edit is the best (conservative) estimate.
+    yield* sql`ALTER TABLE state
+      ADD COLUMN schedule_reset_at INTEGER NOT NULL DEFAULT 0`;
+    yield* sql`UPDATE state SET schedule_reset_at = coalesce(
+      (SELECT updated_at FROM config WHERE singleton = 1), 0)`;
+  }),
 });
 
 /** Tables wiped by `destroy()`; the tombstone is kept. */
@@ -303,7 +312,8 @@ export const recentChecks = Effect.fn("MonitorStorage.recentChecks")(
 
 /**
  * Counted samples since `since`, and per-bucket (`bucketMs` wide, from
- * `since`) mean latency of successful checks and counted failures.
+ * `since`) mean latency of successful counted checks and counted failures.
+ * Manual (uncounted) checks are left out of both.
  */
 export const readRecent = Effect.fn("MonitorStorage.readRecent")(
   function* readRecentEffect(since: number, bucketMs: number) {
@@ -319,9 +329,9 @@ export const readRecent = Effect.fn("MonitorStorage.readRecent")(
       latencyMs: number | null;
     }>`SELECT CAST((at - ${since}) / ${bucketMs} AS INTEGER) AS bucket,
         avg(CASE WHEN ok = 1 THEN latency_ms END) AS latency_ms,
-        sum(CASE WHEN ok = 0 AND counted = 1 THEN 1 ELSE 0 END) AS failures
+        sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failures
       FROM checks
-      WHERE at >= ${since}
+      WHERE counted = 1 AND at >= ${since}
       GROUP BY bucket
       ORDER BY bucket`;
     return {

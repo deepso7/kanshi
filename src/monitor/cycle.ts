@@ -28,6 +28,7 @@ export const initialState = (now: number): MonitorState => ({
   nextSlotAt: now,
   openIncidentId: null,
   rolledUpThrough: null,
+  scheduleResetAt: now,
   status: "unknown",
   successStreak: 0,
   summaryRevision: 1,

@@ -12,6 +12,7 @@ import type {
   MonitorSnapshot,
 } from "../../src/domain/monitor.ts";
 import { initialState } from "../../src/monitor/cycle.ts";
+import { applyConfigChange } from "../../src/monitor/reset.ts";
 import type {
   WatchdogRow,
   WatchdogStatus,
@@ -55,6 +56,7 @@ const snapshot = (
   overrides: {
     readonly config?: Partial<MonitorConfig>;
     readonly lastCheckedAt?: number | null;
+    readonly scheduleResetAt?: number;
     readonly summaryRevision?: number;
   } = {}
 ): MonitorSnapshot => ({
@@ -62,6 +64,7 @@ const snapshot = (
   state: {
     ...initialState(t0),
     lastCheckedAt: overrides.lastCheckedAt ?? null,
+    scheduleResetAt: overrides.scheduleResetAt ?? t0,
     status: "up",
     summaryRevision: overrides.summaryRevision ?? 7,
   },
@@ -174,7 +177,7 @@ describe("staleness", () => {
     assert.strictEqual(staleThresholdMs(5), 2 * minute + 10_000);
   });
 
-  it("measures from the last check, creation or edit, whichever is latest", () => {
+  it("measures from the last check, creation or schedule reset, whichever is latest", () => {
     assert.strictEqual(lastSignOfLife(snapshot()), t0);
     assert.strictEqual(
       lastSignOfLife(snapshot({ lastCheckedAt: t0 + minute })),
@@ -183,12 +186,77 @@ describe("staleness", () => {
     assert.strictEqual(
       lastSignOfLife(
         snapshot({
-          config: { updatedAt: t0 + 5 * minute },
           lastCheckedAt: t0 + minute,
+          scheduleResetAt: t0 + 5 * minute,
         })
       ),
       t0 + 5 * minute
     );
+    // `updatedAt` alone (a cosmetic edit) is not a sign of life.
+    assert.strictEqual(
+      lastSignOfLife(
+        snapshot({
+          config: { updatedAt: t0 + 5 * minute },
+          lastCheckedAt: t0 + minute,
+        })
+      ),
+      t0 + minute
+    );
+  });
+
+  describe("edits of an already-stale monitor", () => {
+    // Last checked at t0, stale since t0 + 4 minutes; edited at t0 + 10.
+    const stale = snapshot({ lastCheckedAt: t0 });
+    const editedAt = t0 + 10 * minute;
+    const edit = (patch: Partial<MonitorConfig>) => {
+      const after = { ...stale.config, ...patch, updatedAt: editedAt };
+      const change = applyConfigChange(
+        stale.config,
+        after,
+        stale.state,
+        editedAt
+      );
+      return { config: change.config, state: change.state };
+    };
+
+    it("stays stale after a cosmetic edit", () => {
+      assert.isTrue(isStale(stale, editedAt));
+      for (const patch of [
+        { name: "Renamed" },
+        { channels: ["c1"] },
+        { managed: true },
+      ] satisfies readonly Partial<MonitorConfig>[]) {
+        const edited = edit(patch);
+        assert.strictEqual(edited.config.updatedAt, editedAt);
+        assert.isTrue(isStale(edited, editedAt + 1), JSON.stringify(patch));
+      }
+    });
+
+    it("restarts the clock on a probe-affecting edit", () => {
+      const edited = edit({ timeoutMs: 5000 });
+      assert.strictEqual(lastSignOfLife(edited), editedAt);
+      assert.isFalse(isStale(edited, editedAt + 4 * minute));
+      assert.isTrue(isStale(edited, editedAt + 4 * minute + 1));
+    });
+
+    it("restarts the clock on enable", () => {
+      const disabledAt = t0 + 5 * minute;
+      const disabled = applyConfigChange(
+        stale.config,
+        { ...stale.config, enabled: false, updatedAt: disabledAt },
+        stale.state,
+        disabledAt
+      );
+      const enabled = applyConfigChange(
+        disabled.config,
+        { ...disabled.config, enabled: true, updatedAt: editedAt },
+        disabled.state,
+        editedAt
+      );
+      const value = { config: enabled.config, state: enabled.state };
+      assert.strictEqual(lastSignOfLife(value), editedAt);
+      assert.isFalse(isStale(value, editedAt + 4 * minute));
+    });
   });
 
   it("is stale only strictly past the threshold, and only when enabled", () => {

@@ -427,6 +427,7 @@ describe("reset rules", () => {
     assert.strictEqual(change.state.failureStreak, 0);
     assert.strictEqual(change.state.nextCheckAt, t0 + 999);
     assert.strictEqual(change.state.nextCheckKind, "scheduled");
+    assert.strictEqual(change.state.scheduleResetAt, t0 + 999);
     assert.isNull(change.state.inflight);
     assert.isNull(change.closeIncident);
     assert.strictEqual(change.state.openIncidentId, state.openIncidentId);
@@ -442,6 +443,7 @@ describe("reset rules", () => {
     );
     assert.strictEqual(change.config.generation, 0);
     assert.strictEqual(change.state.failureStreak, state.failureStreak);
+    assert.strictEqual(change.state.scheduleResetAt, state.scheduleResetAt);
     assert.strictEqual(change.state.summaryRevision, state.summaryRevision + 1);
     const noop = applyConfigChange(config, config, state, t0 + 999);
     assert.strictEqual(noop.state.summaryRevision, state.summaryRevision);
@@ -485,6 +487,7 @@ describe("reset rules", () => {
     );
     assert.strictEqual(enabled.config.generation, 2);
     assert.strictEqual(enabled.state.status, "unknown");
+    assert.strictEqual(enabled.state.scheduleResetAt, t0 + 2000);
     assert.strictEqual(nextAlarmAt(enabled.config, enabled.state), t0 + 2000);
     const failed = runDue(enabled.config, enabled.state, down, t0 + 2000);
     const reopened = runDue(

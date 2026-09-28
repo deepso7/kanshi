@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 
 import type { FetchLike } from "../domain/probe.ts";
+import { readBounded } from "../domain/probe.ts";
 import type { AlertRequest } from "./message.ts";
 
 /** Attempts per outbox row before it is marked `failed`. */
@@ -9,6 +10,10 @@ export const backoffBaseMs = 30_000;
 export const backoffMaxMs = 30 * 60_000;
 /** How long one delivery request may take. */
 export const deliveryTimeoutMs = 10_000;
+/** Bytes of a failed response's body read for the error message. */
+export const errorBodyBytes = 1024;
+/** Characters of that body kept in the error message. */
+const errorBodyChars = 200;
 
 /**
  * Delay before the next attempt after `attempts` failed ones (>= 1):
@@ -71,8 +76,16 @@ export const deliver = Effect.fn("Alerts.deliver")(function* deliverEffect(
         redirect: "follow",
         signal: AbortSignal.timeout(timeoutMs),
       });
-      const text = await response.text().catch(() => "");
-      return { status: response.status, text: text.slice(0, 200) };
+      if (classifyStatus(response.status) === "delivered") {
+        await response.body?.cancel().catch(() => null);
+        return { status: response.status, text: "" };
+      }
+      // The endpoint is not trusted: never buffer its whole body.
+      const bytes = await readBounded(response.body, errorBodyBytes).catch(
+        () => new Uint8Array(0)
+      );
+      const text = new TextDecoder().decode(bytes);
+      return { status: response.status, text: text.slice(0, errorBodyChars) };
     },
   }).pipe(Effect.result);
 

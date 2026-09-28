@@ -111,6 +111,11 @@ export const MonitorState = Schema.Struct({
   nextSlotAt: NonNegativeInt,
   openIncidentId: Schema.NullOr(Schema.String),
   rolledUpThrough: Schema.NullOr(Schema.String),
+  /**
+   * When the check schedule last restarted: creation, enable, disable or a
+   * probe-affecting edit. Cosmetic edits leave it alone.
+   */
+  scheduleResetAt: NonNegativeInt,
   status: MonitorStatus,
   successStreak: NonNegativeInt,
   summaryRevision: NonNegativeInt,
