@@ -963,3 +963,30 @@ test of a deleted channel -> 404 page), `/status` and
 `/api/public/status` while the flip target was down (banner "Major
 outage", open incident), cookie-authenticated `/api` writes with and
 without Origin, logout. No errors in the dev log.
+
+### Commands (end of phase 6)
+
+- `pnpm exec tsc --noEmit -p .`: pass
+- `pnpm check`: pass
+- `pnpm test`: pass (142 tests)
+- `pnpm test:integ`: pass (26 tests, about 3.5 minutes)
+
+Commit `e336350` (the notes) fails `pnpm check` on Markdown formatting
+only; `952ea2c` fixes it.
+
+### Open issues and for later phases
+
+- No rate limit on `/login`; the token is long and random, but repeated
+  wrong tokens are only logged.
+- Safari may refuse `Secure` cookies on `http://localhost`, so signing in
+  to the local dev stack may need Chrome or Firefox. Deployed stages are
+  https.
+- The CSP allows inline script and style (one static block each); a hash
+  or nonce would be stricter.
+- On `*.workers.dev` the Cache API is a no-op, so the status page reads
+  every public monitor's history on every request. Fine at the target
+  scale; a custom domain enables the cache.
+- The status page has no title or branding setting yet (phase 7 config
+  could add one).
+- Phase 7: the dashboard shows `managed` but does not stop editing a
+  managed monitor or channel; `kanshi sync` will overwrite such edits.
