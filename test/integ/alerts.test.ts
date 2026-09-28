@@ -5,6 +5,7 @@ import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
 
+import type { ChannelTestResult } from "../../src/api/spec.ts";
 import type { ChannelView } from "../../src/domain/channel.ts";
 import { setup } from "./harness.ts";
 
@@ -13,6 +14,52 @@ const { create, devUrl, send, test } = setup("integ-alerts");
 /** A sink URL whose events can be told apart by `tag`. */
 const sinkUrl = (tag: string, query = "") =>
   devUrl(`/webhook?tag=${tag}${query}`);
+
+interface SinkEvent {
+  readonly at: number;
+  readonly detail: {
+    readonly body: string;
+    readonly idempotencyKey: string | null;
+    readonly query: string;
+    readonly respondedWith: number;
+  };
+  readonly id: number;
+}
+
+/** A webhook alert as received by the sink. */
+interface Received {
+  readonly event: "down" | "test" | "up";
+  readonly id: string;
+  readonly idempotencyKey: string | null;
+  readonly recovered: boolean;
+  readonly respondedWith: number;
+  readonly title: string;
+}
+
+/** Webhook alerts the sink received for `tag`, oldest first. */
+const received = (tag: string) =>
+  send("GET", "/_dev/events").pipe(
+    Effect.map((reply) =>
+      (reply.body as readonly SinkEvent[])
+        .filter((event) =>
+          new URLSearchParams(event.detail.query).getAll("tag").includes(tag)
+        )
+        .map((event) => {
+          const body = JSON.parse(event.detail.body) as Omit<
+            Received,
+            "idempotencyKey" | "respondedWith"
+          >;
+          return {
+            event: body.event,
+            id: body.id,
+            idempotencyKey: event.detail.idempotencyKey,
+            recovered: body.recovered,
+            respondedWith: event.detail.respondedWith,
+            title: body.title,
+          } satisfies Received;
+        })
+    )
+  );
 
 const createChannel = Effect.fn("Test.createChannel")(function* createChannel(
   body: Record<string, unknown>
@@ -97,6 +144,45 @@ test(
         body: { name: "x" },
       })).status
     ).toBe(404);
+  }),
+  { timeout: 60_000 }
+);
+
+test(
+  "the test endpoint sends a test alert and reports the result",
+  Effect.gen(function* channelTestEndpointTest() {
+    const tag = crypto.randomUUID();
+    const channel = yield* createChannel({ url: yield* sinkUrl(tag) });
+    const reply = yield* send("POST", `/api/channels/${channel.id}/test`);
+    expect(reply.status).toBe(200);
+    expect(reply.body as ChannelTestResult).toEqual({
+      delivered: true,
+      error: null,
+      status: 200,
+    });
+    const [event, ...rest] = yield* received(tag);
+    expect(rest).toHaveLength(0);
+    expect(event?.event).toBe("test");
+    expect(event?.idempotencyKey).toBe(event?.id ?? "");
+    expect(event?.title).toContain(channel.name);
+
+    const failingTag = crypto.randomUUID();
+    const failing = yield* createChannel({
+      url: yield* sinkUrl(failingTag, "&fail=503"),
+    });
+    const failed = yield* send("POST", `/api/channels/${failing.id}/test`);
+    expect(failed.status).toBe(200);
+    expect(failed.body as ChannelTestResult).toEqual({
+      delivered: false,
+      error: "HTTP 503: failed",
+      status: 503,
+    });
+
+    expect((yield* send("POST", "/api/channels/missing/test")).status).toBe(
+      404
+    );
+    yield* send("DELETE", `/api/channels/${channel.id}`);
+    yield* send("DELETE", `/api/channels/${failing.id}`);
   }),
   { timeout: 60_000 }
 );

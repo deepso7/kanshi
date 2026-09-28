@@ -94,6 +94,14 @@ const monitorsGroup = HttpApiGroup.make("monitors")
   .prefix("/api/monitors")
   .middleware(ApiAuth);
 
+/** The result of `POST /api/channels/:id/test`. */
+export const ChannelTestResult = Schema.Struct({
+  delivered: Schema.Boolean,
+  error: Schema.NullOr(Schema.String),
+  status: Schema.NullOr(Schema.Number),
+});
+export type ChannelTestResult = typeof ChannelTestResult.Type;
+
 const ChannelIdParams = Schema.Struct({ id: Schema.NonEmptyString });
 
 const channelsGroup = HttpApiGroup.make("channels")
@@ -116,6 +124,11 @@ const channelsGroup = HttpApiGroup.make("channels")
       error: NotFound,
       params: ChannelIdParams,
       success: HttpApiSchema.NoContent,
+    }),
+    HttpApiEndpoint.post("test", "/:id/test", {
+      error: NotFound,
+      params: ChannelIdParams,
+      success: ChannelTestResult,
     })
   )
   .prefix("/api/channels")

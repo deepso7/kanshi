@@ -26,8 +26,8 @@ const maxDelayMs = 60_000;
  * - `GET /_dev/target?status=500&delay=2000&body=...` fake target
  * - `GET /_dev/target/flip/:name` 200 while up, 503 while down;
  *   `POST` with `?up=true|false` sets it, without toggles it
- * - `POST /_dev/webhook?fail=500` alert sink, recorded in `dev_events`;
- *   `GET /_dev/events` lists them
+ * - `POST /_dev/webhook?fail=500&failTimes=1&tag=x` alert sink, recorded
+ *   in `dev_events` and logged; `GET /_dev/events` lists them
  * - `GET /_dev/registry` every Registry row, whatever its lifecycle
  * - `GET /_dev/monitors/:id` a monitor's raw status, checks and incidents
  */
@@ -45,6 +45,26 @@ const target = (url: URL) =>
     const body = url.searchParams.get("body") ?? (status < 400 ? "ok" : "down");
     return HttpServerResponse.text(body, { status });
   });
+
+/** One console line for a received alert, whatever the channel format. */
+const alertSummary = (url: URL, body: string): string => {
+  const title = url.searchParams.get("title");
+  let text = body;
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const found = [parsed.text, parsed.content].find(
+      (value) => typeof value === "string"
+    );
+    text = typeof found === "string" ? found : body;
+  } catch {
+    // Not JSON (ntfy): the body is the message.
+  }
+  const line = [title, text]
+    .filter(Boolean)
+    .join(" | ")
+    .replaceAll("\n", " | ");
+  return line.slice(0, 300);
+};
 
 export const makeDevRoutes = (deps: DevDeps) => {
   const registry = () => deps.registries.getByName(registryName);
@@ -66,10 +86,21 @@ export const makeDevRoutes = (deps: DevDeps) => {
       });
     });
 
+  /**
+   * `POST /_dev/webhook?fail=500&failTimes=2&tag=x`: records the alert and
+   * answers `fail` (always, or for the first `failTimes` requests of `tag`).
+   */
   const webhook = (request: HttpServerRequest.HttpServerRequest, url: URL) =>
     Effect.gen(function* webhookRoute() {
       const fail = url.searchParams.get("fail");
-      const status = fail === null ? 200 : statusParam(fail, 500);
+      const failTimes = Number(url.searchParams.get("failTimes") ?? Number.NaN);
+      let failing = fail !== null;
+      if (failing && Number.isInteger(failTimes)) {
+        const tag = url.searchParams.get("tag") ?? url.search;
+        const count = yield* registry().bumpDevCounter(`webhook:${tag}`);
+        failing = count <= failTimes;
+      }
+      const status = failing ? statusParam(fail, 500) : 200;
       const body = yield* request.text;
       const id = yield* registry().recordDevEvent("webhook", {
         body,
@@ -79,7 +110,9 @@ export const makeDevRoutes = (deps: DevDeps) => {
         query: url.search,
         respondedWith: status,
       });
-      yield* Effect.log(`dev webhook #${id} (${status}): ${body}`);
+      yield* Effect.log(
+        `dev webhook #${id} (${status}) ${alertSummary(url, body)}`
+      );
       return HttpServerResponse.text(status < 400 ? "ok" : "failed", {
         status,
       });

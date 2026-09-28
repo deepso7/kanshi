@@ -2,9 +2,12 @@ import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
+import { deliver } from "../alerts/delivery.ts";
+import { alertRequest } from "../alerts/message.ts";
 import { checkChannelUrl, hashUrl } from "../domain/channel.ts";
 import type { ChannelRecordPatch, Registry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
+import type { ChannelTestResult } from "./spec.ts";
 import { BadRequest, Conflict, KanshiApi, NotFound } from "./spec.ts";
 
 export interface ChannelsDeps {
@@ -71,6 +74,27 @@ export const makeChannelsHandlers = (deps: ChannelsDeps) => {
           };
           const updated = yield* registry().updateChannel(params.id, patch);
           return updated ?? (yield* notFound(params.id));
+        })
+      )
+      .handle("test", ({ params }) =>
+        Effect.gen(function* testChannel() {
+          const target = yield* registry().channelTarget(params.id);
+          if (target === null) {
+            return yield* notFound(params.id);
+          }
+          const result = yield* deliver(
+            alertRequest(target.kind, target.url, {
+              _tag: "Test",
+              channelName: target.name,
+              idempotencyKey: `test:${target.id}:${crypto.randomUUID()}`,
+              sentAt: Date.now(),
+            })
+          );
+          return (
+            result._tag === "Delivered"
+              ? { delivered: true, error: null, status: result.status }
+              : { delivered: false, error: result.error, status: result.status }
+          ) satisfies ChannelTestResult;
         })
       )
       .handle("remove", ({ params }) =>
