@@ -813,3 +813,153 @@ config.updatedAt) > 2 × interval + 2 min` (**deviation**: the plan
   carries `watch.episodeId`).
 - A Registry row whose monitor lost its config (active + unconfigured) is
   reported, not repaired.
+
+## Phase 6 (UI)
+
+### Layout
+
+- `src/service/{monitors,channels,status}.ts`: the operations behind both
+  the `/api` handlers and the pages (create/delete flows, reads, channel
+  test, public status). `src/api/handlers.ts` and `src/api/channels.ts` are
+  now thin adapters; `src/api/public.ts` serves `GET /api/public/status`.
+- `src/ui/html.ts`: the `html` tagged template (escapes every
+  interpolation that is not already `Html`; arrays are joined; `false`,
+  `null`, `undefined` render nothing), `raw`, `safeHref`.
+- `src/ui/session.ts`: session values, `Set-Cookie` strings and the Origin
+  check. `src/ui/charts.ts`: uptime bars and sparkline (inline SVG).
+  `src/ui/format.ts`, `src/ui/forms.ts` (form body -> API input, readable
+  schema errors), `src/ui/layout.ts` (the one CSS block, the inline script,
+  the page shell), `src/ui/pages.ts`, `src/ui/status-page.ts`,
+  `src/ui/routes.ts` (the page router). `src/http/route.ts`: the path
+  matcher shared with `/_dev/*`.
+- `src/domain/public-status.ts`: the public status schema and
+  `overallStatus`.
+- Worker routing: `/api/*` -> HttpApi, `/_dev/*` (dev stage) -> fixtures,
+  everything else -> pages (404 page for unknown paths).
+
+### Auth and CSRF
+
+- `/login` takes the API token (timing-safe compare) and sets
+  `kanshi_session=<expiresAt>.<hex HMAC-SHA256>`; the HMAC key is derived
+  from the token, the message is the expiry. `HttpOnly; Secure;
+  SameSite=Strict; Path=/; Max-Age=30d`. Verification uses
+  `crypto.subtle.verify` (constant time) and checks the expiry. No state
+  is stored: rotating `KANSHI_API_TOKEN` logs everyone out.
+  **Deviation/addition:** sessions expire after 30 days.
+- `/logout` clears the cookie in the browser only; a copied cookie stays
+  valid until it expires or the token rotates.
+- `/api` security is `bearer` OR `session` (cookie `kanshi_session`,
+  Effect's `HttpApiSecurity.apiKey({ in: "cookie" })`; schemes are tried
+  in order). A cookie-authenticated request that is not GET/HEAD/OPTIONS
+  must pass the Origin check, otherwise 403. Bearer requests are not
+  Origin-checked.
+- Origin check (`isSameOrigin`): the `Origin` header must equal the
+  request URL's origin; without an `Origin` header only
+  `Sec-Fetch-Site: same-origin` passes. Every page form post (including
+  `/login` and `/logout`) is checked; failures get a 403 page.
+- Page form posts read the body **before** rejecting: answering a POST
+  with an unread body made the local dev gateway reset the connection
+  (`ECONNRESET` in the integration tests).
+- Signed-out requests to dashboard pages redirect (303) to `/login`.
+- Every page: `Cache-Control: no-store`, a CSP (`default-src 'none'`,
+  inline style and script allowed, `form-action 'self'`,
+  `frame-ancestors 'none'`), `X-Frame-Options: DENY`,
+  `Referrer-Policy: same-origin`, `nosniff`.
+
+### Pages
+
+- `/`: status, last check, 24h uptime, 24h latency sparkline, interval,
+  public and "not checked" badges; a banner lists monitors with an open
+  watchdog episode (`watch.episodeId`, free from `registry.list()`);
+  counts per status; the dev stage adds the webhook sink's last 20
+  `dev_events`. Auto-refreshes every 30s.
+- `/monitors/:id`: header with status, public/private, URL (link only if
+  http(s)); buttons check now (enabled only), pause/resume, make
+  public/private, edit, delete (JS confirm); 90-day bars; 24h latency;
+  incidents with each alert row (event, channel name, state, last error);
+  the last 50 checks (kind, counted, result, HTTP, latency, message);
+  settings.
+- `/monitors/new`, `/monitors/:id/edit`: one form. Timeout is entered in
+  seconds. Channels: "all" or a checkbox list. Unchecked boxes mean false
+  (the edit form sets every field, including `public` and `enabled`).
+  Errors re-render the form with the submitted values (400).
+- `/channels`: each channel with kind, masked URL, "send test alert" (the
+  result is rendered inline, including the error), delete (confirm), and
+  an inline edit form (empty URL keeps the stored one); an add form.
+- Success after a redirect is a fixed message chosen by `?done=<code>`;
+  nothing from the query string is echoed.
+- The inline script only rewrites `<time data-local>` to local time and
+  asks for confirmation on `form[data-confirm]`; everything works without
+  it. Days on bars are UTC.
+- Bars: `>= 99.5%` green, `>= 95%` amber, below red, `partial` grey (even
+  when a percentage exists), no samples blank; a young monitor is padded
+  on the left so every chart has 90 bars.
+
+### 24h uptime and sparkline
+
+**Change from the phase-4 note:** instead of `uptime?days=1` (a UTC day)
+plus a checks scan, the Monitor DO has a new RPC `recent(windowMs,
+buckets)`: one aggregate over the last 24h (counted samples and up) and
+one `GROUP BY` into 48 half-hour buckets (mean latency of successful
+checks, counted failures). It is a rolling 24 hours and reads no rows into
+the Worker. Not exposed over `/api`.
+
+### Public status
+
+- `makeStatusService().publicStatus()`: every request calls
+  `registry.list()` and keeps active rows with `public = true`, so a
+  monitor made private (the API's `PATCH` writes `public` to the Registry
+  before answering) disappears on the next request. For each, the 90-day
+  history comes from the Cache API (`caches.default`, key
+  `https://kanshi.cache/status-history/v1/<id>`, `max-age=300`) or from
+  `monitor.uptime(90)`; a down monitor's open incident start is read live.
+  Failures of one monitor render it without history.
+- `GET /api/public/status` (no auth, `no-store`,
+  `Access-Control-Allow-Origin: *`): `{ generatedAt, overall:
+operational | partial_outage | major_outage, monitors: [{ name, status:
+up | down | unknown | paused, lastCheckedAt, uptimePercent, downSince,
+days: [{ day, partial, uptimePercent }] }] }`. No URLs, ids, keys or
+  incident causes (a cause can contain a hostname).
+- `/status` renders the same data: banner, open incidents ("X is down
+  since ..."), per-monitor bars. Auto-refreshes every 60s.
+
+### Gotchas
+
+- **Tagged templates containing `</script>`** are compiled by the Oxc
+  transform (used by `alchemy dev` for the stack) with a runtime helper
+  from `@oxc-project/runtime`, which is not installed, and the stack fails
+  to load. `layout.ts` builds the `<script>` element from a plain template
+  string instead. Keep `</script` out of `html` templates.
+- `oxfmt` formats `html` templates as HTML (re-indents, moves `${}`
+  onto their own lines). Harmless in HTML; unit tests compare markup after
+  collapsing whitespace between tags.
+- The SQL bucket index needs `CAST(... AS INTEGER)`: bound numbers are
+  REAL, so `/` did not divide integers.
+
+### Tests
+
+- Unit: `test/unit/session.test.ts` (escaping, composition, `safeHref`,
+  session derivation/verification incl. rotation, expiry and tampering,
+  cookie attributes, Origin check) and `test/unit/ui.test.ts` (bar levels,
+  padding and trimming, sparkline path and gaps, failure marks,
+  `recentActivity`, formatting, form mapping and errors, overall status,
+  status page escaping).
+- Integration: `test/integ/ui.test.ts` on stage `integ-ui` (about 10s):
+  sign-in flow and cookie attributes, signed-out redirect, cookie auth on
+  `/api` with the Origin rule, forged cookie, logout; form posts with a bad
+  or missing Origin rejected (create and delete); a monitor made private
+  (API `PATCH` and the dashboard button) disappears from `/status` and
+  `/api/public/status` on the next request; the status page and JSON show
+  only public monitors and no URLs or ids. The harness has a `raw`
+  request helper (no bearer, redirects not followed).
+
+### Manual check
+
+`pnpm dev` + `pnpm seed`, then curl and a browser: login (good, wrong
+token, cross-origin), dashboard, detail, new/edit forms (valid and
+invalid input, escaping of a `<b>` name), pause/resume/check/public
+buttons, channels (create with a bad and a good URL, test, edit, delete,
+test of a deleted channel -> 404 page), `/status` and
+`/api/public/status` while the flip target was down (banner "Major
+outage", open incident), cookie-authenticated `/api` writes with and
+without Origin, logout. No errors in the dev log.
