@@ -1,14 +1,14 @@
 /* oxlint-disable eslint/max-classes-per-file -- keep the small shared error vocabulary together */
 import * as Schema from "effect/Schema";
 
-export class MonitorNotFound extends Schema.TaggedErrorClass<MonitorNotFound>()(
+export class MonitorNotFound extends Schema.TaggedError<MonitorNotFound>()(
   "MonitorNotFound",
   {
     monitorId: Schema.NonEmptyString,
   }
 ) {}
 
-export class ProbeTimeout extends Schema.TaggedErrorClass<ProbeTimeout>()(
+export class ProbeTimeout extends Schema.TaggedError<ProbeTimeout>()(
   "ProbeTimeout",
   {
     monitorId: Schema.NonEmptyString,
@@ -18,7 +18,7 @@ export class ProbeTimeout extends Schema.TaggedErrorClass<ProbeTimeout>()(
   }
 ) {}
 
-export class ProbeFailed extends Schema.TaggedErrorClass<ProbeFailed>()(
+export class ProbeFailed extends Schema.TaggedError<ProbeFailed>()(
   "ProbeFailed",
   {
     cause: Schema.Defect(),
@@ -26,7 +26,7 @@ export class ProbeFailed extends Schema.TaggedErrorClass<ProbeFailed>()(
   }
 ) {}
 
-export class AnalyticsIngestFailed extends Schema.TaggedErrorClass<AnalyticsIngestFailed>()(
+export class AnalyticsIngestFailed extends Schema.TaggedError<AnalyticsIngestFailed>()(
   "AnalyticsIngestFailed",
   {
     cause: Schema.Defect(),
@@ -34,7 +34,7 @@ export class AnalyticsIngestFailed extends Schema.TaggedErrorClass<AnalyticsInge
   }
 ) {}
 
-export class AlertDeliveryFailed extends Schema.TaggedErrorClass<AlertDeliveryFailed>()(
+export class AlertDeliveryFailed extends Schema.TaggedError<AlertDeliveryFailed>()(
   "AlertDeliveryFailed",
   {
     cause: Schema.Defect(),
@@ -42,7 +42,7 @@ export class AlertDeliveryFailed extends Schema.TaggedErrorClass<AlertDeliveryFa
   }
 ) {}
 
-export class DatabaseError extends Schema.TaggedErrorClass<DatabaseError>()(
+export class DatabaseError extends Schema.TaggedError<DatabaseError>()(
   "DatabaseError",
   {
     cause: Schema.Defect(),

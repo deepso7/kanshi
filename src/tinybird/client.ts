@@ -32,7 +32,7 @@ const IngestResponse = Schema.Struct({
   successful_rows: Schema.Int,
 });
 
-export class TinybirdRowsQuarantined extends Schema.TaggedErrorClass<TinybirdRowsQuarantined>()(
+export class TinybirdRowsQuarantined extends Schema.TaggedError<TinybirdRowsQuarantined>()(
   "TinybirdRowsQuarantined",
   {
     datasource: Schema.String,

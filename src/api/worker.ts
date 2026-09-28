@@ -18,9 +18,14 @@ import { KanshiApi } from "./spec.ts";
 import { StatusApiLive } from "./status.ts";
 
 const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
+  compression: {
+    algorithms: new Set<HttpPlatform.CompressionAlgorithm>(),
+    compressResponse: (response) => Effect.succeed(response),
+  },
   fileResponse: () => Effect.die("HttpPlatform.fileResponse not supported"),
   fileWebResponse: () =>
     Effect.die("HttpPlatform.fileWebResponse not supported"),
+  platform: "web",
 });
 
 export default class ApiWorker extends Cloudflare.Worker<ApiWorker>()(
@@ -30,12 +35,12 @@ export default class ApiWorker extends Cloudflare.Worker<ApiWorker>()(
   },
   Effect.gen(function* ApiWorkerInit() {
     const databaseClient = yield* makeDatabaseClient;
-    const apiToken = yield* Config.redacted("KANSHI_API_TOKEN");
+    const apiToken = yield* Config.Redacted("KANSHI_API_TOKEN");
     if (Redacted.value(apiToken).trim().length === 0) {
       return yield* Effect.die(new Error("KANSHI_API_TOKEN must not be empty"));
     }
-    const tinybirdUrl = yield* Config.string("TINYBIRD_URL");
-    const tinybirdReadToken = yield* Config.redacted("TINYBIRD_READ_TOKEN");
+    const tinybirdUrl = yield* Config.String("TINYBIRD_URL");
+    const tinybirdReadToken = yield* Config.Redacted("TINYBIRD_READ_TOKEN");
 
     const app = HttpApiBuilder.layer(KanshiApi).pipe(
       Layer.provide([

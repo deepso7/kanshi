@@ -16,10 +16,10 @@ export default class EngineWorker extends Cloudflare.Worker<EngineWorker>()(
   Effect.gen(function* EngineWorkerInit() {
     const databaseClient = yield* makeDatabaseClient;
 
-    const baseUrl = yield* Config.string("TINYBIRD_URL");
-    const appendToken = yield* Config.redacted("TINYBIRD_APPEND_TOKEN");
-    const readToken = yield* Config.redacted("TINYBIRD_READ_TOKEN");
-    const apiToken = yield* Config.redacted("KANSHI_API_TOKEN");
+    const baseUrl = yield* Config.String("TINYBIRD_URL");
+    const appendToken = yield* Config.Redacted("TINYBIRD_APPEND_TOKEN");
+    const readToken = yield* Config.Redacted("TINYBIRD_READ_TOKEN");
+    const apiToken = yield* Config.Redacted("KANSHI_API_TOKEN");
     const tinybird = {
       appendToken: Redacted.value(appendToken),
       baseUrl,

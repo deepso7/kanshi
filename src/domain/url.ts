@@ -29,7 +29,7 @@ const UrlValidationReason = Schema.Literals([
   "protocol_not_allowed",
 ]);
 
-export class UrlValidationError extends Schema.TaggedErrorClass<UrlValidationError>()(
+export class UrlValidationError extends Schema.TaggedError<UrlValidationError>()(
   "UrlValidationError",
   {
     hostname: Schema.String,
