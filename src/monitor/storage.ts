@@ -301,6 +301,37 @@ export const recentChecks = Effect.fn("MonitorStorage.recentChecks")(
   }
 );
 
+/**
+ * Counted samples since `since`, and per-bucket (`bucketMs` wide, from
+ * `since`) mean latency of successful checks and counted failures.
+ */
+export const readRecent = Effect.fn("MonitorStorage.readRecent")(
+  function* readRecentEffect(since: number, bucketMs: number) {
+    const sql = yield* SqlClient.SqlClient;
+    const [totals] = yield* sql<{
+      counted: number;
+      up: number | null;
+    }>`SELECT count(*) AS counted, sum(ok) AS up FROM checks
+      WHERE counted = 1 AND at >= ${since}`;
+    const buckets = yield* sql<{
+      bucket: number;
+      failures: number | null;
+      latencyMs: number | null;
+    }>`SELECT CAST((at - ${since}) / ${bucketMs} AS INTEGER) AS bucket,
+        avg(CASE WHEN ok = 1 THEN latency_ms END) AS latency_ms,
+        sum(CASE WHEN ok = 0 AND counted = 1 THEN 1 ELSE 0 END) AS failures
+      FROM checks
+      WHERE at >= ${since}
+      GROUP BY bucket
+      ORDER BY bucket`;
+    return {
+      buckets,
+      counted: totals?.counted ?? 0,
+      up: totals?.up ?? 0,
+    };
+  }
+);
+
 export const listIncidents = Effect.fn("MonitorStorage.listIncidents")(
   function* listIncidentsEffect(limit: number) {
     const sql = yield* SqlClient.SqlClient;

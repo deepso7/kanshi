@@ -62,3 +62,24 @@ export const UptimeReport = Schema.Struct({
   uptimePercent: Schema.NullOr(Schema.Number),
 });
 export type UptimeReport = typeof UptimeReport.Type;
+
+/** One time bucket of recent checks, for the dashboard's sparkline. */
+export const RecentBucket = Schema.Struct({
+  /** Bucket start (epoch ms). */
+  at: Schema.Number,
+  /** Counted failures in the bucket. */
+  failures: Schema.Number,
+  /** Mean latency (ms) of the successful checks, null without any. */
+  latencyMs: Schema.NullOr(Schema.Number),
+});
+export type RecentBucket = typeof RecentBucket.Type;
+
+/** Counted samples and latency buckets since a point in time. */
+export const RecentActivity = Schema.Struct({
+  /** Oldest first; one per bucket, empty buckets included. */
+  buckets: Schema.Array(RecentBucket),
+  counted: Schema.Number,
+  up: Schema.Number,
+  uptimePercent: Schema.NullOr(Schema.Number),
+});
+export type RecentActivity = typeof RecentActivity.Type;

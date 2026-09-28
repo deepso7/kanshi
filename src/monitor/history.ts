@@ -1,5 +1,7 @@
 import type {
   DailyRollup,
+  RecentActivity,
+  RecentBucket,
   UptimeDay,
   UptimeReport,
 } from "../domain/history.ts";
@@ -238,4 +240,48 @@ export const reportDays = (
     }
   }
   return result;
+};
+
+/** The dashboard's window: the last 24 hours in 48 half-hour buckets. */
+export const recentWindowMs = dayMs;
+export const recentBuckets = 48;
+
+export interface RecentRows {
+  readonly buckets: readonly {
+    readonly bucket: number;
+    readonly failures: number | null;
+    readonly latencyMs: number | null;
+  }[];
+  readonly counted: number;
+  readonly up: number;
+}
+
+/**
+ * Assemble `count` buckets of `bucketMs` from `since`, oldest first,
+ * filling the buckets without checks. Mean latencies are rounded to ms.
+ */
+export const recentActivity = (
+  since: number,
+  bucketMs: number,
+  count: number,
+  rows: RecentRows
+): RecentActivity => {
+  const byIndex = new Map(rows.buckets.map((row) => [row.bucket, row]));
+  const buckets = Array.from({ length: count }, (_, index): RecentBucket => {
+    const row = byIndex.get(index);
+    return {
+      at: since + index * bucketMs,
+      failures: row?.failures ?? 0,
+      latencyMs:
+        row?.latencyMs === null || row?.latencyMs === undefined
+          ? null
+          : Math.round(row.latencyMs),
+    };
+  });
+  return {
+    buckets,
+    counted: rows.counted,
+    up: rows.up,
+    uptimePercent: uptimePercent(rows.up, rows.counted),
+  };
 };

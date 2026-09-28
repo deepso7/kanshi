@@ -12,6 +12,7 @@ import { alertRequest, idempotencyKey } from "../alerts/message.ts";
 import type { Notification, OutboxEntry } from "../domain/alert.ts";
 import type {
   IncidentWithAlerts,
+  RecentActivity,
   UptimeDay,
   UptimeReport,
 } from "../domain/history.ts";
@@ -52,6 +53,7 @@ import {
   maxRollupDaysPerRun,
   nextMaintenanceTime,
   periodChange,
+  recentActivity,
   reportDays,
   rollupDay,
   uptimeDay,
@@ -84,6 +86,7 @@ import {
   readIncident,
   readOutboxPair,
   readPeriods,
+  readRecent,
   readRollups,
   readSamples,
   readState,
@@ -192,6 +195,14 @@ export class Monitor extends Cloudflare.DurableObject<
       MonitorNotConfigured | MonitorTombstoned,
       RuntimeContext
     >;
+    /**
+     * Counted samples in the last `windowMs` and latency in `buckets`
+     * equal buckets (the dashboard's 24h uptime and sparkline).
+     */
+    recent: (
+      windowMs: number,
+      buckets: number
+    ) => Effect.Effect<RecentActivity, never, RuntimeContext>;
     /** Run maintenance as of `now` whether due or not (dev hook). */
     maintain: (
       now: number
@@ -885,6 +896,15 @@ export const MonitorLive = Monitor.make(
             ),
             Effect.tap(() => rearm)
           ),
+        recent: (windowMs: number, buckets: number) => {
+          const count = Math.max(1, Math.floor(buckets));
+          const bucketMs = Math.max(1, Math.ceil(windowMs / count));
+          const since = Date.now() - bucketMs * count;
+          return withSql(readRecent(since, bucketMs)).pipe(
+            Effect.map((rows) => recentActivity(since, bucketMs, count, rows)),
+            Effect.orDie
+          );
+        },
         runNow,
         snapshot: () =>
           withSql(loadLive).pipe(Effect.catchTag("SqlError", Effect.die)),

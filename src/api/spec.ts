@@ -20,6 +20,7 @@ import {
   MonitorState,
   MonitorSummary,
 } from "../domain/monitor.ts";
+import { PublicStatus } from "../domain/public-status.ts";
 import { ApiAuth } from "./auth.ts";
 
 export class NotFound extends Schema.TaggedError<NotFound>()(
@@ -174,6 +175,16 @@ const channelsGroup = HttpApiGroup.make("channels")
   .prefix("/api/channels")
   .middleware(ApiAuth);
 
+/** No auth: only `public` monitors, never URLs. */
+const publicGroup = HttpApiGroup.make("public")
+  .add(
+    HttpApiEndpoint.get("status", "/status", {
+      success: PublicStatus,
+    })
+  )
+  .prefix("/api/public");
+
 export const KanshiApi = HttpApi.make("KanshiApi")
   .add(monitorsGroup)
-  .add(channelsGroup);
+  .add(channelsGroup)
+  .add(publicGroup);

@@ -11,6 +11,7 @@ import { buildConfig } from "../domain/monitor-input.ts";
 import type { ChannelSelection, MonitorSnapshot } from "../domain/monitor.ts";
 import { summaryOf } from "../domain/monitor.ts";
 import { initialState } from "../monitor/cycle.ts";
+import { recentBuckets, recentWindowMs } from "../monitor/history.ts";
 import type { ChecksQuery, Monitor } from "../monitor/monitor.ts";
 import type { Registry, RegistryEntry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
@@ -265,6 +266,10 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
   const incidents = (id: string, limit: number) =>
     activeEntry(id).pipe(Effect.andThen(monitor(id).incidents(limit)));
 
+  /** The last 24h: counted samples and half-hour latency buckets. */
+  const recent = (id: string) =>
+    monitor(id).recent(recentWindowMs, recentBuckets);
+
   return {
     activeEntry,
     check,
@@ -273,6 +278,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
     get,
     incidents,
     list,
+    recent,
     remove,
     toListItem,
     update,

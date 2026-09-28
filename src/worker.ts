@@ -14,12 +14,14 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { ApiAuthLive, credentialValidatorLayer } from "./api/auth.ts";
 import { makeChannelsHandlers } from "./api/channels.ts";
 import { makeMonitorsHandlers } from "./api/handlers.ts";
+import { makePublicHandlers } from "./api/public.ts";
 import { KanshiApi } from "./api/spec.ts";
 import { makeDevRoutes } from "./dev/routes.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
 import { makeChannelService } from "./service/channels.ts";
 import { makeMonitorService } from "./service/monitors.ts";
+import { makeStatusService, workersHistoryCache } from "./service/status.ts";
 import { runWatchdog } from "./watchdog/run.ts";
 
 /** The watchdog's Cron Trigger. */
@@ -87,11 +89,17 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
       registries,
     });
     const channelService = makeChannelService({ devMode, registries });
+    const statusService = makeStatusService({
+      cache: workersHistoryCache(),
+      monitors,
+      registries,
+    });
 
     const api = HttpApiBuilder.layer(KanshiApi).pipe(
       Layer.provide([
         makeMonitorsHandlers(monitorService),
         makeChannelsHandlers(channelService),
+        makePublicHandlers(statusService),
       ]),
       Layer.provide(ApiAuthLive),
       Layer.provide(credentialValidatorLayer(apiToken)),
