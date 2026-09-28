@@ -197,9 +197,10 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
     });
 
   /**
-   * Apply a patch to the monitor, then write `public` synchronously to the
-   * Registry, so the status page stops showing a monitor made private as
-   * soon as this returns.
+   * Apply a patch to the monitor, then write `managed` and `public`
+   * synchronously to the Registry (the list and config sync read `managed`
+   * there), so the status page stops showing a monitor made private as soon
+   * as this returns.
    */
   const update = (id: string, patch: MonitorPatchInput) =>
     Effect.gen(function* updateMonitor() {
@@ -215,6 +216,12 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
             MonitorTombstoned: () => Effect.fail(notFound(id)),
           })
         );
+      if (patch.managed !== undefined && patch.managed !== entry.managed) {
+        const updated = yield* registry().setManaged(id, patch.managed);
+        if (!updated) {
+          return yield* notFound(id);
+        }
+      }
       if (patch.public !== undefined && patch.public !== entry.public) {
         const updated = yield* registry().setPublic(id, patch.public);
         if (!updated) {

@@ -59,6 +59,23 @@ export const MonitorPatchInput = Schema.Struct({
 });
 export type MonitorPatchInput = typeof MonitorPatchInput.Type;
 
+/**
+ * What an omitted field means on create. Config sync applies the same
+ * defaults, so removing a field from `kanshi.config.ts` resets it.
+ */
+export const monitorDefaults = {
+  bodyContains: null,
+  channels: "all",
+  enabled: true,
+  expectedStatus: defaultExpectedStatus,
+  failureThreshold: 1,
+  intervalSeconds: 60,
+  method: "GET",
+  public: false,
+  successThreshold: 1,
+  timeoutMs: 10_000,
+} as const;
+
 /** `all`, or the listed channel ids without duplicates. */
 const normalizeChannels = (channels: ChannelSelection): ChannelSelection =>
   channels === "all" ? channels : [...new Set(channels)];
@@ -101,28 +118,30 @@ export const buildConfig = (
   Result.gen(function* buildConfigResult() {
     const url = yield* checkUrl(input.url, options.devMode);
     const intervalSeconds = yield* checkInterval(
-      input.intervalSeconds ?? 60,
+      input.intervalSeconds ?? monitorDefaults.intervalSeconds,
       options.devMode
     );
     const expectedStatus = yield* checkExpectedStatus(
-      input.expectedStatus ?? defaultExpectedStatus
+      input.expectedStatus ?? monitorDefaults.expectedStatus
     );
     return {
-      bodyContains: input.bodyContains ?? null,
-      channels: normalizeChannels(input.channels ?? "all"),
+      bodyContains: input.bodyContains ?? monitorDefaults.bodyContains,
+      channels: normalizeChannels(input.channels ?? monitorDefaults.channels),
       createdAt: options.now,
-      enabled: input.enabled ?? true,
+      enabled: input.enabled ?? monitorDefaults.enabled,
       expectedStatus,
-      failureThreshold: input.failureThreshold ?? 1,
+      failureThreshold:
+        input.failureThreshold ?? monitorDefaults.failureThreshold,
       generation: 0,
       id,
       intervalSeconds,
       key: input.key ?? id,
       managed: input.managed ?? false,
-      method: input.method ?? "GET",
+      method: input.method ?? monitorDefaults.method,
       name: input.name,
-      successThreshold: input.successThreshold ?? 1,
-      timeoutMs: input.timeoutMs ?? 10_000,
+      successThreshold:
+        input.successThreshold ?? monitorDefaults.successThreshold,
+      timeoutMs: input.timeoutMs ?? monitorDefaults.timeoutMs,
       updatedAt: options.now,
       url,
     } satisfies MonitorConfig;

@@ -198,6 +198,11 @@ export class Registry extends Cloudflare.DurableObject<
       id: string,
       isPublic: boolean
     ) => Effect.Effect<boolean, never, RuntimeContext>;
+    /** Mirror the monitor's `managed` flag (config sync adopts monitors). */
+    setManaged: (
+      id: string,
+      managed: boolean
+    ) => Effect.Effect<boolean, never, RuntimeContext>;
     /**
      * Store a monitor's summary unless the row is missing or `deleting`, or
      * `revision` is not newer than the stored one.
@@ -801,6 +806,14 @@ export const RegistryLive = Registry.make(
             })
           ).pipe(Effect.andThen(rearm), Effect.asVoid),
         setFlip,
+        setManaged: (id: string, managed: boolean) =>
+          sql<{ id: string }>`UPDATE monitors
+            SET managed = ${managed ? 1 : 0}, updated_at = ${Date.now()}
+            WHERE id = ${id} AND lifecycle != 'deleting'
+            RETURNING id`.pipe(
+            Effect.map((rows) => rows.length === 1),
+            Effect.orDie
+          ),
         setPublic: (id: string, isPublic: boolean) =>
           sql<{ id: string }>`UPDATE monitors
             SET public = ${isPublic ? 1 : 0}, updated_at = ${Date.now()}
