@@ -101,8 +101,9 @@ hour (30s doubling to 30m, 8 attempts); 4xx responses other than
 
 All routes except `/api/public/*` need `Authorization: Bearer
 $KANSHI_API_TOKEN` (or the dashboard session). Errors are JSON
-`{ "_tag", "message" }` with 400, 404 or 409, or 503 (`Unavailable`) when a
-`PATCH` was only partly applied: retry it.
+`{ "_tag", "message" }` with 400, 404 or 409. A monitor `PATCH` that changed
+`public` but could not apply the rest answers 409 (a concurrent edit made it
+invalid) or 503 (`Unavailable`); the message says so: retry it.
 
 | Route                                                      | What                                     |
 | ---------------------------------------------------------- | ---------------------------------------- |

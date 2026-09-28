@@ -220,11 +220,14 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
    * 2. The monitor's configuration (a transaction in the Monitor object).
    * 3. `managed` to the Registry (the list and config sync read it there).
    *
-   * Every write is idempotent (it sets values, and the configuration is
-   * validated against the merged result), so retrying a request that
-   * failed after step 1 converges; such a failure is `Unavailable` (503)
-   * and tells the client to retry. A patch that would be rejected is
-   * checked before step 1, so a 400 changes nothing.
+   * A patch that would be rejected is checked against a snapshot before
+   * step 1, so a 400 changes nothing. Once step 1 has changed `public`,
+   * a later failure says so: a concurrent edit that makes the rest invalid
+   * in step 2 is a `Conflict` (409), and any other failure is `Unavailable`
+   * (503); both tell the client that visibility was already updated and to
+   * retry. Every write is idempotent (it sets values, and the configuration
+   * is validated against the merged result), so a retry converges. A
+   * `NotFound` stays a 404: the monitor was deleted concurrently.
    */
   const update = (id: string, patch: MonitorPatchInput) =>
     Effect.gen(function* updateMonitor() {
@@ -274,8 +277,16 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
         return snapshot;
       });
 
+      const publicSet = `public was set to ${String(patch.public)}`;
       const snapshot = changesPublic
         ? yield* applyRest.pipe(
+            Effect.catchTag("BadRequest", (error) =>
+              Effect.fail(
+                new Conflict({
+                  message: `monitor ${id} changed concurrently: ${publicSet}, but the other changes were not applied (${error.message}); retry them`,
+                })
+              )
+            ),
             Effect.catchDefect((defect) =>
               Effect.logError(
                 "update failed after setting public",
@@ -284,7 +295,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
                 Effect.andThen(
                   Effect.fail(
                     new Unavailable({
-                      message: `monitor ${id}: public was set to ${String(patch.public)} but the other changes may not have been applied; retry the request`,
+                      message: `monitor ${id}: ${publicSet} but the other changes may not have been applied; retry the request`,
                     })
                   )
                 )

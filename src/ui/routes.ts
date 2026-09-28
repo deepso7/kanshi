@@ -13,6 +13,8 @@ import type {
   NotFound,
   Unavailable,
 } from "../api/spec.ts";
+import type { FormBody } from "../http/body.ts";
+import { discardBody, maxFormBytes, readFormBody } from "../http/body.ts";
 import { matchPattern } from "../http/route.ts";
 import type { Registry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
@@ -183,22 +185,44 @@ const find = (
   return null;
 };
 
+/**
+ * Read and drop the body of a post we are rejecting without buffering it:
+ * answering with an unread body makes some proxies (the local dev gateway
+ * among them) reset the connection.
+ */
+const discardRequestBody = (request: HttpServerRequest.HttpServerRequest) =>
+  HttpServerRequest.toWeb(request).pipe(
+    Effect.flatMap((web) => Effect.promise(() => discardBody(web.body))),
+    Effect.ignore
+  );
+
+const readForm = (request: HttpServerRequest.HttpServerRequest) =>
+  HttpServerRequest.toWeb(request).pipe(
+    Effect.flatMap((web) => Effect.promise(() => readFormBody(web))),
+    Effect.orElseSucceed((): FormBody => ({ _tag: "Form", fields: [] }))
+  );
+
 const run = (
   handle: Handler,
   input: Omit<RouteInput, "form">,
   isPost: boolean
 ) =>
   Effect.gen(function* runRoute() {
-    // Read the body even when the post is rejected: answering with an
-    // unread request body makes some proxies reset the connection.
-    const form: FormFields = isPost
-      ? yield* input.request.urlParamsBody.pipe(
-          Effect.map((params) => params.params),
-          Effect.orElseSucceed((): FormFields => [])
-        )
-      : [];
     if (isPost && !requestIsSameOrigin(input.request)) {
+      yield* discardRequestBody(input.request);
       return htmlResponse(forbiddenPage(), 403);
+    }
+    let form: FormFields = [];
+    if (isPost) {
+      const body = yield* readForm(input.request);
+      if (body._tag === "TooLarge") {
+        return errorPage(
+          413,
+          "Form too large",
+          `Form posts are limited to ${maxFormBytes / 1024} KB.`
+        );
+      }
+      form = body.fields;
     }
     return yield* handle({ ...input, form }).pipe(
       Effect.catchTags({
@@ -570,9 +594,9 @@ export const makeUiRoutes = (deps: UiDeps) => {
     const route = find(privateRoutes, request.method, segments);
     const signedIn = yield* hasSession(request);
     if (route === null || !signedIn) {
-      // Rejected without running a handler: still read the body (see `run`).
+      // Rejected without running a handler: still drain the body.
       if (isPost) {
-        yield* request.arrayBuffer.pipe(Effect.ignore);
+        yield* discardRequestBody(request);
       }
       return route === null
         ? htmlResponse(notFoundPage(signedIn), 404)

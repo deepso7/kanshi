@@ -108,7 +108,7 @@ const monitorsGroup = HttpApiGroup.make("monitors")
       success: MonitorResponse,
     }),
     HttpApiEndpoint.patch("update", "/:id", {
-      error: [BadRequest, NotFound, Unavailable],
+      error: [BadRequest, Conflict, NotFound, Unavailable],
       params: MonitorIdParams,
       payload: MonitorPatchInput.pipe(HttpApiSchema.asJson()),
       success: MonitorResponse,

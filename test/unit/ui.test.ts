@@ -1,8 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
 import type { RecentBucket } from "../../src/domain/history.ts";
 import { overallStatus } from "../../src/domain/public-status.ts";
+import { discardBody, readFormBody } from "../../src/http/body.ts";
 import { recentActivity } from "../../src/monitor/history.ts";
 import type { BarDay } from "../../src/ui/charts.ts";
 import {
@@ -375,4 +377,72 @@ describe("managed resources", () => {
     assert.strictEqual(count(markup, "managed by config</span>"), 1);
     assert.strictEqual(count(markup, "The next <span"), 1);
   });
+});
+
+const post = (body: string, headers: Record<string, string> = {}) =>
+  new Request("http://localhost/login", { body, headers, method: "POST" });
+
+/** A stream of `count` chunks of `size` bytes that records how far it got. */
+const counted = (chunkCount: number, size: number) => {
+  const seen = { cancelled: false, chunks: 0 };
+  const stream = new ReadableStream<Uint8Array>({
+    cancel: () => {
+      seen.cancelled = true;
+    },
+    pull: (controller) => {
+      if (seen.chunks === chunkCount) {
+        controller.close();
+        return;
+      }
+      seen.chunks += 1;
+      controller.enqueue(new Uint8Array(size).fill(97));
+    },
+  });
+  return { seen, stream };
+};
+
+describe("form bodies", () => {
+  it.effect("parses a small form", () =>
+    Effect.promise(() => readFormBody(post("token=a%20b&x=1"))).pipe(
+      Effect.map((result) =>
+        assert.deepStrictEqual(result, {
+          _tag: "Form",
+          fields: [
+            ["token", "a b"],
+            ["x", "1"],
+          ],
+        })
+      )
+    )
+  );
+
+  it.effect("refuses a form over the limit", () =>
+    Effect.promise(() => readFormBody(post("a".repeat(65)), 64)).pipe(
+      Effect.map((result) => assert.strictEqual(result._tag, "TooLarge"))
+    )
+  );
+
+  it.effect("refuses a declared length over the limit unread", () =>
+    Effect.promise(() =>
+      readFormBody(post("a=1", { "content-length": "999999" }), 64)
+    ).pipe(Effect.map((result) => assert.strictEqual(result._tag, "TooLarge")))
+  );
+
+  it.effect("discards a body chunk by chunk up to the cap", () =>
+    Effect.gen(function* discardTest() {
+      const { seen, stream } = counted(100, 1024);
+      yield* Effect.promise(() => discardBody(stream, 10 * 1024));
+      assert.isTrue(seen.cancelled);
+      assert.isBelow(seen.chunks, 100);
+    })
+  );
+
+  it.effect("discards a small body to the end", () =>
+    Effect.gen(function* drainTest() {
+      const { seen, stream } = counted(3, 1024);
+      yield* Effect.promise(() => discardBody(stream, 10 * 1024));
+      assert.isFalse(seen.cancelled);
+      assert.strictEqual(seen.chunks, 3);
+    })
+  );
 });
