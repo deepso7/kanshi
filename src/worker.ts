@@ -12,6 +12,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { ApiAuthLive, bearerTokenValidatorLayer } from "./api/auth.ts";
+import { makeChannelsHandlers } from "./api/channels.ts";
 import { makeMonitorsHandlers } from "./api/handlers.ts";
 import { KanshiApi } from "./api/spec.ts";
 import { makeDevRoutes } from "./dev/routes.ts";
@@ -62,9 +63,10 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
     const registries = yield* Registry;
 
     const api = HttpApiBuilder.layer(KanshiApi).pipe(
-      Layer.provide(
-        makeMonitorsHandlers({ devMode, monitors, quota, registries })
-      ),
+      Layer.provide([
+        makeMonitorsHandlers({ devMode, monitors, quota, registries }),
+        makeChannelsHandlers({ devMode, registries }),
+      ]),
       Layer.provide(ApiAuthLive),
       Layer.provide(bearerTokenValidatorLayer(apiToken)),
       Layer.provide([Etag.layer, HttpPlatformStub, Path.layer]),

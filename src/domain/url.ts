@@ -144,7 +144,8 @@ export const isPublicIpAddress = (hostname: string): boolean => {
 const isIpAddress = (hostname: string): boolean =>
   parseIpv4(hostname) !== undefined || parseIpv6(hostname) !== undefined;
 
-const isLoopback = (hostname: string): boolean => {
+/** `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]`. */
+export const isLoopback = (hostname: string): boolean => {
   if (hostname === "localhost" || hostname.endsWith(".localhost")) {
     return true;
   }

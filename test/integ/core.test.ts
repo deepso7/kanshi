@@ -4,125 +4,15 @@
 // both use port 1337).
 import { expect } from "bun:test";
 
-import * as Alchemy from "alchemy";
-import * as Cloudflare from "alchemy/Cloudflare";
-import * as Test from "alchemy/Test/Bun";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import * as Schedule from "effect/Schedule";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { MonitorResponse } from "../../src/api/spec.ts";
-import type { MonitorStatusView } from "../../src/monitor/monitor.ts";
-import type { CheckRow, IncidentRow } from "../../src/monitor/storage.ts";
-import type { RegistryEntry } from "../../src/registry/registry.ts";
-import Stack, { apiToken, monitorQuota } from "./alchemy.run.ts";
+import { monitorQuota } from "./alchemy.run.ts";
+import { checksOf, setup, statusOf, waitFor } from "./harness.ts";
 
-const { afterAll, beforeAll, deploy, destroy, test } = Test.make({
-  dev: true,
-  providers: Cloudflare.providers(),
-  stage: "integ",
-  state: Alchemy.localState(),
-});
-
-const stack = beforeAll(
-  deploy(Stack).pipe(
-    Effect.tap(({ url }) => Test.getWhenReady(`${url}/_dev/target`))
-  ),
-  { timeout: 180_000 }
-);
-afterAll.skipIf(!!process.env.NO_DESTROY)(destroy(Stack), {
-  timeout: 180_000,
-});
-
-type Method = "DELETE" | "GET" | "PATCH" | "POST";
-
-interface Reply {
-  readonly body: unknown;
-  readonly status: number;
-}
-
-const send = Effect.fn("Test.send")(function* sendRequest(
-  method: Method,
-  path: string,
-  options: {
-    readonly auth?: string | null;
-    readonly body?: unknown;
-    readonly headers?: Readonly<Record<string, string>>;
-  } = {}
-) {
-  const { url } = yield* stack;
-  const client = yield* HttpClient.HttpClient;
-  const auth = options.auth === undefined ? apiToken : options.auth;
-  let request = HttpClientRequest.make(method)(`${url}${path}`).pipe(
-    HttpClientRequest.setHeaders({
-      ...options.headers,
-      ...(auth === null ? {} : { authorization: `Bearer ${auth}` }),
-    })
-  );
-  if (options.body !== undefined) {
-    request = HttpClientRequest.bodyJsonUnsafe(request, options.body);
-  }
-  const response = yield* client.execute(request);
-  const text = yield* response.text;
-  return {
-    body: text.length > 0 ? (JSON.parse(text) as unknown) : null,
-    status: response.status,
-  } satisfies Reply;
-});
-
-interface Detail {
-  readonly checks: readonly CheckRow[];
-  readonly incidents: readonly IncidentRow[];
-  readonly status: MonitorStatusView;
-}
-
-const detail = (id: string) =>
-  send("GET", `/_dev/monitors/${id}`).pipe(
-    Effect.map((reply) => reply.body as Detail)
-  );
-
-/** Checks oldest first. */
-const checksOf = (value: Detail): readonly CheckRow[] =>
-  value.checks.toReversed();
-
-const registryRows = send("GET", "/_dev/registry").pipe(
-  Effect.map((reply) => reply.body as readonly RegistryEntry[])
-);
-
-/** Poll `effect` until `predicate` holds. */
-const waitFor = <A, E, R>(
-  label: string,
-  effect: Effect.Effect<A, E, R>,
-  predicate: (value: A) => boolean,
-  timeoutMs = 30_000
-) =>
-  effect.pipe(
-    Effect.filterOrFail(predicate, () => new Error(`timed out: ${label}`)),
-    Effect.retry({
-      schedule: Schedule.spaced("250 millis"),
-      times: Math.ceil(timeoutMs / 250),
-    })
-  );
-
-const create = Effect.fn("Test.create")(function* createMonitor(
-  body: Record<string, unknown>
-) {
-  const reply = yield* send("POST", "/api/monitors", {
-    body: { name: "integration", ...body },
-  });
-  expect(reply.status).toBe(201);
-  return reply.body as MonitorResponse;
-});
-
-const devUrl = (path: string) =>
-  stack.pipe(Effect.map(({ url }) => `${url}/_dev${path}`));
-
-const setFlip = (name: string, up: boolean) =>
-  send("POST", `/_dev/target/flip/${name}?up=${up}`, { auth: null });
-
-const statusOf = (value: Detail) => value.status.snapshot?.state.status;
+const { create, detail, devUrl, registryRows, send, setFlip, test } =
+  setup("integ");
 
 test(
   "requires the bearer token and validates input",

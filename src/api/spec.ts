@@ -6,6 +6,11 @@ import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 
 import {
+  ChannelCreateInput,
+  ChannelPatchInput,
+  ChannelView,
+} from "../domain/channel.ts";
+import {
   MonitorCreateInput,
   MonitorPatchInput,
 } from "../domain/monitor-input.ts";
@@ -89,4 +94,33 @@ const monitorsGroup = HttpApiGroup.make("monitors")
   .prefix("/api/monitors")
   .middleware(ApiAuth);
 
-export const KanshiApi = HttpApi.make("KanshiApi").add(monitorsGroup);
+const ChannelIdParams = Schema.Struct({ id: Schema.NonEmptyString });
+
+const channelsGroup = HttpApiGroup.make("channels")
+  .add(
+    HttpApiEndpoint.get("list", "/", {
+      success: Schema.Array(ChannelView),
+    }),
+    HttpApiEndpoint.post("create", "/", {
+      error: [BadRequest, Conflict],
+      payload: ChannelCreateInput.pipe(HttpApiSchema.asJson()),
+      success: ChannelView.pipe(HttpApiSchema.status(201)),
+    }),
+    HttpApiEndpoint.patch("update", "/:id", {
+      error: [BadRequest, NotFound],
+      params: ChannelIdParams,
+      payload: ChannelPatchInput.pipe(HttpApiSchema.asJson()),
+      success: ChannelView,
+    }),
+    HttpApiEndpoint.delete("remove", "/:id", {
+      error: NotFound,
+      params: ChannelIdParams,
+      success: HttpApiSchema.NoContent,
+    })
+  )
+  .prefix("/api/channels")
+  .middleware(ApiAuth);
+
+export const KanshiApi = HttpApi.make("KanshiApi")
+  .add(monitorsGroup)
+  .add(channelsGroup);

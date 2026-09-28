@@ -59,6 +59,10 @@ export const MonitorPatchInput = Schema.Struct({
 });
 export type MonitorPatchInput = typeof MonitorPatchInput.Type;
 
+/** `all`, or the listed channel ids without duplicates. */
+const normalizeChannels = (channels: ChannelSelection): ChannelSelection =>
+  channels === "all" ? channels : [...new Set(channels)];
+
 export interface InputOptions {
   /** Dev stage: loopback targets and intervals down to 5s are allowed. */
   readonly devMode: boolean;
@@ -105,7 +109,7 @@ export const buildConfig = (
     );
     return {
       bodyContains: input.bodyContains ?? null,
-      channels: input.channels ?? "all",
+      channels: normalizeChannels(input.channels ?? "all"),
       createdAt: options.now,
       enabled: input.enabled ?? true,
       expectedStatus,
@@ -164,7 +168,10 @@ export const patchConfig = (
         patch.bodyContains === undefined
           ? config.bodyContains
           : patch.bodyContains,
-      channels: patch.channels ?? config.channels,
+      channels:
+        patch.channels === undefined
+          ? config.channels
+          : normalizeChannels(patch.channels),
       enabled: patch.enabled ?? config.enabled,
       expectedStatus,
       failureThreshold: patch.failureThreshold ?? config.failureThreshold,

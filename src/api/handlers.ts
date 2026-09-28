@@ -3,7 +3,7 @@ import * as Result from "effect/Result";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { buildConfig } from "../domain/monitor-input.ts";
-import type { MonitorSnapshot } from "../domain/monitor.ts";
+import type { ChannelSelection, MonitorSnapshot } from "../domain/monitor.ts";
 import { summaryOf } from "../domain/monitor.ts";
 import { initialState } from "../monitor/cycle.ts";
 import type { Monitor } from "../monitor/monitor.ts";
@@ -45,6 +45,20 @@ const toListItem = (entry: RegistryEntry): MonitorListItem => ({
 export const makeMonitorsHandlers = (deps: ApiDeps) => {
   const registry = () => deps.registries.getByName(registryName);
   const monitor = (id: string) => deps.monitors.getByName(id);
+
+  /** A monitor's explicit channel list must name existing channels. */
+  const checkChannels = (channels: ChannelSelection | undefined) =>
+    Effect.gen(function* checkChannelsEffect() {
+      if (channels === undefined || channels === "all") {
+        return;
+      }
+      const missing = yield* registry().missingChannels(channels);
+      if (missing.length > 0) {
+        return yield* new BadRequest({
+          message: `channels: unknown channel ids ${missing.join(", ")}`,
+        });
+      }
+    });
 
   /** The Registry row of an existing, fully created monitor. */
   const activeEntry = (id: string) =>
@@ -99,6 +113,7 @@ export const makeMonitorsHandlers = (deps: ApiDeps) => {
             return yield* new BadRequest({ message: built.failure });
           }
           const config = built.success;
+          yield* checkChannels(config.channels);
           const isPublic = payload.public ?? false;
 
           const { opId } = yield* registry()
@@ -173,6 +188,7 @@ export const makeMonitorsHandlers = (deps: ApiDeps) => {
       .handle("update", ({ params, payload }) =>
         Effect.gen(function* updateMonitor() {
           const entry = yield* activeEntry(params.id);
+          yield* checkChannels(payload.channels);
           const snapshot = yield* monitor(params.id)
             .update(payload, { devMode: deps.devMode })
             .pipe(

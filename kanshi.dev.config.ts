@@ -1,10 +1,26 @@
-// Monitors created by `pnpm seed` against the local dev stack (`pnpm dev`).
-// They probe the dev stage's own `/_dev/target` fixtures.
+// Channels and monitors created by `pnpm seed` against the local dev stack
+// (`pnpm dev`). Monitors probe the dev stage's own `/_dev/target` fixtures;
+// channels post to its `/_dev/webhook` sink (recorded in `GET /_dev/events`
+// and printed to the console). Monitors use every channel by default.
 import { defineConfig } from "./src/config.ts";
 
 const dev = "http://localhost:1337/_dev";
 
 export default defineConfig({
+  channels: [
+    {
+      key: "dev-webhook",
+      kind: "webhook",
+      name: "Dev webhook sink (generic JSON)",
+      url: `${dev}/webhook?as=webhook`,
+    },
+    {
+      key: "dev-slack",
+      kind: "slack",
+      name: "Dev webhook sink (Slack format)",
+      url: `${dev}/webhook?as=slack`,
+    },
+  ],
   monitors: [
     {
       intervalSeconds: 10,

@@ -5,8 +5,10 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import type { ChannelTarget, ChannelView } from "../domain/channel.ts";
+import { ChannelKind, maskUrl } from "../domain/channel.ts";
 import { MonitorStatus } from "../domain/monitor.ts";
-import type { MonitorSummary } from "../domain/monitor.ts";
+import type { ChannelSelection, MonitorSummary } from "../domain/monitor.ts";
 import { openDurableSql } from "../storage/sqlite.ts";
 import { KeyTaken, QuotaExceeded, registryErrors } from "./errors.ts";
 
@@ -54,6 +56,52 @@ export interface BeginInput {
   readonly quota: number;
   readonly summary: MonitorSummary;
 }
+
+/** A channel as stored, including its secret URL and the URL's hash. */
+export interface ChannelRecord {
+  readonly id: string;
+  readonly key: string;
+  readonly kind: ChannelKind;
+  readonly managed: boolean;
+  readonly name: string;
+  readonly url: string;
+  readonly urlHash: string;
+}
+
+export type ChannelRecordPatch = Partial<
+  Pick<ChannelRecord, "kind" | "managed" | "name" | "url" | "urlHash">
+>;
+
+const ChannelRow = Schema.Struct({
+  createdAt: Schema.Number,
+  id: Schema.String,
+  key: Schema.String,
+  kind: ChannelKind,
+  managed: Schema.BooleanFromBit,
+  name: Schema.String,
+  updatedAt: Schema.Number,
+  url: Schema.String,
+  urlHash: Schema.String,
+});
+type ChannelRow = typeof ChannelRow.Type;
+
+const toChannelView = (row: ChannelRow): ChannelView => ({
+  createdAt: row.createdAt,
+  id: row.id,
+  key: row.key,
+  kind: row.kind,
+  managed: row.managed,
+  maskedUrl: maskUrl(row.url),
+  name: row.name,
+  updatedAt: row.updatedAt,
+  urlHash: row.urlHash,
+});
+
+const decodeChannels = (rows: readonly unknown[]) =>
+  Schema.decodeUnknownEffect(Schema.Array(ChannelRow))(rows).pipe(Effect.orDie);
+
+const channelRows = (rows: Effect.Effect<readonly unknown[], unknown>) =>
+  rows.pipe(Effect.orDie, Effect.flatMap(decodeChannels));
 
 export interface DevEvent {
   readonly at: number;
@@ -115,6 +163,41 @@ export class Registry extends Cloudflare.DurableObject<
       up: boolean | null
     ) => Effect.Effect<boolean, never, RuntimeContext>;
     getFlip: (name: string) => Effect.Effect<boolean, never, RuntimeContext>;
+    /** Dev stage: increment and return a named counter (starts at 1). */
+    bumpDevCounter: (
+      name: string
+    ) => Effect.Effect<number, never, RuntimeContext>;
+    /** Insert a channel (unique key). */
+    createChannel: (
+      record: ChannelRecord
+    ) => Effect.Effect<ChannelView, KeyTaken, RuntimeContext>;
+    updateChannel: (
+      id: string,
+      patch: ChannelRecordPatch
+    ) => Effect.Effect<ChannelView | null, never, RuntimeContext>;
+    deleteChannel: (
+      id: string
+    ) => Effect.Effect<boolean, never, RuntimeContext>;
+    listChannels: () => Effect.Effect<
+      readonly ChannelView[],
+      never,
+      RuntimeContext
+    >;
+    /** The channel with its secret URL, for delivery. Null once deleted. */
+    channelTarget: (
+      id: string
+    ) => Effect.Effect<ChannelTarget | null, never, RuntimeContext>;
+    /**
+     * The ids of the existing channels a monitor alerts: every channel for
+     * `all`, otherwise the listed ones that still exist.
+     */
+    recipients: (
+      selection: ChannelSelection
+    ) => Effect.Effect<readonly string[], never, RuntimeContext>;
+    /** The given ids that name no channel. */
+    missingChannels: (
+      ids: readonly string[]
+    ) => Effect.Effect<readonly string[], never, RuntimeContext>;
   }
 >()("Registry", { errors: registryErrors }) {}
 
@@ -147,6 +230,25 @@ const migrations = SqliteMigrator.fromRecord({
     yield* sql`CREATE TABLE dev_flips (
       name TEXT PRIMARY KEY,
       up INTEGER NOT NULL
+    )`;
+  }),
+  "2_channels": Effect.gen(function* channelsMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE channels (
+      id TEXT PRIMARY KEY,
+      key TEXT NOT NULL UNIQUE,
+      managed INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      url TEXT NOT NULL,
+      url_hash TEXT NOT NULL,
+      name TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`;
+    // Dev stage only: counters for the webhook sink's `failTimes`.
+    yield* sql`CREATE TABLE dev_counters (
+      name TEXT PRIMARY KEY,
+      value INTEGER NOT NULL
     )`;
   }),
 });
@@ -286,9 +388,107 @@ export const RegistryLive = Registry.make(
         );
       };
 
+      const getChannel = (id: string) =>
+        channelRows(sql`SELECT * FROM channels WHERE id = ${id}`).pipe(
+          Effect.map((rows) => rows[0] ?? null)
+        );
+
+      const createChannel = (record: ChannelRecord) =>
+        sql
+          .withTransaction(
+            Effect.gen(function* createChannelTx() {
+              const taken =
+                yield* sql`SELECT id FROM channels WHERE key = ${record.key}`;
+              if (taken.length > 0) {
+                return yield* new KeyTaken({ key: record.key });
+              }
+              const now = Date.now();
+              const rows = yield* sql`INSERT INTO channels ${sql.insert({
+                createdAt: now,
+                id: record.id,
+                key: record.key,
+                kind: record.kind,
+                managed: record.managed ? 1 : 0,
+                name: record.name,
+                updatedAt: now,
+                url: record.url,
+                urlHash: record.urlHash,
+              })} RETURNING *`;
+              const [row] = yield* decodeChannels(rows);
+              if (row === undefined) {
+                return yield* Effect.die("channel insert returned no row");
+              }
+              return toChannelView(row);
+            })
+          )
+          .pipe(Effect.catchTag("SqlError", Effect.die));
+
+      const updateChannel = (id: string, patch: ChannelRecordPatch) =>
+        Effect.gen(function* updateChannelEffect() {
+          const current = yield* getChannel(id);
+          if (current === null) {
+            return null;
+          }
+          const rows = yield* channelRows(sql`UPDATE channels
+            SET kind = ${patch.kind ?? current.kind},
+                managed = ${(patch.managed ?? current.managed) ? 1 : 0},
+                name = ${patch.name ?? current.name},
+                url = ${patch.url ?? current.url},
+                url_hash = ${patch.urlHash ?? current.urlHash},
+                updated_at = ${Date.now()}
+            WHERE id = ${id}
+            RETURNING *`);
+          const [row] = rows;
+          return row === undefined ? null : toChannelView(row);
+        });
+
+      const recipients = (selection: ChannelSelection) =>
+        sql<{
+          id: string;
+        }>`SELECT id FROM channels ORDER BY created_at, id`.pipe(
+          Effect.map((rows) => {
+            const existing = rows.map((row) => row.id);
+            if (selection === "all") {
+              return existing;
+            }
+            const wanted = new Set(selection);
+            return existing.filter((id) => wanted.has(id));
+          }),
+          Effect.orDie
+        );
+
       return {
         activate,
         begin,
+        bumpDevCounter: (name: string) =>
+          sql<{ value: number }>`INSERT INTO dev_counters (name, value)
+            VALUES (${name}, 1)
+            ON CONFLICT (name) DO UPDATE SET value = value + 1
+            RETURNING value`.pipe(
+            Effect.map((rows) => rows[0]?.value ?? 0),
+            Effect.orDie
+          ),
+        channelTarget: (id: string) =>
+          getChannel(id).pipe(
+            Effect.map((row) =>
+              row === null
+                ? null
+                : ({
+                    id: row.id,
+                    kind: row.kind,
+                    name: row.name,
+                    url: row.url,
+                  } satisfies ChannelTarget)
+            )
+          ),
+        createChannel,
+        deleteChannel: (id: string) =>
+          sql<{
+            id: string;
+          }>`DELETE FROM channels WHERE id = ${id} RETURNING id`.pipe(
+            Effect.map((rows) => rows.length === 1),
+            Effect.orDie
+          ),
         devEvents: () =>
           sql<{
             at: number;
@@ -318,7 +518,19 @@ export const RegistryLive = Registry.make(
             Effect.flatMap(decodeEntries),
             Effect.orDie
           ),
+        listChannels: () =>
+          channelRows(sql`SELECT * FROM channels ORDER BY created_at, id`).pipe(
+            Effect.map((rows) => rows.map(toChannelView))
+          ),
         markDeleting,
+        missingChannels: (ids: readonly string[]) =>
+          recipients(ids).pipe(
+            Effect.map((found) => {
+              const existing = new Set(found);
+              return [...new Set(ids)].filter((id) => !existing.has(id));
+            })
+          ),
+        recipients,
         recordDevEvent: (kind: string, detail: unknown) =>
           sql<{ id: number }>`INSERT INTO dev_events (at, kind, detail)
             VALUES (${Date.now()}, ${kind}, ${JSON.stringify(detail)})
@@ -340,6 +552,7 @@ export const RegistryLive = Registry.make(
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
           ),
+        updateChannel,
         upsertSummary,
       };
     });
