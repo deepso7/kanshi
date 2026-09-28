@@ -1,3 +1,9 @@
+// The Kanshi stack: one Worker (API, dashboard, status page, watchdog cron
+// every 5 minutes) hosting the Monitor and Registry Durable Objects.
+// `KANSHI_API_TOKEN` (from .env or the environment) is deployed as a secret.
+// - `pnpm dev`: stage `dev`, run locally by `alchemy dev` (dev mode on).
+// - `pnpm deploy` / `pnpm destroy`: stage `prod` on Cloudflare. State is
+//   kept in `.alchemy/` on the machine that deploys.
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as ConfigProvider from "effect/ConfigProvider";

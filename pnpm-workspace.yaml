@@ -4,6 +4,8 @@ allowBuilds:
   msgpackr-extract: true
   workerd: true
 saveExact: true
+# Keep every Effect package, including the ones alchemy pulls in as
+# (optional) peers, on the same version as `effect`.
 overrides:
   effect: 4.0.0-rc.117
   "@effect/platform-bun": 4.0.0-rc.117
