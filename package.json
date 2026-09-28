@@ -22,6 +22,7 @@
     "@effect/platform-node": "4.0.0-rc.117",
     "@effect/sql-d1": "4.0.0-rc.117",
     "@effect/sql-pg": "4.0.0-rc.117",
+    "@effect/sql-sqlite-do": "4.0.0-rc.117",
     "@tinybirdco/sdk": "0.0.82",
     "alchemy": "2.0.0-beta.79",
     "drizzle-orm": "1.0.0-rc.5-ab785fc",
