@@ -17,6 +17,7 @@ import {
   nextAlarmAt,
   startCheck,
 } from "../../src/monitor/cycle.ts";
+import { nextMaintenanceTime } from "../../src/monitor/history.ts";
 import { evaluate } from "../../src/monitor/machine.ts";
 import { applyConfigChange } from "../../src/monitor/reset.ts";
 
@@ -364,12 +365,19 @@ describe("alarm computation", () => {
 
   it("ignores checks while disabled but keeps other work", () => {
     const disabled = { ...config, enabled: false };
-    assert.isNull(nextAlarmAt(disabled, initialState(t0)));
-    const maintenance = { ...initialState(t0), nextMaintenanceAt: t0 + 5 };
+    const idle = { ...initialState(t0), nextMaintenanceAt: null };
+    assert.isNull(nextAlarmAt(disabled, idle));
+    const maintenance = { ...idle, nextMaintenanceAt: t0 + 5 };
     assert.strictEqual(nextAlarmAt(disabled, maintenance), t0 + 5);
+    assert.strictEqual(nextAlarmAt(disabled, idle, [null, t0 + 7]), t0 + 7);
+  });
+
+  it("a fresh monitor schedules daily maintenance, even while disabled", () => {
+    const fresh = initialState(t0);
+    assert.strictEqual(fresh.nextMaintenanceAt, nextMaintenanceTime(t0));
     assert.strictEqual(
-      nextAlarmAt(disabled, initialState(t0), [null, t0 + 7]),
-      t0 + 7
+      nextAlarmAt({ ...config, enabled: false }, fresh),
+      fresh.nextMaintenanceAt
     );
   });
 
@@ -455,7 +463,11 @@ describe("reset rules", () => {
     assert.isNull(change.state.openIncidentId);
     assert.isNull(change.state.manualRequestedAt);
     assert.strictEqual(change.state.nextCheckKind, "scheduled");
-    assert.isNull(nextAlarmAt(change.config, change.state));
+    // Only maintenance keeps waking a disabled monitor.
+    assert.strictEqual(
+      nextAlarmAt(change.config, change.state),
+      state.nextMaintenanceAt
+    );
   });
 
   it("enable bumps generation and checks now, so a down target opens a new incident", () => {

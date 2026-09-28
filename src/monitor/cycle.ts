@@ -5,6 +5,7 @@ import type {
   MonitorState,
   ProbeOutcome,
 } from "../domain/monitor.ts";
+import { nextMaintenanceTime } from "./history.ts";
 import type { Transition } from "./machine.ts";
 import { evaluate } from "./machine.ts";
 
@@ -23,7 +24,7 @@ export const initialState = (now: number): MonitorState => ({
   manualRequestedAt: null,
   nextCheckAt: now,
   nextCheckKind: "scheduled",
-  nextMaintenanceAt: null,
+  nextMaintenanceAt: nextMaintenanceTime(now),
   nextSlotAt: now,
   openIncidentId: null,
   rolledUpThrough: null,

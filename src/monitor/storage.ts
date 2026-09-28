@@ -5,17 +5,18 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import type { AlertEvent } from "../domain/alert.ts";
 import { Notification, OutboxEntry } from "../domain/alert.ts";
+import type { DailyRollup } from "../domain/history.ts";
+import { Check, Incident } from "../domain/history.ts";
+import type { IncidentResolution } from "../domain/monitor.ts";
 import {
   ChannelSelection,
-  CheckErrorKind,
-  CheckKind,
-  IncidentResolution,
   Inflight,
   LastResult,
   MonitorConfig,
   MonitorState,
 } from "../domain/monitor.ts";
 import type { CheckRecord, IncidentClose, IncidentOpen } from "./cycle.ts";
+import type { EnabledPeriod, PeriodChange, Sample } from "./history.ts";
 
 /**
  * Monitor DO schema. Column names are snake_case; the SQL client maps them
@@ -122,6 +123,32 @@ export const migrations = SqliteMigrator.fromRecord({
     )`;
     yield* sql`CREATE INDEX outbox_state ON outbox (state)`;
   }),
+  "3_history": Effect.gen(function* historyMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    // Spans during which the monitor was enabled, one per interval in
+    // force; `expected` samples per day are derived from them.
+    yield* sql`CREATE TABLE enabled_periods (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      interval_seconds INTEGER NOT NULL
+    )`;
+    yield* sql`CREATE TABLE daily_rollups (
+      day TEXT PRIMARY KEY,
+      counted INTEGER NOT NULL,
+      up INTEGER NOT NULL,
+      down INTEGER NOT NULL,
+      expected REAL NOT NULL,
+      p50 INTEGER,
+      p95 INTEGER
+    )`;
+    yield* sql`CREATE INDEX incidents_resolved_at ON incidents (resolved_at)`;
+    // Existing monitors: assume enabled since creation, maintain now.
+    yield* sql`INSERT INTO enabled_periods (started_at, ended_at, interval_seconds)
+      SELECT created_at, NULL, interval_seconds FROM config WHERE enabled = 1`;
+    yield* sql`UPDATE state SET next_maintenance_at = ${Date.now()}
+      WHERE next_maintenance_at IS NULL`;
+  }),
 });
 
 /** Tables wiped by `destroy()`; the tombstone is kept. */
@@ -133,6 +160,8 @@ const dataTables = [
   "notifications",
   "incident_recipients",
   "outbox",
+  "enabled_periods",
+  "daily_rollups",
 ] as const;
 
 const ConfigRow = Schema.Struct({
@@ -150,27 +179,14 @@ const StateRow = Schema.Struct({
 });
 
 export const CheckRow = Schema.Struct({
-  at: Schema.Number,
-  checkId: Schema.String,
+  ...Check.fields,
   counted: Schema.BooleanFromBit,
-  errorKind: Schema.NullOr(CheckErrorKind),
-  kind: CheckKind,
-  latencyMs: Schema.NullOr(Schema.Number),
-  message: Schema.NullOr(Schema.String),
   ok: Schema.BooleanFromBit,
-  status: Schema.NullOr(Schema.Number),
 });
 export type CheckRow = typeof CheckRow.Type;
 
-export const IncidentRow = Schema.Struct({
-  cause: Schema.String,
-  id: Schema.String,
-  lastHttpStatus: Schema.NullOr(Schema.Number),
-  resolution: Schema.NullOr(IncidentResolution),
-  resolvedAt: Schema.NullOr(Schema.Number),
-  startedAt: Schema.Number,
-});
-export type IncidentRow = typeof IncidentRow.Type;
+export const IncidentRow = Incident;
+export type IncidentRow = Incident;
 
 const NotificationRow = Schema.Struct({
   ...Notification.fields,
@@ -269,11 +285,16 @@ export const closeIncident = Effect.fn("MonitorStorage.closeIncident")(
   }
 );
 
+/** Checks at or after `since`, newest first. */
 export const recentChecks = Effect.fn("MonitorStorage.recentChecks")(
-  function* recentChecksEffect(limit: number) {
+  function* recentChecksEffect(options: {
+    readonly limit: number;
+    readonly since?: number | undefined;
+  }) {
     const sql = yield* SqlClient.SqlClient;
-    const rows =
-      yield* sql`SELECT * FROM checks ORDER BY at DESC, check_id DESC LIMIT ${limit}`;
+    const rows = yield* sql`SELECT * FROM checks
+      WHERE at >= ${options.since ?? 0}
+      ORDER BY at DESC, check_id DESC LIMIT ${options.limit}`;
     return yield* Schema.decodeUnknownEffect(Schema.Array(CheckRow))(rows).pipe(
       Effect.orDie
     );
@@ -470,6 +491,130 @@ export const recentAlerts = Effect.fn("MonitorStorage.recentAlerts")(
       incidentId: string;
     }>`SELECT * FROM incident_recipients ORDER BY incident_id, channel_id LIMIT ${limit}`;
     return { notifications, outbox, recipients };
+  }
+);
+
+/** Apply a config change to the enabled-periods log. */
+export const recordPeriodChange = Effect.fn(
+  "MonitorStorage.recordPeriodChange"
+)(function* recordPeriodChangeEffect(change: PeriodChange, now: number) {
+  const sql = yield* SqlClient.SqlClient;
+  if (change.close) {
+    yield* sql`UPDATE enabled_periods SET ended_at = ${now}
+        WHERE ended_at IS NULL`;
+  }
+  if (change.open !== null) {
+    yield* sql`INSERT INTO enabled_periods ${sql.insert({
+      endedAt: null,
+      intervalSeconds: change.open.intervalSeconds,
+      startedAt: now,
+    })}`;
+  }
+});
+
+/** Enabled periods overlapping `[from, to)`. */
+export const readPeriods = Effect.fn("MonitorStorage.readPeriods")(
+  function* readPeriodsEffect(from: number, to: number) {
+    const sql = yield* SqlClient.SqlClient;
+    return yield* sql<EnabledPeriod>`SELECT started_at, ended_at, interval_seconds
+      FROM enabled_periods
+      WHERE started_at < ${to} AND (ended_at IS NULL OR ended_at > ${from})
+      ORDER BY started_at`;
+  }
+);
+
+/** Counted samples in `[from, to)`. */
+export const readSamples = Effect.fn("MonitorStorage.readSamples")(
+  function* readSamplesEffect(from: number, to: number) {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{
+      latencyMs: number | null;
+      ok: number;
+    }>`SELECT ok, latency_ms FROM checks
+      WHERE counted = 1 AND at >= ${from} AND at < ${to}`;
+    return rows.map((row): Sample => ({
+      latencyMs: row.latencyMs,
+      ok: row.ok === 1,
+    }));
+  }
+);
+
+export const writeRollup = Effect.fn("MonitorStorage.writeRollup")(
+  function* writeRollupEffect(rollup: DailyRollup) {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT OR REPLACE INTO daily_rollups ${sql.insert({ ...rollup })}`;
+  }
+);
+
+/** Rollups for days in `[fromDay, toDay]`, oldest first. */
+export const readRollups = Effect.fn("MonitorStorage.readRollups")(
+  function* readRollupsEffect(fromDay: string, toDay: string) {
+    const sql = yield* SqlClient.SqlClient;
+    return yield* sql<DailyRollup>`SELECT * FROM daily_rollups
+      WHERE day >= ${fromDay} AND day <= ${toDay} ORDER BY day`;
+  }
+);
+
+export interface PruneCounts {
+  readonly checks: number;
+  readonly incidents: number;
+  readonly periods: number;
+}
+
+/**
+ * Retention: raw checks before `checksBefore`, enabled periods that ended
+ * before `periodsBefore` (only rolled-up days need them), and incidents
+ * resolved before `incidentsBefore` with no alert work pending, together
+ * with their notifications, recipients and outbox rows.
+ */
+export const prune = Effect.fn("MonitorStorage.prune")(function* pruneEffect(
+  checksBefore: number | null,
+  periodsBefore: number | null,
+  incidentsBefore: number
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const count = (table: string) =>
+    sql<{ n: number }>`SELECT count(*) AS n FROM ${sql(table)}`.pipe(
+      Effect.map((rows) => rows[0]?.n ?? 0)
+    );
+  const checksBeforeCount = yield* count("checks");
+  if (checksBefore !== null) {
+    yield* sql`DELETE FROM checks WHERE at < ${checksBefore}`;
+  }
+  const periodsBeforeCount = yield* count("enabled_periods");
+  if (periodsBefore !== null) {
+    yield* sql`DELETE FROM enabled_periods
+      WHERE ended_at IS NOT NULL AND ended_at <= ${periodsBefore}`;
+  }
+  const incidentsBeforeCount = yield* count("incidents");
+  yield* sql`DELETE FROM incidents
+    WHERE resolved_at IS NOT NULL AND resolved_at < ${incidentsBefore}
+      AND id NOT IN (SELECT incident_id FROM notifications WHERE resolved = 0)
+      AND id NOT IN (SELECT incident_id FROM outbox WHERE state = 'pending')`;
+  // Alert rows live and die with their incident.
+  for (const table of ["notifications", "incident_recipients", "outbox"]) {
+    yield* sql`DELETE FROM ${sql(table)}
+      WHERE incident_id NOT IN (SELECT id FROM incidents)`;
+  }
+  return {
+    checks: checksBeforeCount - (yield* count("checks")),
+    incidents: incidentsBeforeCount - (yield* count("incidents")),
+    periods: periodsBeforeCount - (yield* count("enabled_periods")),
+  } satisfies PruneCounts;
+});
+
+/** Alert rows of the listed incidents, for the incidents endpoint. */
+export const incidentAlerts = Effect.fn("MonitorStorage.incidentAlerts")(
+  function* incidentAlertsEffect(incidentIds: readonly string[]) {
+    const sql = yield* SqlClient.SqlClient;
+    if (incidentIds.length === 0) {
+      return [];
+    }
+    return yield* sql`SELECT * FROM outbox
+      WHERE ${sql.in("incident_id", incidentIds)}
+      ORDER BY created_at, event DESC, channel_id`.pipe(
+      Effect.flatMap(decodeOutbox)
+    );
   }
 );
 

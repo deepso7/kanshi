@@ -10,6 +10,11 @@ import { deliver } from "../alerts/delivery.ts";
 import type { DeliveryResult } from "../alerts/delivery.ts";
 import { alertRequest, idempotencyKey } from "../alerts/message.ts";
 import type { Notification, OutboxEntry } from "../domain/alert.ts";
+import type {
+  IncidentWithAlerts,
+  UptimeDay,
+  UptimeReport,
+} from "../domain/history.ts";
 import type { MonitorPatchInput } from "../domain/monitor-input.ts";
 import { patchConfig } from "../domain/monitor-input.ts";
 import type {
@@ -39,6 +44,20 @@ import {
   monitorErrors,
 } from "./errors.ts";
 import {
+  checksPruneBefore,
+  dayMs,
+  dayStart,
+  daysToRollUp,
+  incidentsPruneBefore,
+  maxRollupDaysPerRun,
+  nextMaintenanceTime,
+  periodChange,
+  reportDays,
+  rollupDay,
+  uptimeDay,
+  uptimeReport,
+} from "./history.ts";
+import {
   afterAttempt,
   deferred,
   dueNotifications,
@@ -50,28 +69,35 @@ import {
   skipped,
 } from "./outbox.ts";
 import { applyConfigChange } from "./reset.ts";
-import type { CheckRow, IncidentRow } from "./storage.ts";
+import type { CheckRow, PruneCounts } from "./storage.ts";
 import {
   closeIncident,
+  incidentAlerts,
   insertCheck,
   insertNotification,
   listIncidents,
   migrations,
   openIncident,
+  prune,
   readAlertWork,
   readConfig,
   readIncident,
   readOutboxPair,
+  readPeriods,
+  readRollups,
+  readSamples,
   readState,
   readTombstone,
   recentAlerts,
   recentChecks,
+  recordPeriodChange,
   resolveDown,
   resolveUp,
   wipe,
   writeConfig,
   writeNotification,
   writeOutbox,
+  writeRollup,
   writeState,
 } from "./storage.ts";
 
@@ -90,6 +116,22 @@ export interface MonitorAlertsView {
     readonly incidentId: string;
   }[];
 }
+
+/** What a maintenance run did (for the dev hook and logs). */
+export interface MaintenanceResult {
+  readonly nextMaintenanceAt: number | null;
+  readonly pruned: PruneCounts;
+  readonly rolledUp: readonly string[];
+  readonly rolledUpThrough: string | null;
+}
+
+export interface ChecksQuery {
+  readonly limit: number;
+  readonly since?: number | undefined;
+}
+
+/** How long a failed maintenance run waits before the next try. */
+const maintenanceRetryMs = 60 * 60 * 1000;
 
 /** Outbox rows attempted per alarm run; the rest re-arm immediately. */
 const deliveriesPerRun = 25;
@@ -134,12 +176,30 @@ export class Monitor extends Cloudflare.DurableObject<
       RuntimeContext
     >;
     status: () => Effect.Effect<MonitorStatusView, never, RuntimeContext>;
+    /** Checks at or after `since`, newest first. */
     checks: (
-      limit: number
+      query: ChecksQuery
     ) => Effect.Effect<readonly CheckRow[], never, RuntimeContext>;
+    /** Incidents with their alert rows, newest first. */
     incidents: (
       limit: number
-    ) => Effect.Effect<readonly IncidentRow[], never, RuntimeContext>;
+    ) => Effect.Effect<readonly IncidentWithAlerts[], never, RuntimeContext>;
+    /** Per-day uptime for the last `days` days, today computed live. */
+    uptime: (
+      days: number
+    ) => Effect.Effect<
+      UptimeReport,
+      MonitorNotConfigured | MonitorTombstoned,
+      RuntimeContext
+    >;
+    /** Run maintenance as of `now` whether due or not (dev hook). */
+    maintain: (
+      now: number
+    ) => Effect.Effect<
+      MaintenanceResult,
+      MonitorNotConfigured | MonitorTombstoned,
+      RuntimeContext
+    >;
     alerts: (
       limit: number
     ) => Effect.Effect<MonitorAlertsView, never, RuntimeContext>;
@@ -288,9 +348,11 @@ export const MonitorLive = Monitor.make(
               }
               return { config: loaded.config, state: loaded.state };
             }
-            const initial = initialState(Date.now());
+            const now = Date.now();
+            const initial = initialState(now);
             yield* writeConfig(config);
             yield* writeState(initial);
+            yield* recordPeriodChange(periodChange(null, config), now);
             return { config, state: initial };
           })
         ).pipe(
@@ -320,6 +382,10 @@ export const MonitorLive = Monitor.make(
             );
             yield* writeConfig(change.config);
             yield* writeState(change.state);
+            yield* recordPeriodChange(
+              periodChange(live.config, change.config),
+              now
+            );
             if (change.closeIncident !== null) {
               yield* closeIncident(
                 change.closeIncident,
@@ -657,12 +723,139 @@ export const MonitorLive = Monitor.make(
         }
       });
 
+      /**
+       * Roll every closed day after the watermark up and advance it in the
+       * same transaction, then prune by retention. Runs when
+       * `nextMaintenanceAt` is due, or always when `force`d.
+       */
+      const maintain = (now: number, force: boolean) =>
+        transact(
+          Effect.gen(function* maintainTx() {
+            const live = yield* loadLive;
+            if (!force && (live.state.nextMaintenanceAt ?? 0) > now) {
+              return null;
+            }
+            const days = daysToRollUp(
+              live.state.rolledUpThrough,
+              live.config.createdAt,
+              now
+            );
+            for (const day of days) {
+              const from = dayStart(day);
+              const samples = yield* readSamples(from, from + dayMs);
+              const periods = yield* readPeriods(from, from + dayMs);
+              yield* writeRollup(rollupDay(day, samples, periods));
+            }
+            const rolledUpThrough = days.at(-1) ?? live.state.rolledUpThrough;
+            const more =
+              days.length === maxRollupDaysPerRun &&
+              daysToRollUp(rolledUpThrough, live.config.createdAt, now, 1)
+                .length > 0;
+            const nextMaintenanceAt = more ? now : nextMaintenanceTime(now);
+            yield* writeState({
+              ...live.state,
+              nextMaintenanceAt,
+              rolledUpThrough,
+            });
+            const pruned = yield* prune(
+              checksPruneBefore(rolledUpThrough, now),
+              rolledUpThrough === null
+                ? null
+                : dayStart(rolledUpThrough) + dayMs,
+              incidentsPruneBefore(now)
+            );
+            return {
+              nextMaintenanceAt,
+              pruned,
+              rolledUp: days,
+              rolledUpThrough,
+            } satisfies MaintenanceResult;
+          })
+        );
+
+      /** A failed run retries in an hour rather than spinning the alarm. */
+      const postponeMaintenance = transact(
+        Effect.gen(function* postponeMaintenanceTx() {
+          const live = yield* loadLive;
+          yield* writeState({
+            ...live.state,
+            nextMaintenanceAt: Date.now() + maintenanceRetryMs,
+          });
+        })
+      ).pipe(Effect.ignore);
+
+      const maintainStep = Effect.suspend(() =>
+        maintain(Date.now(), false)
+      ).pipe(
+        Effect.tap((result) =>
+          result === null
+            ? Effect.void
+            : Effect.logInfo(
+                `maintenance rolled up ${result.rolledUp.length} days through ${result.rolledUpThrough}, pruned ${result.pruned.checks} checks, ${result.pruned.incidents} incidents`
+              )
+        ),
+        Effect.catchTags({
+          MonitorNotConfigured: () => Effect.void,
+          MonitorTombstoned: () => Effect.void,
+        }),
+        Effect.tapCause(() => postponeMaintenance)
+      );
+
+      const uptime = (days: number) =>
+        withSql(
+          Effect.gen(function* uptimeEffect() {
+            const live = yield* loadLive;
+            const now = Date.now();
+            const covered = reportDays(days, live.config.createdAt, now);
+            const [first] = covered;
+            const last = covered.at(-1);
+            if (first === undefined || last === undefined) {
+              return uptimeReport([]);
+            }
+            const watermark = live.state.rolledUpThrough;
+            const stored = new Map(
+              (yield* readRollups(first, last)).map((row) => [row.day, row])
+            );
+            const result: UptimeDay[] = [];
+            for (const day of covered) {
+              if (watermark !== null && day <= watermark) {
+                const row = stored.get(day);
+                if (row !== undefined) {
+                  result.push(uptimeDay(row, false));
+                }
+                continue;
+              }
+              // Today, or a closed day maintenance has not reached yet.
+              const from = dayStart(day);
+              const samples = yield* readSamples(from, from + dayMs);
+              const periods = yield* readPeriods(from, from + dayMs);
+              result.push(
+                uptimeDay(rollupDay(day, samples, periods, now), true)
+              );
+            }
+            return uptimeReport(result);
+          })
+        ).pipe(Effect.catchTag("SqlError", Effect.die));
+
+      const incidents = (limit: number) =>
+        withSql(
+          Effect.gen(function* incidentsEffect() {
+            const rows = yield* listIncidents(limit);
+            const alerts = yield* incidentAlerts(rows.map((row) => row.id));
+            return rows.map((row): IncidentWithAlerts => ({
+              ...row,
+              alerts: alerts.filter((alert) => alert.incidentId === row.id),
+            }));
+          })
+        ).pipe(Effect.orDie);
+
       const alarm = (_info?: Cloudflare.AlarmInvocationInfo) =>
         Effect.gen(function* alarmEffect() {
           yield* logged("expire")(expireStep);
           yield* logged("check")(checkStep);
           yield* logged("notify")(notifyStep);
           yield* logged("deliver")(deliverStep);
+          yield* logged("maintain")(maintainStep);
           yield* rearm;
         }).pipe(Effect.withSpan("Monitor.alarm"));
 
@@ -670,18 +863,27 @@ export const MonitorLive = Monitor.make(
         alarm,
         alerts: (limit: number) =>
           withSql(recentAlerts(limit)).pipe(Effect.orDie),
-        checks: (limit: number) =>
-          withSql(recentChecks(limit)).pipe(Effect.orDie),
+        checks: (query: ChecksQuery) =>
+          withSql(recentChecks(query)).pipe(Effect.orDie),
         configure,
         destroy,
         ensureAlarm: () => rearm,
-        incidents: (limit: number) =>
-          withSql(listIncidents(limit)).pipe(Effect.orDie),
+        incidents,
+        maintain: (now: number) =>
+          maintain(now, true).pipe(
+            Effect.flatMap((result) =>
+              result === null
+                ? Effect.die("maintenance skipped")
+                : Effect.succeed(result)
+            ),
+            Effect.tap(() => rearm)
+          ),
         runNow,
         snapshot: () =>
           withSql(loadLive).pipe(Effect.catchTag("SqlError", Effect.die)),
         status,
         update,
+        uptime,
       };
     });
   })

@@ -293,7 +293,11 @@ describe("alarm computation with alert work", () => {
     updatedAt: t0,
     url: "https://example.com/",
   };
-  const state = { ...initialState(t0), nextCheckAt: t0 + 60_000 };
+  const state = {
+    ...initialState(t0),
+    nextCheckAt: t0 + 60_000,
+    nextMaintenanceAt: null,
+  };
 
   it("wakes for the earliest notification retry or outbox attempt", () => {
     const outbox = [row({ event: "down", nextAttemptAt: t0 + 30_000 })];

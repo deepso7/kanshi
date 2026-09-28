@@ -20,6 +20,9 @@ const statusParam = (value: string | null, fallback: number): number => {
 
 const maxDelayMs = 60_000;
 
+const monitorNotFound = () =>
+  Effect.succeed(HttpServerResponse.text("monitor not found", { status: 404 }));
+
 /**
  * Dev stage fixtures under `/_dev/*` (never routed outside the dev stage):
  *
@@ -31,6 +34,8 @@ const maxDelayMs = 60_000;
  * - `GET /_dev/registry` every Registry row, whatever its lifecycle
  * - `GET /_dev/monitors/:id` a monitor's raw status, checks, incidents and
  *   alert rows (notifications, recipients, outbox)
+ * - `POST /_dev/monitors/:id/maintain?now=<ms>` run maintenance (rollups,
+ *   retention) as of `now` (default: the current time), due or not
  */
 /** `GET /_dev/target?status=&delay=&body=` */
 const target = (url: URL) =>
@@ -124,10 +129,26 @@ export const makeDevRoutes = (deps: DevDeps) => {
       const monitor = deps.monitors.getByName(id);
       return yield* HttpServerResponse.json({
         alerts: yield* monitor.alerts(100),
-        checks: yield* monitor.checks(100),
+        checks: yield* monitor.checks({ limit: 100 }),
         incidents: yield* monitor.incidents(100),
         status: yield* monitor.status(),
       });
+    });
+
+  const maintain = (id: string, url: URL) =>
+    Effect.gen(function* maintainRoute() {
+      const nowParam = Number(url.searchParams.get("now") ?? Number.NaN);
+      const now = Number.isFinite(nowParam) ? nowParam : Date.now();
+      return yield* deps.monitors
+        .getByName(id)
+        .maintain(now)
+        .pipe(
+          Effect.flatMap((result) => HttpServerResponse.json(result)),
+          Effect.catchTags({
+            MonitorNotConfigured: monitorNotFound,
+            MonitorTombstoned: monitorNotFound,
+          })
+        );
     });
 
   return Effect.gen(function* devRoutes() {
@@ -156,6 +177,14 @@ export const makeDevRoutes = (deps: DevDeps) => {
     }
     if (area === "monitors" && first !== undefined && get) {
       return yield* monitorDetail(first);
+    }
+    if (
+      area === "monitors" &&
+      first !== undefined &&
+      second === "maintain" &&
+      request.method === "POST"
+    ) {
+      return yield* maintain(first, url);
     }
     return HttpServerResponse.empty({ status: 404 });
   });

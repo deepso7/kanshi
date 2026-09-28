@@ -118,7 +118,10 @@ test(
     expect(disabledBody.generation).toBe(1);
 
     const paused = yield* detail(monitor.id);
-    expect(paused.status.alarmAt).toBeNull();
+    // Only the daily maintenance keeps waking a disabled monitor.
+    expect(paused.status.alarmAt).toBe(
+      paused.status.snapshot?.state.nextMaintenanceAt ?? Number.NaN
+    );
     expect(paused.incidents).toHaveLength(1);
     expect(paused.incidents[0]?.resolution).toBe("disabled");
     // Nothing is checked while disabled; a probe that was in flight is
