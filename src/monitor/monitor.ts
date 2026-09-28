@@ -1,10 +1,15 @@
 import type { RuntimeContext } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { deliver } from "../alerts/delivery.ts";
+import type { DeliveryResult } from "../alerts/delivery.ts";
+import { alertRequest, idempotencyKey } from "../alerts/message.ts";
+import type { Notification, OutboxEntry } from "../domain/alert.ts";
 import type { MonitorPatchInput } from "../domain/monitor-input.ts";
 import { patchConfig } from "../domain/monitor-input.ts";
 import type {
@@ -33,20 +38,40 @@ import {
   MonitorTombstoned,
   monitorErrors,
 } from "./errors.ts";
+import {
+  afterAttempt,
+  deferred,
+  dueNotifications,
+  dueOutbox,
+  notificationFailed,
+  notificationsDueAt,
+  outboxDecision,
+  outboxDueAt,
+  skipped,
+} from "./outbox.ts";
 import { applyConfigChange } from "./reset.ts";
 import type { CheckRow, IncidentRow } from "./storage.ts";
 import {
   closeIncident,
   insertCheck,
+  insertNotification,
   listIncidents,
   migrations,
   openIncident,
+  readAlertWork,
   readConfig,
+  readIncident,
+  readOutboxPair,
   readState,
   readTombstone,
+  recentAlerts,
   recentChecks,
+  resolveDown,
+  resolveUp,
   wipe,
   writeConfig,
+  writeNotification,
+  writeOutbox,
   writeState,
 } from "./storage.ts";
 
@@ -55,6 +80,19 @@ export interface MonitorStatusView {
   readonly snapshot: MonitorSnapshot | null;
   readonly tombstonedAt: number | null;
 }
+
+/** Recent alert rows, for the dev inspector and tests. */
+export interface MonitorAlertsView {
+  readonly notifications: readonly Notification[];
+  readonly outbox: readonly OutboxEntry[];
+  readonly recipients: readonly {
+    readonly channelId: string;
+    readonly incidentId: string;
+  }[];
+}
+
+/** Outbox rows attempted per alarm run; the rest re-arm immediately. */
+const deliveriesPerRun = 25;
 
 export interface UpdateOptions {
   readonly devMode: boolean;
@@ -102,6 +140,9 @@ export class Monitor extends Cloudflare.DurableObject<
     incidents: (
       limit: number
     ) => Effect.Effect<readonly IncidentRow[], never, RuntimeContext>;
+    alerts: (
+      limit: number
+    ) => Effect.Effect<MonitorAlertsView, never, RuntimeContext>;
     /** Delete all data and leave a tombstone. Idempotent. */
     destroy: () => Effect.Effect<void, never, RuntimeContext>;
     /** Recompute and set the alarm from persisted state. */
@@ -139,6 +180,9 @@ const loadLive = Effect.gen(function* loadLiveEffect() {
   return { config: loaded.config, state: loaded.state };
 });
 
+const describeCause = (cause: Cause.Cause<unknown>): string =>
+  Cause.pretty(cause).split("\n", 1)[0]?.slice(0, 200) ?? "unknown error";
+
 /** Alarm steps catch their own failures so later steps still run. */
 const logged =
   (step: string) =>
@@ -155,6 +199,8 @@ export const MonitorLive = Monitor.make(
   Effect.gen(function* MonitorInit() {
     const state = yield* Cloudflare.DurableObjectState;
     const registries = yield* Registry;
+
+    const registry = () => registries.getByName(registryName);
 
     /** Best effort: the watchdog converges summaries that fail here. */
     const pushSummary = (config: MonitorConfig, current: MonitorState) =>
@@ -195,12 +241,16 @@ export const MonitorLive = Monitor.make(
         .withPermits(1)(
           Effect.gen(function* rearmEffect() {
             const loaded = yield* withSql(load);
+            const work = yield* withSql(readAlertWork);
             const at =
               loaded.tombstonedAt !== null ||
               loaded.config === null ||
               loaded.state === null
                 ? null
-                : nextAlarmAt(loaded.config, loaded.state);
+                : nextAlarmAt(loaded.config, loaded.state, [
+                    notificationsDueAt(work.notifications),
+                    outboxDueAt(work.outbox),
+                  ]);
             yield* at === null
               ? state.storage.deleteAlarm()
               : state.storage.setAlarm(at);
@@ -389,11 +439,23 @@ export const MonitorLive = Monitor.make(
             }
             yield* writeState(completion.state);
             yield* insertCheck(completion.check);
+            // The intent to alert commits with the transition; the alarm
+            // resolves and sends it (no cross-DO call in here).
             if (completion.openIncident !== null) {
               yield* openIncident(completion.openIncident);
+              yield* insertNotification(
+                completion.openIncident.id,
+                "down",
+                completion.check.at
+              );
             }
             if (completion.closeIncident !== null) {
               yield* closeIncident(completion.closeIncident, "recovered");
+              yield* insertNotification(
+                completion.closeIncident.id,
+                "up",
+                completion.check.at
+              );
             }
             if (completion.transition !== "none") {
               yield* Effect.logInfo(
@@ -424,15 +486,190 @@ export const MonitorLive = Monitor.make(
         }
       });
 
+      /**
+       * `down`: fetch the monitor's channels from the Registry (outside any
+       * transaction), then fix the recipients, queue one `down` row each and
+       * mark it resolved in one transaction. `up`: once its `down` is
+       * resolved, queue one `up` row per recipient. A Registry failure
+       * retries the notification with backoff.
+       */
+      const resolveNotification = (
+        notification: Notification,
+        config: MonitorConfig
+      ) =>
+        Effect.gen(function* resolveNotificationEffect() {
+          const { notifications } = yield* withSql(readAlertWork);
+          const current = notifications.find(
+            (other) =>
+              other.incidentId === notification.incidentId &&
+              other.event === notification.event
+          );
+          if (current === undefined || current.resolved) {
+            return;
+          }
+          if (current.event === "up") {
+            const down = notifications.find(
+              (other) =>
+                other.incidentId === current.incidentId &&
+                other.event === "down"
+            );
+            if (down !== undefined && !down.resolved) {
+              return;
+            }
+            yield* transact(resolveUp(current.incidentId, Date.now()));
+            return;
+          }
+          const recipients = yield* registry()
+            .recipients(config.channels)
+            .pipe(Effect.exit);
+          if (recipients._tag === "Failure") {
+            yield* Effect.logWarning(
+              `resolving recipients for incident ${current.incidentId} failed`,
+              recipients.cause
+            );
+            yield* transact(
+              writeNotification(
+                notificationFailed(
+                  current,
+                  `registry: ${describeCause(recipients.cause)}`,
+                  Date.now()
+                )
+              )
+            );
+            return;
+          }
+          yield* transact(
+            resolveDown(current.incidentId, recipients.value, Date.now())
+          );
+        });
+
+      const notifyStep = Effect.gen(function* notifyStepEffect() {
+        const live = yield* withSql(loadLive);
+        const { notifications } = yield* withSql(readAlertWork);
+        for (const notification of dueNotifications(
+          notifications,
+          Date.now()
+        )) {
+          yield* logged(`notify ${notification.incidentId}`)(
+            resolveNotification(notification, live.config)
+          );
+        }
+      });
+
+      /** Decide, and possibly send, one outbox row. */
+      const sendOne = (due: OutboxEntry, config: MonitorConfig) =>
+        Effect.gen(function* sendOneEffect() {
+          const pair = yield* withSql(
+            readOutboxPair(due.incidentId, due.event, due.channelId)
+          );
+          const { entry } = pair;
+          if (entry === null) {
+            return;
+          }
+          const incident = yield* withSql(readIncident(entry.incidentId));
+          const decision = outboxDecision(entry, pair.down, incident);
+          if (decision._tag === "Done" || decision._tag === "Wait") {
+            return;
+          }
+          if (decision._tag === "Skip" || incident === null) {
+            const reason =
+              decision._tag === "Skip"
+                ? decision.reason
+                : "incident no longer exists";
+            yield* transact(writeOutbox(skipped(entry, reason, Date.now())));
+            return;
+          }
+          const target = yield* registry()
+            .channelTarget(entry.channelId)
+            .pipe(Effect.exit);
+          if (target._tag === "Failure") {
+            yield* Effect.logWarning(
+              `resolving channel ${entry.channelId} failed`,
+              target.cause
+            );
+            yield* transact(
+              writeOutbox(
+                deferred(
+                  entry,
+                  `registry: ${describeCause(target.cause)}`,
+                  Date.now()
+                )
+              )
+            );
+            return;
+          }
+          if (target.value === null) {
+            const gone: DeliveryResult = {
+              _tag: "Failed",
+              error: "channel deleted",
+              permanent: true,
+              status: null,
+            };
+            yield* transact(
+              writeOutbox(afterAttempt(entry, gone, false, Date.now()))
+            );
+            return;
+          }
+          const result = yield* deliver(
+            alertRequest(target.value.kind, target.value.url, {
+              _tag: decision.message,
+              idempotencyKey: idempotencyKey(
+                entry.incidentId,
+                entry.event,
+                entry.channelId
+              ),
+              incident: {
+                cause: incident.cause,
+                id: incident.id,
+                lastHttpStatus: incident.lastHttpStatus,
+                resolvedAt: incident.resolvedAt,
+                startedAt: incident.startedAt,
+              },
+              monitor: { id: config.id, name: config.name, url: config.url },
+              sentAt: Date.now(),
+            })
+          );
+          if (result._tag === "Failed") {
+            yield* Effect.logWarning(
+              `alert ${entry.incidentId}:${entry.event} to ${entry.channelId} failed: ${result.error}`
+            );
+          }
+          yield* transact(
+            writeOutbox(
+              afterAttempt(
+                entry,
+                result,
+                decision.message === "DownRecovered",
+                Date.now()
+              )
+            )
+          );
+        });
+
+      const deliverStep = Effect.gen(function* deliverStepEffect() {
+        const live = yield* withSql(loadLive);
+        const { outbox } = yield* withSql(readAlertWork);
+        const due = dueOutbox(outbox, Date.now()).slice(0, deliveriesPerRun);
+        for (const entry of due) {
+          yield* logged(`deliver ${entry.incidentId}:${entry.event}`)(
+            sendOne(entry, live.config)
+          );
+        }
+      });
+
       const alarm = (_info?: Cloudflare.AlarmInvocationInfo) =>
         Effect.gen(function* alarmEffect() {
           yield* logged("expire")(expireStep);
           yield* logged("check")(checkStep);
+          yield* logged("notify")(notifyStep);
+          yield* logged("deliver")(deliverStep);
           yield* rearm;
         }).pipe(Effect.withSpan("Monitor.alarm"));
 
       return {
         alarm,
+        alerts: (limit: number) =>
+          withSql(recentAlerts(limit)).pipe(Effect.orDie),
         checks: (limit: number) =>
           withSql(recentChecks(limit)).pipe(Effect.orDie),
         configure,

@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import type { AlertEvent } from "../domain/alert.ts";
+import { Notification, OutboxEntry } from "../domain/alert.ts";
 import {
   ChannelSelection,
   CheckErrorKind,
@@ -87,10 +89,51 @@ export const migrations = SqliteMigrator.fromRecord({
       last_http_status INTEGER
     )`;
   }),
+  "2_alerts": Effect.gen(function* alertsMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE notifications (
+      incident_id TEXT NOT NULL,
+      event TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      resolved INTEGER NOT NULL,
+      attempts INTEGER NOT NULL,
+      next_attempt_at INTEGER NOT NULL,
+      last_error TEXT,
+      PRIMARY KEY (incident_id, event)
+    )`;
+    yield* sql`CREATE INDEX notifications_resolved ON notifications (resolved)`;
+    yield* sql`CREATE TABLE incident_recipients (
+      incident_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      PRIMARY KEY (incident_id, channel_id)
+    )`;
+    yield* sql`CREATE TABLE outbox (
+      incident_id TEXT NOT NULL,
+      event TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      attempts INTEGER NOT NULL,
+      next_attempt_at INTEGER NOT NULL,
+      last_error TEXT,
+      combined INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (incident_id, event, channel_id)
+    )`;
+    yield* sql`CREATE INDEX outbox_state ON outbox (state)`;
+  }),
 });
 
 /** Tables wiped by `destroy()`; the tombstone is kept. */
-const dataTables = ["config", "state", "checks", "incidents"] as const;
+const dataTables = [
+  "config",
+  "state",
+  "checks",
+  "incidents",
+  "notifications",
+  "incident_recipients",
+  "outbox",
+] as const;
 
 const ConfigRow = Schema.Struct({
   ...MonitorConfig.fields,
@@ -128,6 +171,24 @@ export const IncidentRow = Schema.Struct({
   startedAt: Schema.Number,
 });
 export type IncidentRow = typeof IncidentRow.Type;
+
+const NotificationRow = Schema.Struct({
+  ...Notification.fields,
+  resolved: Schema.BooleanFromBit,
+});
+
+const OutboxRow = Schema.Struct({
+  ...OutboxEntry.fields,
+  combined: Schema.BooleanFromBit,
+});
+
+const decodeNotifications = (rows: readonly unknown[]) =>
+  Schema.decodeUnknownEffect(Schema.Array(NotificationRow))(rows).pipe(
+    Effect.orDie
+  );
+
+const decodeOutbox = (rows: readonly unknown[]) =>
+  Schema.decodeUnknownEffect(Schema.Array(OutboxRow))(rows).pipe(Effect.orDie);
 
 const decodeOne =
   <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) =>
@@ -227,6 +288,188 @@ export const listIncidents = Effect.fn("MonitorStorage.listIncidents")(
     return yield* Schema.decodeUnknownEffect(Schema.Array(IncidentRow))(
       rows
     ).pipe(Effect.orDie);
+  }
+);
+
+export const readIncident = Effect.fn("MonitorStorage.readIncident")(
+  function* readIncidentEffect(id: string) {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql`SELECT * FROM incidents WHERE id = ${id}`;
+    return yield* decodeOne(IncidentRow)(rows);
+  }
+);
+
+/** The durable intent to alert; written with the transition. */
+export const insertNotification = Effect.fn(
+  "MonitorStorage.insertNotification"
+)(function* insertNotificationEffect(
+  incidentId: string,
+  event: AlertEvent,
+  now: number
+) {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`INSERT OR IGNORE INTO notifications ${sql.insert(
+    Schema.encodeSync(NotificationRow)({
+      attempts: 0,
+      createdAt: now,
+      event,
+      incidentId,
+      lastError: null,
+      nextAttemptAt: now,
+      resolved: false,
+    })
+  )}`;
+});
+
+/**
+ * Pending alert work: every notification of an incident that has an
+ * unresolved one, and every outbox row of an incident that has a pending
+ * one (so each pending `up` row comes with its `down` row).
+ */
+export const readAlertWork = Effect.gen(function* readAlertWorkEffect() {
+  const sql = yield* SqlClient.SqlClient;
+  const notifications = yield* sql`SELECT * FROM notifications
+    WHERE incident_id IN (
+      SELECT incident_id FROM notifications WHERE resolved = 0
+    )`.pipe(Effect.flatMap(decodeNotifications));
+  const outbox = yield* sql`SELECT * FROM outbox
+    WHERE incident_id IN (
+      SELECT incident_id FROM outbox WHERE state = 'pending'
+    )`.pipe(Effect.flatMap(decodeOutbox));
+  return { notifications, outbox };
+});
+
+export const writeNotification = Effect.fn("MonitorStorage.writeNotification")(
+  function* writeNotificationEffect(notification: Notification) {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`UPDATE notifications
+      SET attempts = ${notification.attempts},
+          next_attempt_at = ${notification.nextAttemptAt},
+          last_error = ${notification.lastError},
+          resolved = ${notification.resolved ? 1 : 0}
+      WHERE incident_id = ${notification.incidentId}
+        AND event = ${notification.event}`;
+  }
+);
+
+const pendingOutboxRow = (
+  incidentId: string,
+  event: AlertEvent,
+  channelId: string,
+  now: number
+) =>
+  Schema.encodeSync(OutboxRow)({
+    attempts: 0,
+    channelId,
+    combined: false,
+    createdAt: now,
+    event,
+    incidentId,
+    lastError: null,
+    nextAttemptAt: now,
+    state: "pending",
+    updatedAt: now,
+  });
+
+/**
+ * Resolve a `down` notification: fix the incident's recipients and queue a
+ * `down` alert for each. Idempotent; run in one transaction.
+ */
+export const resolveDown = Effect.fn("MonitorStorage.resolveDown")(
+  function* resolveDownEffect(
+    incidentId: string,
+    channelIds: readonly string[],
+    now: number
+  ) {
+    const sql = yield* SqlClient.SqlClient;
+    for (const channelId of channelIds) {
+      yield* sql`INSERT OR IGNORE INTO incident_recipients ${sql.insert({
+        channelId,
+        incidentId,
+      })}`;
+      yield* sql`INSERT OR IGNORE INTO outbox ${sql.insert(
+        pendingOutboxRow(incidentId, "down", channelId, now)
+      )}`;
+    }
+    yield* sql`UPDATE notifications SET resolved = 1, last_error = NULL
+      WHERE incident_id = ${incidentId} AND event = 'down'`;
+  }
+);
+
+/**
+ * Resolve an `up` notification: queue an `up` alert for every recipient of
+ * the incident's `down`. Idempotent; run in one transaction.
+ */
+export const resolveUp = Effect.fn("MonitorStorage.resolveUp")(
+  function* resolveUpEffect(incidentId: string, now: number) {
+    const sql = yield* SqlClient.SqlClient;
+    const recipients = yield* sql<{
+      channelId: string;
+    }>`SELECT channel_id FROM incident_recipients WHERE incident_id = ${incidentId}`;
+    for (const { channelId } of recipients) {
+      yield* sql`INSERT OR IGNORE INTO outbox ${sql.insert(
+        pendingOutboxRow(incidentId, "up", channelId, now)
+      )}`;
+    }
+    yield* sql`UPDATE notifications SET resolved = 1, last_error = NULL
+      WHERE incident_id = ${incidentId} AND event = 'up'`;
+  }
+);
+
+/** An outbox row and, for an `up` row, its `down` row. */
+export const readOutboxPair = Effect.fn("MonitorStorage.readOutboxPair")(
+  function* readOutboxPairEffect(
+    incidentId: string,
+    event: AlertEvent,
+    channelId: string
+  ) {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql`SELECT * FROM outbox
+      WHERE incident_id = ${incidentId} AND channel_id = ${channelId}`.pipe(
+      Effect.flatMap(decodeOutbox)
+    );
+    return {
+      down: rows.find((row) => row.event === "down") ?? null,
+      entry: rows.find((row) => row.event === event) ?? null,
+    };
+  }
+);
+
+/** Store an attempt's outcome; only a still-pending row is updated. */
+export const writeOutbox = Effect.fn("MonitorStorage.writeOutbox")(
+  function* writeOutboxEffect(entry: OutboxEntry) {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`UPDATE outbox
+      SET state = ${entry.state},
+          attempts = ${entry.attempts},
+          next_attempt_at = ${entry.nextAttemptAt},
+          last_error = ${entry.lastError},
+          combined = ${entry.combined ? 1 : 0},
+          updated_at = ${entry.updatedAt}
+      WHERE incident_id = ${entry.incidentId}
+        AND event = ${entry.event}
+        AND channel_id = ${entry.channelId}
+        AND state = 'pending'`;
+  }
+);
+
+/** Recent alert rows, for the dev inspector. */
+export const recentAlerts = Effect.fn("MonitorStorage.recentAlerts")(
+  function* recentAlertsEffect(limit: number) {
+    const sql = yield* SqlClient.SqlClient;
+    const notifications = yield* sql`SELECT * FROM notifications
+      ORDER BY created_at DESC, event DESC LIMIT ${limit}`.pipe(
+      Effect.flatMap(decodeNotifications)
+    );
+    const outbox = yield* sql`SELECT * FROM outbox
+      ORDER BY created_at DESC, event DESC, channel_id LIMIT ${limit}`.pipe(
+      Effect.flatMap(decodeOutbox)
+    );
+    const recipients = yield* sql<{
+      channelId: string;
+      incidentId: string;
+    }>`SELECT * FROM incident_recipients ORDER BY incident_id, channel_id LIMIT ${limit}`;
+    return { notifications, outbox, recipients };
   }
 );
 

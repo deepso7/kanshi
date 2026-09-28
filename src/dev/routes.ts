@@ -29,7 +29,8 @@ const maxDelayMs = 60_000;
  * - `POST /_dev/webhook?fail=500&failTimes=1&tag=x` alert sink, recorded
  *   in `dev_events` and logged; `GET /_dev/events` lists them
  * - `GET /_dev/registry` every Registry row, whatever its lifecycle
- * - `GET /_dev/monitors/:id` a monitor's raw status, checks and incidents
+ * - `GET /_dev/monitors/:id` a monitor's raw status, checks, incidents and
+ *   alert rows (notifications, recipients, outbox)
  */
 /** `GET /_dev/target?status=&delay=&body=` */
 const target = (url: URL) =>
@@ -122,6 +123,7 @@ export const makeDevRoutes = (deps: DevDeps) => {
     Effect.gen(function* monitorRoute() {
       const monitor = deps.monitors.getByName(id);
       return yield* HttpServerResponse.json({
+        alerts: yield* monitor.alerts(100),
         checks: yield* monitor.checks(100),
         incidents: yield* monitor.incidents(100),
         status: yield* monitor.status(),
