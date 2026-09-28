@@ -431,3 +431,114 @@ No blockers found. Constraints to carry into phase 2:
 - `pnpm test:integ`: `bun test test/integ`, the Worker run locally by
   `Test.make({ dev: true })` on stage `integ` with real alarms (~60s). Do
   not run it while `pnpm dev` is up (both use port 1337).
+
+## Phase 3 (alerts)
+
+### Layout
+
+- `src/domain/channel.ts`: channel kinds, create/patch input schemas,
+  `ChannelView` (what the API returns), `checkChannelUrl`, `maskUrl`,
+  `hashUrl`. `src/domain/alert.ts`: `Notification` and `OutboxEntry`
+  schemas.
+- `src/alerts/message.ts`: the message model (`Down`, `Recovered`,
+  `DownRecovered`, `Test`), text and the per-kind request
+  (`alertRequest`). `src/alerts/delivery.ts`: `deliver` (one POST, never
+  fails), `classifyStatus`, `backoffMs`, `maxAttempts`.
+- `src/monitor/outbox.ts`: the pure rules (notification waiting and due
+  times, `outboxDecision`, `dueOutbox`, `outboxDueAt`, `afterAttempt`,
+  `skipped`, `deferred`). `src/api/channels.ts`: the channels handlers.
+- Migrations: Registry `"2_channels"` (`channels`, plus the dev-only
+  `dev_counters`), Monitor `"2_alerts"` (`notifications`,
+  `incident_recipients`, `outbox`). Phase 4 should use `"3_history"`. The
+  existing dev stage's objects picked the migrations up on activation.
+
+### API
+
+- `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id`,
+  `POST /api/channels/:id/test`. There is no `GET /api/channels/:id` (not
+  in the plan; the list is enough so far). A channel is `{ id, key,
+managed, kind, name, maskedUrl, urlHash, createdAt, updatedAt }`; `key`
+  defaults to the id, is unique (409) and is not patchable; `kind`, `name`,
+  `managed` and `url` are.
+- The URL is never returned. `maskedUrl` is the origin plus `/****` and,
+  when the rest is at least 12 characters, its last 4
+  (`https://hooks.slack.com/****abcd`). `urlHash` is the SHA-256 hex of the
+  **normalised** URL (the output of `checkChannelUrl`, i.e. `new
+URL(...).toString()` after defaulting to `https://`). Phase 7 sync must
+  normalise env URLs with `checkChannelUrl` before hashing, or every
+  channel will look changed.
+- URL rules: the target URL rules (no credentials, local hostnames or
+  private IP literals) plus https only. The dev stage also allows loopback
+  hosts over http (for `/_dev/webhook`). ntfy access tokens can go in the
+  URL (`?auth=...`), which is secret anyway.
+- The test endpoint answers 200 `{ delivered, status, error }` whether or
+  not the channel accepted it (404 for an unknown channel), so the UI can
+  show the error.
+- Monitor `channels`: `all` or a list of ids; create/patch reject unknown
+  ids with 400 and de-duplicate the list; `[]` means no alerts. Deleting a
+  channel does not edit monitors: dangling ids are ignored when recipients
+  are resolved (and in-flight rows to it end `failed`, "channel deleted").
+
+### Alert pipeline decisions
+
+- `notifications` has `attempts`, `next_attempt_at`, `last_error` besides
+  the plan's columns (**deviation**), for the Registry-unreachable
+  backoff. Resolution retries forever (30s doubling, capped at 30m).
+- `outbox` has `combined` (a `down` that already said "recovered"),
+  `created_at`, `updated_at` besides the plan's columns.
+- "If the incident is already resolved when `down` is first sent" is
+  checked on **every** attempt: a `down` that failed while the incident
+  was open and is retried after recovery goes out as "was down for Xm,
+  recovered" and the `up` row is skipped. Tested in integration.
+- `down` rows of an incident closed as `disabled` or `deleted` before they
+  were sent are **skipped**, not sent (the operator paused it; "recovered"
+  would be wrong). A delete wipes the alert tables anyway.
+- A Registry failure while resolving a channel at send time defers the
+  row with backoff **without** spending one of its 8 attempts.
+- Retry schedule: 30s, 1m, 2m, 4m, 8m, 16m, 30m; the 8th failure is final
+  (about 61 minutes in total). No jitter.
+- `up` notifications waiting for their `down`, and `up` rows waiting for
+  their channel's `down` row, are left out of the alarm computation, so a
+  waiting row never makes the alarm spin.
+- The deliver step sends at most 25 rows per alarm run, one after another,
+  each with a 10s timeout, after the check step. The rest re-arm for now.
+- Messages use the monitor's name and URL at send time, not at the
+  transition.
+- `Idempotency-Key` is only sent to `webhook` channels (as the plan says);
+  test alerts use `test:<channel>:<uuid>`. Other formats: Slack `{ text }`,
+  Discord `{ content, allowed_mentions: { parse: [] } }` (content capped at
+  2000), ntfy plain text body with `title`/`priority`/`tags` as query
+  parameters (headers cannot carry UTF-8 names).
+- At-least-once: a crash between the POST and the outbox write resends the
+  same idempotency key on the next alarm.
+
+### Dev mode and tests
+
+- `/_dev/webhook?fail=500&failTimes=N&tag=x` fails only the first N
+  requests per tag (counter in the Registry's `dev_counters`); every alert
+  is logged as one readable line. `GET /_dev/monitors/:id` now includes
+  `alerts` (`notifications`, `outbox`, `recipients`).
+- `kanshi.dev.config.ts` has `channels` (a generic webhook and a Slack
+  formatted one, both to the dev sink); `pnpm seed` creates missing
+  channels by key before monitors.
+- Integration tests are split into `test/integ/core.test.ts` and
+  `test/integ/alerts.test.ts`, sharing `test/integ/harness.ts`
+  (`setup(stage)` makes the `Test.make` API and registers deploy/destroy
+  hooks). Each file deploys its own stage (`integ`, `integ-alerts`) on port
+  1337, one after the other. The suite takes about 3 minutes; the retry
+  test waits the real 30s backoff.
+
+### For later phases
+
+- Phase 4: nothing prunes `notifications`, `incident_recipients` or
+  `outbox`; prune them with their incidents. An incidents endpoint could
+  expose each incident's alert rows (state, attempts, last error).
+- Phase 5: the watchdog's "monitor X is not being checked" alert goes to
+  all channels but has no monitor outbox to live in; it needs its own
+  durable dedup/outbox (probably in the Registry), reusing
+  `alertRequest`/`deliver`. `ensureAlarm()` already accounts for pending
+  alert work.
+- Phase 6: the channels page uses the endpoints above; show `maskedUrl`
+  and the test result's `error`.
+- Phase 7: channel config (`ChannelDefinition`) is already in
+  `defineConfig`; diff URLs by `urlHash` as described above.
