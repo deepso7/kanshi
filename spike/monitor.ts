@@ -41,6 +41,9 @@ export class Monitor extends Cloudflare.DurableObject<
     status: () => Effect.Effect<MonitorStatus, never, RuntimeContext>;
     txFail: () => Effect.Effect<{ rowsAfter: number }, never, RuntimeContext>;
     askRegistry: () => Effect.Effect<string, never, RuntimeContext>;
+    alarm: (
+      info?: Cloudflare.AlarmInvocationInfo
+    ) => Effect.Effect<void, never, RuntimeContext>;
   }
 >()("Monitor") {}
 
@@ -143,7 +146,9 @@ export const MonitorLive = Monitor.make(
         if (intervalMs > 0) {
           yield* state.storage.setAlarm(now + intervalMs);
         }
-      });
+        // A typed failure becomes a defect; a dying alarm is retried by
+        // workerd (the bridge rejects the alarm() promise).
+      }, Effect.orDie);
 
       return {
         alarm,
