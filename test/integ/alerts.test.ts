@@ -419,7 +419,10 @@ test(
     expect(after.alerts.outbox.map((r) => [r.event, r.state])).toEqual([
       ["down", "delivered"],
     ]);
-    expect(after.status.alarmAt).toBeNull();
+    // No alert work left: only the daily maintenance is armed.
+    expect(after.status.alarmAt).toBe(
+      after.status.snapshot?.state.nextMaintenanceAt ?? Number.NaN
+    );
     expect(yield* received(tag)).toHaveLength(1);
 
     yield* send("DELETE", `/api/monitors/${monitor.id}`);

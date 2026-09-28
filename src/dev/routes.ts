@@ -21,7 +21,10 @@ const statusParam = (value: string | null, fallback: number): number => {
 const maxDelayMs = 60_000;
 
 const monitorNotFound = () =>
-  Effect.succeed(HttpServerResponse.text("monitor not found", { status: 404 }));
+  HttpServerResponse.json(
+    { _tag: "NotFound", message: "monitor not found" },
+    { status: 404 }
+  );
 
 /**
  * Dev stage fixtures under `/_dev/*` (never routed outside the dev stage):
