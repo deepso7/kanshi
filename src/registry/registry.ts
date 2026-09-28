@@ -263,6 +263,8 @@ export class Registry extends Cloudflare.DurableObject<
       observation: WatchObservation,
       at: number
     ) => Effect.Effect<ObserveResult, never, RuntimeContext>;
+    /** Recompute and set the alarm from the watchdog outbox. */
+    ensureAlarm: () => Effect.Effect<number | null, never, RuntimeContext>;
     /** Drop episodes resolved before `before` with nothing left to send. */
     pruneWatchdog: (
       before: number
@@ -754,6 +756,7 @@ export const RegistryLive = Registry.make(
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
           ),
+        ensureAlarm: () => rearm,
         get,
         getFlip: (name: string) =>
           sql<{

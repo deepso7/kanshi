@@ -35,6 +35,7 @@ export interface WatchdogReport {
   readonly failed: number;
   readonly now: number;
   readonly pruned: number | null;
+  readonly registryAlarmAt: number | null;
   readonly results: readonly RowReport[];
 }
 
@@ -185,6 +186,16 @@ export const runWatchdog = Effect.fn("Watchdog.run")(
           )
         )
       );
+    // The Registry's own alarm (watchdog alerts) is re-armed the same way.
+    const registryAlarmAt = yield* registry()
+      .ensureAlarm()
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("re-arming the registry alarm failed", cause).pipe(
+            Effect.as(null)
+          )
+        )
+      );
     const failed = results.filter(
       (result) => result.action === "Error" || result.errors.length > 0
     ).length;
@@ -194,6 +205,12 @@ export const runWatchdog = Effect.fn("Watchdog.run")(
     yield* Effect.logInfo(
       `watchdog checked ${results.length} monitors: ${acted} repaired or skipped, ${failed} failed`
     );
-    return { failed, now, pruned, results } satisfies WatchdogReport;
+    return {
+      failed,
+      now,
+      pruned,
+      registryAlarmAt,
+      results,
+    } satisfies WatchdogReport;
   }
 );
