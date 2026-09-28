@@ -228,6 +228,30 @@ describe("probe", () => {
     })
   );
 
+  it.live("retries once when a pooled connection was lost", () =>
+    Effect.gen(function* probeRetry() {
+      let calls = 0;
+      const flaky: FetchLike = () => {
+        calls += 1;
+        return calls === 1
+          ? Promise.reject(new Error("Network connection lost."))
+          : Promise.resolve(new Response("ok"));
+      };
+      const outcome = yield* probe(request, flaky);
+      assert.isTrue(outcome.ok);
+      assert.strictEqual(calls, 2);
+
+      let refused = 0;
+      const down: FetchLike = () => {
+        refused += 1;
+        return Promise.reject(new Error("Network connection lost."));
+      };
+      const failed = yield* probe(request, down);
+      assert.strictEqual(failed.errorKind, "connection");
+      assert.strictEqual(refused, 2);
+    })
+  );
+
   it.live("classifies transport errors", () =>
     Effect.gen(function* probeErrors() {
       const outcome = yield* probe(request, () =>

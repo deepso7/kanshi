@@ -8,12 +8,14 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "dev": "alchemy dev",
+    "dev": "CLOUDFLARE_ACCOUNT_ID=00000000000000000000000000000000 CLOUDFLARE_API_TOKEN=local-dev-placeholder alchemy dev --stage dev",
+    "seed": "bun scripts/seed.ts",
     "deploy": "alchemy deploy",
     "destroy": "alchemy destroy",
+    "test": "vitest run",
+    "test:integ": "CLOUDFLARE_ACCOUNT_ID=00000000000000000000000000000000 CLOUDFLARE_API_TOKEN=local-dev-placeholder bun test test/integ",
     "check": "ultracite check",
-    "fix": "ultracite fix",
-    "test": "vitest run"
+    "fix": "ultracite fix"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-rc.117",

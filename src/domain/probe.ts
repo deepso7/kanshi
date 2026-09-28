@@ -1,4 +1,3 @@
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -102,11 +101,18 @@ const failure = (
  * at most 1 MB of the body (GET, or whenever `bodyContains` is set) and
  * never fails: every problem becomes a failed {@link ProbeOutcome}.
  */
+/**
+ * A pooled keep-alive connection closed by the target just as it was
+ * reused. Retried once, immediately: it says nothing about the target.
+ */
+const isStaleConnection = (outcome: ProbeOutcome): boolean =>
+  outcome.errorKind === "connection" &&
+  /network connection lost/iu.test(outcome.message ?? "");
+
 export const probe = Effect.fn("Probe.run")(function* probeEffect(
   request: ProbeRequest,
   fetchImpl: FetchLike = fetch
 ) {
-  const startedAt = yield* Clock.currentTimeMillis;
   const signal = AbortSignal.timeout(request.timeoutMs);
   const readBody = request.method === "GET" || request.bodyContains !== null;
 
@@ -114,6 +120,7 @@ export const probe = Effect.fn("Probe.run")(function* probeEffect(
     catch: (error) =>
       failure(classifyFetchError(error, signal.aborted), firstLine(error)),
     try: async () => {
+      const startedAt = Date.now();
       const response = await fetchImpl(request.url, {
         headers: { "user-agent": "Kanshi uptime monitor" },
         method: request.method,
@@ -122,29 +129,42 @@ export const probe = Effect.fn("Probe.run")(function* probeEffect(
       });
       if (!readBody) {
         await response.body?.cancel().catch(() => null);
-        return { body: null, status: response.status };
+        return {
+          body: null,
+          latencyMs: Date.now() - startedAt,
+          status: response.status,
+        };
       }
       const bytes = await readBounded(response.body, maxBodyBytes);
-      return { body: bytes, status: response.status };
+      return {
+        body: bytes,
+        latencyMs: Date.now() - startedAt,
+        status: response.status,
+      };
     },
   });
 
   const result = yield* attempt.pipe(
+    Effect.retry({
+      times: 1,
+      while: (outcome) => isStaleConnection(outcome) && !signal.aborted,
+    }),
     Effect.timeoutOption(request.timeoutMs + hardTimeoutGraceMs),
     Effect.map(
       Option.getOrElse(() => ({
         body: null,
+        latencyMs: 0,
         status: -1,
       }))
     ),
     Effect.result
   );
-  const latencyMs = Math.max(0, (yield* Clock.currentTimeMillis) - startedAt);
 
   if (result._tag === "Failure") {
     return result.failure;
   }
   const { body, status } = result.success;
+  const latencyMs = Math.max(0, result.success.latencyMs);
   if (status === -1) {
     return failure("timeout", `no response within ${request.timeoutMs}ms`);
   }
