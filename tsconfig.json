@@ -23,7 +23,7 @@
     "outDir": "dist",
     "sourceMap": true,
 
-    "lib": ["es2022"],
+    "lib": ["es2023"],
 
     "rootDir": ".",
 
