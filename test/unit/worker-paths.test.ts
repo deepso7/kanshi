@@ -9,16 +9,23 @@ describe(isWorkerPath, () => {
       "/api/monitors",
       "/api/session",
       "/_dev/events",
-      "/login",
-      "/monitors/abc/edit",
-      "/channels",
     ]) {
       assert.isTrue(isWorkerPath(path), path);
     }
   });
 
   it("leaves the SPA's paths to the static assets", () => {
-    for (const path of ["/", "/status", "/apis", "/api-docs", "/loginx"]) {
+    for (const path of [
+      "/",
+      "/status",
+      "/apis",
+      "/api-docs",
+      // The retired legacy pages are client routes now.
+      "/login",
+      "/logout",
+      "/monitors/abc/edit",
+      "/channels",
+    ]) {
       assert.isFalse(isWorkerPath(path), path);
     }
   });

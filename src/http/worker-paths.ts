@@ -6,19 +6,11 @@
 export const apiPrefixes = ["/api", "/_dev"] as const;
 
 /**
- * The server-rendered pages still served by `src/ui/` until the SPA
- * replaces them. A later phase removes each prefix with its page (and
- * then the list and `src/ui/`).
+ * Every prefix the Worker answers before the static assets. The legacy
+ * server-rendered pages (`/login`, `/logout`, `/monitors`, `/channels`)
+ * are retired: those paths are the SPA's now.
  */
-export const legacyPagePrefixes = [
-  "/login",
-  "/logout",
-  "/monitors",
-  "/channels",
-] as const;
-
-/** Every prefix the Worker answers before the static assets. */
-export const workerPrefixes = [...apiPrefixes, ...legacyPagePrefixes];
+export const workerPrefixes: readonly string[] = [...apiPrefixes];
 
 /**
  * Cloudflare `run_worker_first` rules: each prefix and everything below

@@ -32,7 +32,6 @@ import { DevService } from "./service/dev.ts";
 import { MonitorService } from "./service/monitors.ts";
 import { StatusService } from "./service/status.ts";
 import { KanshiSettings } from "./settings.ts";
-import { UiRoutes } from "./ui/routes.ts";
 import { runWatchdog } from "./watchdog/run.ts";
 
 /**
@@ -56,8 +55,8 @@ const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
   platform: "web",
 });
 
-/** The services behind `/api` and the pages, built once per isolate. */
-const ServicesLive = Layer.mergeAll(UiRoutes.layer, DevRoutes.layer).pipe(
+/** The services behind `/api` and `/_dev`, built once per isolate. */
+const ServicesLive = DevRoutes.layer.pipe(
   Layer.provideMerge(
     Layer.mergeAll(
       MonitorService.layer,
@@ -71,9 +70,9 @@ const ServicesLive = Layer.mergeAll(UiRoutes.layer, DevRoutes.layer).pipe(
 
 /**
  * The single Kanshi Worker: the SPA (static assets), the `/api` HttpApi,
- * the legacy pages, the watchdog cron and, in the dev stage, the `/_dev/*`
- * fixtures. It hosts the Monitor and Registry Durable Objects. Its config
- * is read by {@link KanshiSettings}.
+ * the watchdog cron and, in the dev stage, the `/_dev/*` fixtures. It
+ * hosts the Monitor and Registry Durable Objects. Its config is read by
+ * {@link KanshiSettings}.
  */
 export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
   "Kanshi",
@@ -138,7 +137,6 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
       HttpRouter.toHttpEffect
     );
     const dev = yield* DevRoutes;
-    const ui = yield* UiRoutes;
 
     return {
       fetch: api.pipe(
@@ -163,7 +161,9 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
             ) {
               return yield* dev;
             }
-            return yield* ui;
+            // Everything else is the SPA's (static assets); a path that
+            // reaches the Worker anyway has no page here.
+            return HttpServerResponse.empty({ status: 404 });
           });
         })
       ),
