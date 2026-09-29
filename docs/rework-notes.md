@@ -1913,10 +1913,14 @@ Alchemy.Stage` fails every request with "Service not found: Stage" (as
   deploy the `alchemy-state-store` Worker and a Secrets Store (bearer
   token, AES key encrypting each state entry); it stages this in
   `.alchemy/state/CloudflareStateStore/` and deletes it once hoisted. The
-  URL and token are cached in `~/.alchemy/<profile>/cloudflare-state-store.json`;
+  URL and token are cached in `~/.alchemy/credentials/<profile>/cloudflare-state-store.json`;
   with `CI=true` they are read from the Secrets Store each run, and a
   missing store fails unless `--yes`. In beta.79 `Cloudflare.state()` takes
   no options (the docs' `workerName` is not there yet).
+- **Upgrades.** No migration: a deployment made with local state and the
+  generated name gets a fresh `kanshi` Worker in an empty store, leaving the
+  old Worker and its DO data behind. The README says to `pnpm run destroy`
+  it from the old version first, or not to upgrade it to keep its data.
 - **Secrets.** Local state writes `Redacted` values in plain JSON
   (`StateEncoding.ts`); the Cloudflare store encrypts every entry, so the
   deployed `KANSHI_API_TOKEN` is no longer on disk.

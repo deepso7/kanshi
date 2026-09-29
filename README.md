@@ -51,7 +51,7 @@ You need Node, pnpm, [Bun](https://bun.sh) and a Cloudflare account.
      uses to reach that Worker and the key that encrypts the state at rest.
 
    The store's URL and token are then cached in
-   `~/.alchemy/<profile>/cloudflare-state-store.json` (profile `default`
+   `~/.alchemy/credentials/<profile>/cloudflare-state-store.json` (profile `default`
    unless you pass `--profile`); later deploys skip the prompt. With
    `CI=true` nothing is cached: each run reads the token from the Secrets
    Store (the API token then needs Secrets Store write access). In CI a
@@ -64,6 +64,13 @@ You need Node, pnpm, [Bun](https://bun.sh) and a Cloudflare account.
    only holds state for local runs (`pnpm dev`, `pnpm test:integ`), which
    stay on disk and never contact Cloudflare; a deploy writes only build
    output and logs there.
+
+   **Upgrading a deployment made with local state** (an older version, with
+   a generated Worker name): this version plans a fresh `kanshi` Worker in
+   an empty Cloudflare state store; the old Worker and its Durable Object
+   data are not migrated. Run `pnpm run destroy` from the old version (with
+   its local `.alchemy/` state) first. To keep your monitors and history,
+   don't upgrade that deployment.
 
 2. **Open the dashboard** at the Worker URL and sign in with the token. The
    public status page is at `/status`.
