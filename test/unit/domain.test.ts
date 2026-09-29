@@ -8,9 +8,9 @@ import {
   parseExpectedStatus,
 } from "../../src/domain/expected-status.ts";
 import { buildConfig, patchConfig } from "../../src/domain/monitor-input.ts";
-import { overallStatus } from "../../src/domain/public-status.ts";
 import type { FetchLike } from "../../src/domain/probe.ts";
 import { classifyFetchError, probe } from "../../src/domain/probe.ts";
+import { overallStatus } from "../../src/domain/public-status.ts";
 import { checkTargetUrl } from "../../src/domain/url.ts";
 
 const prod = { allowLoopback: false };
