@@ -60,7 +60,9 @@ export class Unavailable extends Schema.TaggedError<Unavailable>()(
 
 /**
  * A monitor's configuration, its `public` flag, its current state and
- * whether the watchdog has an open "not being checked" episode for it.
+ * `notChecked`: the watchdog has an open "not being checked" episode for
+ * it, or its state (read live) shows no check for longer than the
+ * watchdog's stale threshold.
  */
 export const MonitorResponse = Schema.Struct({
   ...MonitorConfig.fields,
@@ -70,7 +72,12 @@ export const MonitorResponse = Schema.Struct({
 });
 export type MonitorResponse = typeof MonitorResponse.Type;
 
-/** A monitor as listed: identity and the Registry's cached summary. */
+/**
+ * A monitor as listed (`GET /api/monitors`): identity and the Registry's
+ * cached summary, and nothing else. The summary is pushed on status
+ * changes and edits only, so it has no last check time; that is read live
+ * by `GET /api/overview` and `GET /api/monitors/:id`.
+ */
 export const MonitorListItem = Schema.Struct({
   ...MonitorSummary.fields,
   id: Schema.String,
@@ -182,9 +189,17 @@ export const StatusCounts = Schema.Struct({
 });
 export type StatusCounts = typeof StatusCounts.Type;
 
-/** A dashboard row: the listed monitor and its recent activity. */
+/**
+ * A dashboard row: the listed monitor, with its summary, last check time,
+ * `notChecked` and recent activity read live from the monitor in one call
+ * (the Registry's cached values when it could not be read). `notChecked`
+ * is an open watchdog episode, or no check for longer than the watchdog's
+ * stale threshold.
+ */
 export const OverviewMonitor = Schema.Struct({
   ...MonitorListItem.fields,
+  /** Null when never checked, or when the monitor could not be read. */
+  lastCheckedAt: Schema.NullOr(Schema.Number),
   /** Null when the monitor could not be read. */
   recent: Schema.NullOr(RecentActivity),
 });

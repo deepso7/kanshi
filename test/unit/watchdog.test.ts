@@ -153,7 +153,6 @@ describe("watchdog decisions", () => {
         summary: {
           enabled: true,
           intervalSeconds: 60,
-          lastCheckedAt: t0 + 30_000,
           name: "Site",
           status: "up",
           url: "https://example.com/",

@@ -122,11 +122,15 @@ export const MonitorState = Schema.Struct({
 });
 export type MonitorState = typeof MonitorState.Type;
 
-/** The per-monitor status cached by the Registry. */
+/**
+ * The per-monitor status cached by the Registry: only fields that change
+ * with a status transition or an edit, never per check (`lastCheckedAt` is
+ * read live from the monitor), so a check that changes nothing needs no
+ * push.
+ */
 export const MonitorSummary = Schema.Struct({
   enabled: Schema.Boolean,
   intervalSeconds: NonNegativeInt,
-  lastCheckedAt: Schema.NullOr(NonNegativeInt),
   name: Schema.String,
   status: MonitorStatus,
   /** The target URL (empty on a row not refreshed since migration 4). */
@@ -153,10 +157,42 @@ export const summaryOf = (
 ): MonitorSummary => ({
   enabled: config.enabled,
   intervalSeconds: config.intervalSeconds,
-  lastCheckedAt: state.lastCheckedAt,
   name: config.name,
   status: state.status,
   url: config.url,
+});
+
+/** Whether two summaries differ in any field the Registry stores. */
+export const summaryChanged = (
+  before: MonitorSummary,
+  after: MonitorSummary
+): boolean =>
+  before.enabled !== after.enabled ||
+  before.intervalSeconds !== after.intervalSeconds ||
+  before.name !== after.name ||
+  before.status !== after.status ||
+  before.url !== after.url;
+
+/**
+ * `after` with its `summaryRevision` bumped by one when the summary changed
+ * from `before` (a status transition, enable/disable, or an edit of the
+ * name, URL or interval), and kept otherwise. The revision is what the
+ * Registry orders pushes by, so it only moves when there is something new
+ * to push.
+ */
+export const reviseSummary = (
+  before: { readonly config: MonitorConfig; readonly state: MonitorState },
+  after: { readonly config: MonitorConfig; readonly state: MonitorState }
+): MonitorState => ({
+  ...after.state,
+  summaryRevision:
+    before.state.summaryRevision +
+    (summaryChanged(
+      summaryOf(before.config, before.state),
+      summaryOf(after.config, after.state)
+    )
+      ? 1
+      : 0),
 });
 
 /** A monitor's full view: its configuration and its current state. */
@@ -165,3 +201,16 @@ export const MonitorSnapshot = Schema.Struct({
   state: MonitorState,
 });
 export type MonitorSnapshot = typeof MonitorSnapshot.Type;
+
+/**
+ * Whether the Monitor pushes its summary to the Registry after a change
+ * from `before` (null: the monitor was just configured) to `after`: only
+ * when the summary revision moved, i.e. a Registry-visible field changed.
+ * A check that leaves the status alone does not push; a status transition,
+ * enable/disable or an edit of the name, URL or interval does.
+ */
+export const shouldPushSummary = (
+  before: MonitorSnapshot | null,
+  after: MonitorSnapshot
+): boolean =>
+  before === null || after.state.summaryRevision > before.state.summaryRevision;

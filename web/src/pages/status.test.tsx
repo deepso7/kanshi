@@ -57,7 +57,6 @@ const website: PublicMonitor = {
     },
   ],
   downSince: null,
-  lastCheckedAt: now - 1000,
   name: "Website",
   ref: "a1b2c3d4e5f60718",
   status: "up",
@@ -67,7 +66,6 @@ const website: PublicMonitor = {
 const api: PublicMonitor = {
   days: [fullDay("2026-09-28", 80)],
   downSince: now - 3 * 60_000,
-  lastCheckedAt: now - 1000,
   name: "API",
   ref: "0f1e2d3c4b5a6978",
   status: "down",
@@ -82,7 +80,6 @@ const status: PublicStatus = {
     {
       days: [],
       downSince: null,
-      lastCheckedAt: null,
       name: "Batch jobs",
       ref: "8899aabbccddeeff",
       status: "paused",

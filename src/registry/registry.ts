@@ -57,7 +57,6 @@ const EntryRow = Schema.Struct({
   id: Schema.String,
   intervalSeconds: Schema.Number,
   key: Schema.String,
-  lastCheckedAt: Schema.NullOr(Schema.Number),
   lifecycle: Lifecycle,
   managed: Schema.BooleanFromBit,
   name: Schema.String,
@@ -373,6 +372,15 @@ const migrations = SqliteMigrator.fromRecord({
     yield* sql`ALTER TABLE monitors ADD COLUMN url TEXT NOT NULL DEFAULT ''`;
     yield* sql`UPDATE monitors SET summary_revision = 0`;
   }),
+  // Monitors push their summary only when a Registry-visible field
+  // changes, not after every check, so the summary no longer carries the
+  // last check time (the dashboard reads it live from each monitor).
+  "5_summary_without_last_checked": Effect.gen(
+    function* summaryWithoutLastCheckedMigration() {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`ALTER TABLE monitors DROP COLUMN last_checked_at`;
+    }
+  ),
 });
 
 const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
@@ -386,7 +394,6 @@ const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
   summary: {
     enabled: row.enabled,
     intervalSeconds: row.intervalSeconds,
-    lastCheckedAt: row.lastCheckedAt,
     name: row.name,
     status: row.status,
     url: row.url,
@@ -472,7 +479,6 @@ export const RegistryLive = Registry.make(
                 id: input.id,
                 intervalSeconds: input.summary.intervalSeconds,
                 key: input.key,
-                lastCheckedAt: input.summary.lastCheckedAt,
                 lifecycle: "creating",
                 managed: input.managed ? 1 : 0,
                 name: input.summary.name,
@@ -525,7 +531,6 @@ export const RegistryLive = Registry.make(
           SET name = ${summary.name},
               status = ${summary.status},
               enabled = ${summary.enabled ? 1 : 0},
-              last_checked_at = ${summary.lastCheckedAt},
               interval_seconds = ${summary.intervalSeconds},
               url = ${summary.url},
               summary_revision = ${revision},
@@ -783,8 +788,8 @@ export const RegistryLive = Registry.make(
           ),
         devRewindSummary: (id: string) =>
           sql<{ id: string }>`UPDATE monitors
-            SET name = '(stale)', status = 'unknown', last_checked_at = NULL,
-                url = '', summary_revision = 0, updated_at = ${Date.now()}
+            SET name = '(stale)', status = 'unknown', url = '',
+                summary_revision = 0, updated_at = ${Date.now()}
             WHERE id = ${id}
             RETURNING id`.pipe(
             Effect.map((rows) => rows.length === 1),

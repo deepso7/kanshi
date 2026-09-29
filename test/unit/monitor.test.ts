@@ -5,6 +5,7 @@ import type {
   MonitorState,
   ProbeOutcome,
 } from "../../src/domain/monitor.ts";
+import { shouldPushSummary } from "../../src/domain/monitor.ts";
 import {
   alignSlot,
   completeCheck,
@@ -498,5 +499,108 @@ describe("reset rules", () => {
     );
     assert.strictEqual(reopened.transition, "down");
     assert.isNotNull(reopened.openIncident);
+  });
+});
+
+/** Whether the Monitor would push after `before` -> `after`. */
+const pushes = (
+  before: { config: MonitorConfig; state: MonitorState },
+  after: { config: MonitorConfig; state: MonitorState }
+) => shouldPushSummary(before, after);
+
+/** An up monitor, checked once. */
+const upState = () =>
+  runDue(config, initialState(t0), up, t0).state satisfies MonitorState;
+
+describe(shouldPushSummary, () => {
+  it("pushes a newly configured monitor", () => {
+    assert.isTrue(shouldPushSummary(null, { config, state: initialState(t0) }));
+  });
+
+  it("does not push a check that leaves the status alone", () => {
+    let state = upState();
+    for (let slot = 1; slot <= 5; slot += 1) {
+      const next = runDue(config, state, up, state.nextCheckAt).state;
+      assert.isFalse(pushes({ config, state }, { config, state: next }));
+      assert.strictEqual(next.summaryRevision, state.summaryRevision);
+      assert.isAbove(next.lastCheckedAt ?? 0, state.lastCheckedAt ?? 0);
+      state = next;
+    }
+  });
+
+  it("does not push an unconfirmed failure, only the confirmed transition", () => {
+    const state = upState();
+    const failed = runDue(config, state, down, state.nextCheckAt);
+    assert.strictEqual(failed.state.status, "up");
+    assert.isFalse(pushes({ config, state }, { config, state: failed.state }));
+    const confirmed = runDue(
+      config,
+      failed.state,
+      down,
+      failed.state.nextCheckAt
+    );
+    assert.strictEqual(confirmed.transition, "down");
+    assert.isTrue(
+      pushes(
+        { config, state: failed.state },
+        { config, state: confirmed.state }
+      )
+    );
+    assert.strictEqual(
+      confirmed.state.summaryRevision,
+      state.summaryRevision + 1
+    );
+  });
+
+  it("pushes the first result of a new monitor (unknown to up)", () => {
+    const state = initialState(t0);
+    const checked = runDue(config, state, up, t0).state;
+    assert.isTrue(pushes({ config, state }, { config, state: checked }));
+  });
+
+  it("pushes edits of what the Registry shows, not of anything else", () => {
+    const state = upState();
+    const edit = (patch: Partial<MonitorConfig>) => {
+      const after = { ...config, ...patch, updatedAt: t0 + 999 };
+      const change = applyConfigChange(config, after, state, t0 + 999);
+      return pushes({ config, state }, change);
+    };
+    for (const patch of [
+      { name: "Renamed" },
+      { url: "https://example.org/" },
+      { intervalSeconds: 120 },
+      { enabled: false },
+    ] satisfies readonly Partial<MonitorConfig>[]) {
+      assert.isTrue(edit(patch), JSON.stringify(patch));
+    }
+    for (const patch of [
+      { channels: ["c1"] },
+      { managed: true },
+      { timeoutMs: 5000 },
+      { failureThreshold: 3 },
+    ] satisfies readonly Partial<MonitorConfig>[]) {
+      assert.isFalse(edit(patch), JSON.stringify(patch));
+    }
+  });
+
+  it("pushes enable of a disabled monitor", () => {
+    const state = upState();
+    const disabled = applyConfigChange(
+      config,
+      { ...config, enabled: false },
+      state,
+      t0 + 999
+    );
+    const enabled = applyConfigChange(
+      disabled.config,
+      { ...disabled.config, enabled: true },
+      disabled.state,
+      t0 + 2000
+    );
+    assert.isTrue(pushes(disabled, enabled));
+    assert.isAbove(
+      enabled.state.summaryRevision,
+      disabled.state.summaryRevision
+    );
   });
 });

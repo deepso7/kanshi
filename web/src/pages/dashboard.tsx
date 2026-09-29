@@ -615,7 +615,12 @@ const MonitorRow = ({
       </td>
       <td {...stylex.props(tableStyles.cell, tableStyles.cellLast)}>
         <span {...stylex.props(tableStyles.mobileOnly)}>Checked </span>
-        <RelativeTime at={monitor.lastCheckedAt} now={now} />
+        {/* Read live with the row's activity; unknown if that failed. */}
+        {recent === null ? (
+          "unavailable"
+        ) : (
+          <RelativeTime at={monitor.lastCheckedAt} now={now} />
+        )}
       </td>
       <td
         {...stylex.props(

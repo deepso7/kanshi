@@ -7,6 +7,7 @@ import type {
   MonitorState,
   ProbeOutcome,
 } from "../domain/monitor.ts";
+import { reviseSummary } from "../domain/monitor.ts";
 import { nextMaintenanceTime } from "./history.ts";
 import type { Transition } from "./machine.ts";
 import { evaluate } from "./machine.ts";
@@ -217,12 +218,7 @@ const schedule = (
   }
 };
 
-/**
- * Commit a probe result. The result is discarded (`Stale`) unless the
- * in-flight record still names this check and the configuration generation
- * did not change while it ran.
- */
-export const completeCheck = (
+const settle = (
   config: MonitorConfig,
   state: MonitorState,
   inflight: Inflight,
@@ -258,7 +254,6 @@ export const completeCheck = (
       scheduled.manualRequestedAt <= inflight.startedAt
         ? null
         : scheduled.manualRequestedAt,
-    summaryRevision: state.summaryRevision + 1,
   };
   const check: CheckRecord = {
     ...outcome,
@@ -310,6 +305,35 @@ export const completeCheck = (
     state: evaluated.state,
     transition: evaluated.transition,
   });
+};
+
+/**
+ * Commit a probe result. The result is discarded (`Stale`) unless the
+ * in-flight record still names this check and the configuration generation
+ * did not change while it ran. The summary revision moves only when the
+ * status did (see `reviseSummary`), so a check that changes nothing leaves
+ * the Registry's summary current and is not pushed.
+ */
+export const completeCheck = (
+  config: MonitorConfig,
+  state: MonitorState,
+  inflight: Inflight,
+  outcome: ProbeOutcome,
+  now: number
+): Completion => {
+  const completion = settle(config, state, inflight, outcome, now);
+  return Completion.$is("Committed")(completion)
+    ? Completion.Committed({
+        check: completion.check,
+        closeIncident: completion.closeIncident,
+        openIncident: completion.openIncident,
+        state: reviseSummary(
+          { config, state },
+          { config, state: completion.state }
+        ),
+        transition: completion.transition,
+      })
+    : completion;
 };
 
 /**
