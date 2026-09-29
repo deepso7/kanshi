@@ -1508,3 +1508,65 @@ to `/login` sets no cookie); the legacy sign-in and form-post tests became
 (cookie reads, cookie writes refused without or with a foreign Origin,
 create and delete from our origin, forged cookie 401); the private toggle
 uses a cookie `PATCH`; `signIn` goes through `/api/session`.
+
+### Phase 3–4: the pages, polish and cleanup
+
+Phase 3 (after 3a above) built the pages on the design system
+(`web/src/components/ui/`, NieR: Automata tokens, light and dark): the
+public status page, the dashboard, channels (add, edit, test and delete
+dialogs), the monitor detail page and the new/edit monitor form (a pure
+model that mirrors the server's validation). Phase 4 polished, cleaned up
+and verified it.
+
+- **Mobile shell.** At 390px every signed-in page rendered about 667px
+  wide: the top bar's min-content sized the grid's `1fr` column. The
+  columns are `minmax(0, 1fr)`; below `md` the shell is a compact top bar
+  (brand, dev badge, theme toggle, sign-out) with the nav wrapping to its
+  own horizontally scrolling row. `PageHeader` titles wrap anywhere (a
+  long monitor name widened the edit page by 28px).
+- **URLs in the list and overview.** The dashboard fetched every monitor
+  for its URL. `MonitorSummary` (the Registry's cached row) now carries
+  `url`, so `MonitorListItem` and `OverviewMonitor` have it. Migration
+  `4_monitor_url` adds the column (`''` default) and resets
+  `summary_revision` to 0, so the next summary push (a check, an edit, or
+  the watchdog's refresh within 5 minutes) fills it in; the dashboard
+  shows no URL line for `''`. `POST /_dev/registry/:id/rewind` clears the
+  URL too, and the watchdog integration test checks it converges.
+- **Sparkline.** A lone reading (a run of one) is a zero-length path with
+  a round cap (`M x yh0`): a dot that stays round under
+  `preserveAspectRatio="none"`, as in the latency chart and the old SSR
+  sparkline. Component test `web/src/components/sparkline.test.tsx`.
+- **Legacy UI removed.** `src/ui/`, `src/http/body.ts` (form bodies) and
+  `test/unit/ui.test.ts` are gone; `MonitorService.listWithRecent` is
+  private to the overview. The overall-status and `recentActivity` tests
+  moved to `domain.test.ts` and `history.test.ts`; the HTML-helper tests
+  left `session.test.ts`.
+- **Dependencies.** `@cloudflare/workers-types` 5.20260929.1 (and its
+  `minimumReleaseAgeExclude` entry). Everything else was already on its
+  latest release; Effect stays on 4.0.0-rc.117 (rc.118 breaks alchemy
+  2.0.0-beta.79).
+- **A11y pass.** Automated in the browser on every page, both themes: text
+  contrast (all at least 4.5:1, or 3:1 for large text; status colours
+  included), unnamed controls (none) and focus rings (every focusable
+  element; the dashboard's stretched row link draws its ring on the row).
+  Dialogs, the alert dialog and the select work from the keyboard (focus
+  moves in, wraps, Escape closes and returns focus; the delete dialog
+  focuses Cancel). Fixed: heading levels (`CardTitle` and `EmptyState` take
+  a `heading`; section cards are `h2`, not-found titles `h1`), a "Skip to
+  content" link, per-channel names on the channel cards' Edit and Send
+  test buttons, "(opens in a new tab)" for screen readers.
+
+Manual check (`pnpm dev`, `pnpm seed`, the browser preview): dashboard,
+monitor detail, form, channels and status at 1280px and 390px, light and
+dark, no horizontal overflow. With the dashboard, the flip monitor's
+detail page and `/status` open, flipping `demo` down and up again updated
+all three in place within their refresh intervals (status, counts, open
+incident, the dev sink's down and recovery alerts, "Partial outage" and
+back to "All systems operational").
+
+Commands (end of UI phase 4): `pnpm build` ok (JS 828 KB, 269 KB gzip);
+`pnpm typecheck`, `pnpm check` pass; `pnpm test` 289 pass (25 files);
+`pnpm test:integ` 32 pass (about 3.7 minutes).
+
+Left for later: route-level code splitting (Vite warns about the 828 KB
+chunk; Effect's Schema and `HttpApiClient` are most of it).
