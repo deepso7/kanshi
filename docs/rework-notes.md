@@ -1424,3 +1424,87 @@ Commands (end of UI phase 2b): `pnpm typecheck`, `pnpm check` pass for
 these paths (the parallel design-system work in `web/src/theme`,
 `web/src/pages` had WIP errors at the time); `pnpm test` 198 pass;
 `pnpm test:integ` 32 pass (about 3.7 minutes).
+
+### Phase 3a: the app skeleton
+
+Routes, auth, the app shell and the shared building blocks the page
+agents fill in; the legacy pages are retired.
+
+Routes (`web/src/router.tsx`; route ids for `getRouteApi` in brackets):
+
+- `/login` [`/login`], public; `?redirect=` (a same-site path, see
+  `web/src/lib/redirect.ts`; anything else is dropped). Signed in: its
+  `beforeLoad` redirects to the target.
+- `/status` [`/status`], public, no app shell; the loader ensures
+  `publicStatusQuery`.
+- `_app` (pathless layout) [`/_app`]: `beforeLoad` runs
+  `ensureQueryData(sessionQuery)` and redirects to `/login?redirect=<href>`
+  when signed out, then prefetches `metaQuery`; renders `AppLayout` (the
+  `AppShell`: Dashboard, Channels, Status page in a new tab; the dev badge
+  from `metaQuery`; theme toggle and sign-out in the footer).
+  - `/` [`/_app/`]: loader awaits `overviewQuery()`, prefetches
+    `episodesQuery` and, in dev mode, `devEventsQuery()`.
+  - `/monitors/new` [`/_app/monitors/new`]: awaits `channelsQuery`,
+    `metaQuery`.
+  - `/monitors/$id` [`/_app/monitors/$id`]: awaits `monitorQuery(id)` (a 404
+    renders the not-found panel in the shell); prefetches recent, uptime,
+    `monitorChecksQuery(id, monitorPageReads.checks)`,
+    `monitorIncidentsQuery(id, monitorPageReads.incidentsLimit)` and
+    channels.
+  - `/monitors/$id/edit` [`/_app/monitors/$id/edit`]: awaits the monitor
+    (404 as above), channels and meta.
+  - `/channels` [`/_app/channels`]: awaits `channelsQuery`.
+- `/_ui` (dev only), unchanged; any other path: the root's `NotFoundPage`.
+
+Decisions:
+
+- **Session in the cache.** `signInMutation` now sets `["session"]` to
+  `{ signedIn: true }` instead of invalidating it: an unobserved query is
+  not refetched by `invalidateQueries`, so the guard's `ensureQueryData`
+  would have kept the old `false` and bounced back to the login page.
+  Sign-out clears the whole cache (as before), so the next guard fetches.
+- **401 anywhere signs out.** Both caches are subscribed (in
+  `router.tsx`, after the router exists: `onError` in the cache config
+  would reference the router before its definition) and, on
+  `Unauthorized`, set `["session"]` to `{ signedIn: false }` and navigate
+  to `/login?redirect=<current href>`; on `/login` itself (a wrong token)
+  nothing happens. Setting, not removing: a page's reads fail with 401
+  together, and removing the query again cancelled the login guard's own
+  session fetch (`CancelledError` on the login page, found in the browser). Queries retry only a connection error or a 503, twice
+  (`shouldRetry`), so a 4xx fails at once.
+- **Errors.** `web/src/api/errors.ts` `describeError(error)` gives a title,
+  the API's `message` (the text the legacy error pages showed) and the
+  status for every typed error and `HttpClientError`; `ErrorPanel`
+  renders it with a retry. The router's default `errorComponent` is
+  `RouteError` (retry re-runs the loaders); layouts outside the shell use
+  `StandaloneRouteError`. Loaders turn a 404 into `notFound()`
+  (`NotFoundPanel` in the shell); the route must set `notFoundComponent`
+  itself: a loader's `notFound()` skipped `defaultNotFoundComponent` and
+  bubbled to the root's full-screen page.
+- **Pending.** Default `pendingComponent` `PageSkeleton` after 250 ms,
+  shown at least 300 ms.
+- **Toasts.** `useToastMutation(options, { success, error })` wraps the
+  shared `mutationOptions`: their `onSuccess` (cache writes,
+  invalidation) runs and is awaited first, then the success toast; errors
+  toast `error` as the title and the API message as the description;
+  `error: false` for errors the page shows inline; 401s never toast.
+- **Formatting.** `web/src/lib/format.ts` (ported from `src/ui/format.ts`
+  plus latency, local dates and API days), `useNow` and `RelativeTime`.
+- **Legacy pages retired.** `legacyPagePrefixes` is gone:
+  `workerPrefixes` is `/api` and `/_dev`, so `/login`, `/logout`,
+  `/monitors/*` and `/channels` get the SPA's `index.html` (deploys and the
+  Vite proxy). The Worker no longer builds `UiRoutes` and answers 404 for
+  any other path that reaches it (only `/_dev/*` outside dev mode or from a
+  non-loopback host). `src/ui/` stays, unrouted, until the cleanup phase;
+  its unit tests still run.
+
+Tests: unit `web/src/lib/format.test.ts`, `redirect.test.ts` (the web
+vitest project now includes `*.test.ts`); `test/unit/worker-paths.test.ts`
+treats the legacy paths as SPA paths. Integration (`test/integ/ui.test.ts`):
+new "the retired legacy pages are the SPA's client routes" (shell for
+`/login`, `/logout`, `/monitors/*`, `/channels`, signed in or out; a POST
+to `/login` sets no cookie); the legacy sign-in and form-post tests became
+"the session cookie works for /api, with the Origin check on writes"
+(cookie reads, cookie writes refused without or with a foreign Origin,
+create and delete from our origin, forged cookie 401); the private toggle
+uses a cookie `PATCH`; `signIn` goes through `/api/session`.

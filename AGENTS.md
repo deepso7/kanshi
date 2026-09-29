@@ -8,9 +8,10 @@ decisions, deviations and gotchas per phase.
 ## Layout
 
 - `src/worker.ts`: the Worker. Serves the SPA (`web/dist`) as static
-  assets; runs first for `/api/*` (Effect `HttpApi`), `/_dev/*` (dev stage
-  only) and the legacy pages (`src/http/worker-paths.ts` lists them, shared
-  with the Vite proxy); registers the watchdog cron; provides both DOs.
+  assets; runs first for `/api/*` (Effect `HttpApi`) and `/_dev/*` (dev
+  stage only; `src/http/worker-paths.ts` lists them, shared with the Vite
+  proxy), 404 for anything else that reaches it; registers the watchdog
+  cron; provides both DOs.
 - `src/monitor/`: the **Monitor DO** (`monitor.ts`, one object per monitor,
   named by monitor id) and its pure rules (`machine.ts`, `cycle.ts`,
   `reset.ts`, `outbox.ts`, `history.ts`) and storage/migrations
@@ -30,11 +31,15 @@ decisions, deviations and gotchas per phase.
   Worker's config (API token, dev mode, quota).
 - `web/`: the SPA (Vite, React 19, StyleX, TanStack Router and Query), its
   own `tsconfig.json`. `web/src/api/`: the typed client (`HttpApiClient`
-  from the spec) and query options; `web/src/pages/` (components only, for
-  Fast Refresh); `web/src/router.tsx` (the route tree);
+  from the spec), query and mutation options (`queries.ts`) and error
+  views (`errors.ts`); `web/src/pages/` (components only, for Fast
+  Refresh); `web/src/router.tsx` (the route tree, session guard, loaders,
+  the 401 sign-out); `web/src/lib/` (formatting, `useToastMutation`,
+  `useNow`); `web/src/components/` (design system in `ui/`, app pieces);
   `web/src/theme/tokens.stylex.ts` (design tokens). `web/public/_headers`:
   CSP and caching for the static assets.
-- `src/ui/`: the legacy server-rendered pages, being replaced by `web/`.
+- `src/ui/`: the legacy server-rendered pages, no longer routed (the SPA
+  serves every page); removed in the cleanup phase.
 - `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*`.
 - `src/config.ts`: `defineConfig` for `kanshi.config.ts` /
   `kanshi.dev.config.ts`. `src/sync/`: `kanshi sync` (`plan.ts` is the pure
