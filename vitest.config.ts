@@ -30,7 +30,7 @@ export default defineConfig({
         plugins: [stylexTransform(), react()],
         test: {
           environment: "happy-dom",
-          include: ["web/src/**/*.test.tsx"],
+          include: ["web/src/**/*.test.{ts,tsx}"],
           name: "web",
           setupFiles: ["web/src/test/setup.ts"],
         },
