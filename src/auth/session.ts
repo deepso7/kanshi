@@ -91,7 +91,7 @@ export interface OriginInput {
 }
 
 /**
- * CSRF check for form posts and cookie-authenticated API writes: the
+ * CSRF check for cookie-authenticated writes (the API, sign-in): the
  * `Origin` header must be the request's own origin. Without an `Origin`
  * header, only `Sec-Fetch-Site: same-origin` is accepted.
  */

@@ -15,6 +15,7 @@ import {
   nextMaintenanceTime,
   percentile,
   periodChange,
+  recentActivity,
   reportDays,
   rollupDay,
   uptimeDay,
@@ -302,5 +303,32 @@ describe("watermark and retention", () => {
 
   it("prunes resolved incidents after 90 days", () => {
     assert.strictEqual(incidentsPruneBefore(midnight), midnight - 90 * dayMs);
+  });
+});
+
+describe(recentActivity, () => {
+  it("assembles buckets, filling the empty ones", () => {
+    const activity = recentActivity(1000, 100, 4, {
+      buckets: [
+        { bucket: 1, failures: 1, latencyMs: 12.6 },
+        { bucket: 3, failures: null, latencyMs: null },
+      ],
+      counted: 4,
+      up: 3,
+    });
+    assert.deepStrictEqual(activity, {
+      buckets: [
+        { at: 1000, failures: 0, latencyMs: null },
+        { at: 1100, failures: 1, latencyMs: 13 },
+        { at: 1200, failures: 0, latencyMs: null },
+        { at: 1300, failures: 0, latencyMs: null },
+      ],
+      counted: 4,
+      up: 3,
+      uptimePercent: 75,
+    });
+    assert.isNull(
+      recentActivity(0, 1, 1, { buckets: [], counted: 0, up: 0 }).uptimePercent
+    );
   });
 });

@@ -20,7 +20,7 @@ describe(isWorkerPath, () => {
       "/status",
       "/apis",
       "/api-docs",
-      // The retired legacy pages are client routes now.
+      // Client routes.
       "/login",
       "/logout",
       "/monitors/abc/edit",

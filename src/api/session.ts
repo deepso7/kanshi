@@ -34,8 +34,8 @@ const requireSameOrigin = (request: HttpServerRequest.HttpServerRequest) =>
     : Effect.fail(new HttpApiError.Forbidden());
 
 /**
- * `/api/session`: the SPA's sign-in, sign-out and "am I signed in". The
- * cookie is the same HMAC session as the legacy `/login` page sets.
+ * `/api/session`: the SPA's sign-in, sign-out and "am I signed in", with
+ * the HMAC session cookie (`src/auth/session.ts`).
  */
 export const SessionHandlers = HttpApiBuilder.group(
   KanshiApi,

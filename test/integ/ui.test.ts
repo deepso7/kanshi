@@ -1,14 +1,11 @@
 // Integration tests for the dashboard and the public status page: the SPA
-// shell (static assets, also for the retired legacy page paths), sign-in
+// shell (static assets, for every client route), sign-in
 // and cookie auth (`/api/session` and /api), the Origin check on
 // cookie-authenticated writes, the dashboard's reads (`/api/overview`,
 // `/api/monitors/:id/recent`, `/api/meta`, `/api/watchdog/episodes`,
 // `/api/dev/events`), and that GET /api/public/status only ever shows
 // monitors that are public right now, without URLs. Run with
 // `pnpm test:integ` (it builds the SPA first).
-//
-// UI rework: every page is the SPA's now (`src/ui/` is unrouted); the
-// server-rendered HTML is no longer checked here.
 import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
@@ -102,9 +99,9 @@ test(
 );
 
 test(
-  "the retired legacy pages are the SPA's client routes",
-  Effect.gen(function* legacyPathsTest() {
-    // Signed out or in, the Worker no longer renders or redirects them.
+  "client routes get the SPA shell, signed in or out",
+  Effect.gen(function* clientRoutesTest() {
+    // The Worker never renders or redirects a page.
     const cookie = yield* signIn;
     for (const path of [
       "/login",
@@ -122,7 +119,7 @@ test(
       expect(signedIn.status).toBe(200);
       expect(signedIn.text).toContain('<div id="root"></div>');
     }
-    // The old form endpoints are gone: no sign-in, no cookie.
+    // A form POST to a page path signs nobody in.
     const post = yield* raw("POST", "/login", {
       form: { token: apiToken },
       headers: { origin: yield* origin },
@@ -186,7 +183,7 @@ test(
     expect(yield* state(`kanshi_session=1.${"0".repeat(64)}`)).toBe(
       '{"signedIn":false}'
     );
-    // The same session as the legacy pages: it works for /api.
+    // The session works for /api.
     const listed = yield* send("GET", "/api/monitors", {
       auth: null,
       headers: { cookie },

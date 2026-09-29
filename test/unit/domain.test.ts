@@ -8,6 +8,7 @@ import {
   parseExpectedStatus,
 } from "../../src/domain/expected-status.ts";
 import { buildConfig, patchConfig } from "../../src/domain/monitor-input.ts";
+import { overallStatus } from "../../src/domain/public-status.ts";
 import type { FetchLike } from "../../src/domain/probe.ts";
 import { classifyFetchError, probe } from "../../src/domain/probe.ts";
 import { checkTargetUrl } from "../../src/domain/url.ts";
@@ -340,4 +341,22 @@ describe("probe()", () => {
       );
     })
   );
+});
+
+describe(overallStatus, () => {
+  it("derives the overall status from the monitors", () => {
+    assert.strictEqual(overallStatus([]), "operational");
+    assert.strictEqual(
+      overallStatus([{ status: "up" }, { status: "unknown" }]),
+      "operational"
+    );
+    assert.strictEqual(
+      overallStatus([{ status: "up" }, { status: "down" }]),
+      "partial_outage"
+    );
+    assert.strictEqual(
+      overallStatus([{ status: "down" }, { status: "paused" }]),
+      "major_outage"
+    );
+  });
 });

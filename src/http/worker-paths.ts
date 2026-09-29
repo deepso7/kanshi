@@ -5,11 +5,7 @@
 /** The HTTP API and, in the dev stage, the `/_dev/*` fixtures. */
 export const apiPrefixes = ["/api", "/_dev"] as const;
 
-/**
- * Every prefix the Worker answers before the static assets. The legacy
- * server-rendered pages (`/login`, `/logout`, `/monitors`, `/channels`)
- * are retired: those paths are the SPA's now.
- */
+/** Every prefix the Worker answers before the static assets. */
 export const workerPrefixes: readonly string[] = [...apiPrefixes];
 
 /**

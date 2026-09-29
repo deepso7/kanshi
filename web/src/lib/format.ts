@@ -1,7 +1,6 @@
 // Display formatting shared by every page. Pure functions over numbers
 // (epoch milliseconds, seconds, percentages); `now` is passed in so a
-// ticking clock (`useNow`) drives relative times. Ported from the legacy
-// pages (`src/ui/format.ts`) and extended with local dates and latency.
+// ticking clock (`useNow`) drives relative times.
 
 const second = 1000;
 const minute = 60 * second;

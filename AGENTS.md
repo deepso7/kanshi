@@ -38,8 +38,6 @@ decisions, deviations and gotchas per phase.
   `useNow`); `web/src/components/` (design system in `ui/`, app pieces);
   `web/src/theme/tokens.stylex.ts` (design tokens). `web/public/_headers`:
   CSP and caching for the static assets.
-- `src/ui/`: the legacy server-rendered pages, no longer routed (the SPA
-  serves every page); removed in the cleanup phase.
 - `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*`.
 - `src/config.ts`: `defineConfig` for `kanshi.config.ts` /
   `kanshi.dev.config.ts`. `src/sync/`: `kanshi sync` (`plan.ts` is the pure
@@ -75,8 +73,8 @@ the rules below.
 Record<never, never> }>` plus `const T = Data.taggedEnum<T>()`, and build
   with `T.X({...})` / `T.Y()`. Errors are `Schema.TaggedError` classes
   (`new E({...})`); schema-backed values use `Schema.TaggedStruct(...).make`
-  or `Schema.TaggedClass`. Shared ones: `FormBody` (`src/http/body.ts`),
-  `DeliveryResult` (`src/alerts/delivery.ts`), `AlertMessage` (plus
+  or `Schema.TaggedClass`. Shared ones: `DeliveryResult`
+  (`src/alerts/delivery.ts`), `AlertMessage` (plus
   `incidentMessage`/`watchdogMessage` for a runtime tag,
   `src/alerts/message.ts`).
 - `no-manual-tag-comparison` / `prefer-effect-match`: no `x._tag === "X"`

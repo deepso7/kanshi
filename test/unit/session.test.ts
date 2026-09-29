@@ -9,51 +9,6 @@ import {
   sessionMaxAgeSeconds,
   verifySession,
 } from "../../src/auth/session.ts";
-import { escapeHtml, html, raw, safeHref } from "../../src/ui/html.ts";
-
-const squash = (markup: string) => markup.replaceAll(/>\s+</gu, "><").trim();
-
-describe(html, () => {
-  it("escapes interpolated values", () => {
-    const name = `<script>alert("x")</script> & 'y'`;
-    assert.strictEqual(
-      html`<p title="${name}">${name}</p>`.value,
-      '<p title="&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &#39;y&#39;">&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &#39;y&#39;</p>'
-    );
-    assert.strictEqual(escapeHtml("a&b"), "a&amp;b");
-  });
-
-  it("composes templates, arrays and raw markup without re-escaping", () => {
-    const items = ["<a>", "b"].map((item) => html`<li>${item}</li>`);
-    assert.strictEqual(
-      // The formatter re-indents html templates; compare without it.
-      squash(
-        html`<ul>
-            ${items}
-          </ul>
-          ${raw("<br>")}`.value
-      ),
-      "<ul><li>&lt;a&gt;</li><li>b</li></ul><br>"
-    );
-  });
-
-  it("renders false, null and undefined as nothing, numbers as text", () => {
-    const show = false;
-    assert.strictEqual(
-      html`${show && html`<b>no</b>`}${null}${undefined}${0}`.value,
-      "0"
-    );
-  });
-
-  it("only links http(s) URLs", () => {
-    assert.strictEqual(
-      safeHref("https://example.com/a"),
-      "https://example.com/a"
-    );
-    assert.strictEqual(safeHref(["javascript", "alert(1)"].join(":")), "#");
-    assert.strictEqual(safeHref("not a url"), "#");
-  });
-});
 
 describe("sessions", () => {
   const token = "secret-token";

@@ -473,7 +473,6 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
     get,
     incidents,
     list,
-    listWithRecent,
     openEpisodes,
     overview,
     recent,
