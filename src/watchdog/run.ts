@@ -6,8 +6,8 @@ import type { Monitor } from "../monitor/monitor.ts";
 import type { Registry, RegistryEntry } from "../registry/registry.ts";
 import { registryName } from "../registry/registry.ts";
 import type { ObserveResult } from "../registry/watchdog-store.ts";
-import type { WatchdogAction } from "./rules.ts";
 import {
+  WatchdogAction,
   decide,
   episodeRetentionMs,
   needsStatus,
@@ -63,8 +63,8 @@ export const runWatchdog = Effect.fn("Watchdog.run")(
 
     const processRow = (row: RegistryEntry) =>
       Effect.gen(function* processRowEffect() {
-        const base = {
-          errors: [] as string[],
+        const base: Pick<RowReport, "errors" | "id" | "lifecycle"> = {
+          errors: [],
           id: row.id,
           lifecycle: row.lifecycle,
         };
@@ -72,89 +72,92 @@ export const runWatchdog = Effect.fn("Watchdog.run")(
           ? yield* monitor(row.id).status()
           : null;
         const action = decide(row, status, now);
-        switch (action._tag) {
-          case "Wait": {
-            return { ...base, action: action._tag, outcome: "waiting" };
-          }
-          case "Activate": {
-            const activated = yield* registry().activate(row.id, action.opId);
-            if (activated) {
+        return yield* WatchdogAction.$match(action, {
+          Abandon: ({ opId }) =>
+            Effect.gen(function* abandonEffect() {
+              const marked = yield* registry().markDeleting(row.id, opId);
+              if (!marked) {
+                return { ...base, action: action._tag, outcome: "row changed" };
+              }
+              yield* finishDelete(row.id);
               yield* Effect.logWarning(
-                `watchdog activated stuck create ${row.id}`
+                `watchdog abandoned stuck create ${row.id}`
               );
-            }
-            return {
+              return { ...base, action: action._tag, outcome: "removed" };
+            }),
+          Activate: ({ opId }) =>
+            Effect.gen(function* activateEffect() {
+              const activated = yield* registry().activate(row.id, opId);
+              if (activated) {
+                yield* Effect.logWarning(
+                  `watchdog activated stuck create ${row.id}`
+                );
+              }
+              return {
+                ...base,
+                action: action._tag,
+                outcome: activated ? "activated" : "row changed",
+              };
+            }),
+          Destroy: () =>
+            Effect.gen(function* destroyEffect() {
+              yield* finishDelete(row.id);
+              yield* Effect.logWarning(
+                `watchdog finished stuck delete ${row.id}`
+              );
+              return { ...base, action: action._tag, outcome: "removed" };
+            }),
+          Refresh: ({ observation, revision, summary }) =>
+            Effect.gen(function* refreshEffect() {
+              // Independent steps: a failure of one still runs the others.
+              const errors: string[] = [];
+              const step = <A, R>(
+                label: string,
+                effect: Effect.Effect<A, unknown, R>
+              ) =>
+                Effect.exit(effect).pipe(
+                  Effect.map((exit) => {
+                    if (Exit.isSuccess(exit)) {
+                      return exit.value;
+                    }
+                    errors.push(`${label}: ${describeCause(exit.cause)}`);
+                    return null;
+                  })
+                );
+              const alarmAt = yield* step(
+                "ensureAlarm",
+                monitor(row.id).ensureAlarm()
+              );
+              const summaryUpdated = yield* step(
+                "upsertSummary",
+                registry().upsertSummary(row.id, summary, revision)
+              );
+              const watch = yield* step(
+                "observe",
+                registry().observe(row.id, observation, now)
+              );
+              const report: RowReport = {
+                ...base,
+                action: action._tag,
+                alarmAt: alarmAt ?? null,
+                errors,
+                outcome: errors.length === 0 ? "refreshed" : "partly failed",
+                summaryUpdated: summaryUpdated ?? false,
+              };
+              return watch === null ? report : { ...report, watch };
+            }),
+          Skip: ({ reason }) =>
+            Effect.gen(function* skipEffect() {
+              yield* Effect.logWarning(`watchdog skipped ${row.id}: ${reason}`);
+              return { ...base, action: action._tag, outcome: reason };
+            }),
+          Wait: () =>
+            Effect.succeed({
               ...base,
               action: action._tag,
-              outcome: activated ? "activated" : "row changed",
-            };
-          }
-          case "Abandon": {
-            const marked = yield* registry().markDeleting(row.id, action.opId);
-            if (!marked) {
-              return { ...base, action: action._tag, outcome: "row changed" };
-            }
-            yield* finishDelete(row.id);
-            yield* Effect.logWarning(
-              `watchdog abandoned stuck create ${row.id}`
-            );
-            return { ...base, action: action._tag, outcome: "removed" };
-          }
-          case "Destroy": {
-            yield* finishDelete(row.id);
-            yield* Effect.logWarning(
-              `watchdog finished stuck delete ${row.id}`
-            );
-            return { ...base, action: action._tag, outcome: "removed" };
-          }
-          case "Refresh": {
-            // Independent steps: a failure of one still runs the others.
-            const errors: string[] = [];
-            const step = <A, R>(
-              label: string,
-              effect: Effect.Effect<A, unknown, R>
-            ) =>
-              Effect.exit(effect).pipe(
-                Effect.map((exit) => {
-                  if (Exit.isSuccess(exit)) {
-                    return exit.value;
-                  }
-                  errors.push(`${label}: ${describeCause(exit.cause)}`);
-                  return null;
-                })
-              );
-            const alarmAt = yield* step(
-              "ensureAlarm",
-              monitor(row.id).ensureAlarm()
-            );
-            const summaryUpdated = yield* step(
-              "upsertSummary",
-              registry().upsertSummary(row.id, action.summary, action.revision)
-            );
-            const watch = yield* step(
-              "observe",
-              registry().observe(row.id, action.observation, now)
-            );
-            return {
-              ...base,
-              action: action._tag,
-              alarmAt: alarmAt ?? null,
-              errors,
-              outcome: errors.length === 0 ? "refreshed" : "partly failed",
-              summaryUpdated: summaryUpdated ?? false,
-              ...(watch === null ? {} : { watch }),
-            };
-          }
-          case "Skip": {
-            yield* Effect.logWarning(
-              `watchdog skipped ${row.id}: ${action.reason}`
-            );
-            return { ...base, action: action._tag, outcome: action.reason };
-          }
-          default: {
-            return action satisfies never;
-          }
-        }
+              outcome: "waiting",
+            }),
+        });
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.logError(`watchdog failed for ${row.id}`, cause).pipe(

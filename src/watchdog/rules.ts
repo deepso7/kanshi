@@ -1,3 +1,5 @@
+import * as Data from "effect/Data";
+
 import type { MonitorSnapshot, MonitorSummary } from "../domain/monitor.ts";
 import { summaryOf } from "../domain/monitor.ts";
 
@@ -41,27 +43,29 @@ export interface WatchObservation {
   readonly url: string;
 }
 
-export type WatchdogAction =
+export type WatchdogAction = Data.TaggedEnum<{
   /** A `creating` row younger than {@link creatingGraceMs}. */
-  | { readonly _tag: "Wait" }
+  Wait: Record<never, never>;
   /** A stuck create whose monitor was configured: finish it. */
-  | { readonly _tag: "Activate"; readonly opId: string }
+  Activate: { readonly opId: string };
   /**
    * A stuck create whose monitor was never configured (or is already
    * tombstoned): run the delete path for that operation only.
    */
-  | { readonly _tag: "Abandon"; readonly opId: string }
+  Abandon: { readonly opId: string };
   /** A stuck delete: retry `destroy()` then `remove()`. */
-  | { readonly _tag: "Destroy" }
+  Destroy: Record<never, never>;
   /** An active monitor: refresh its summary, re-arm, watch staleness. */
-  | {
-      readonly _tag: "Refresh";
-      readonly observation: WatchObservation;
-      readonly revision: number;
-      readonly summary: MonitorSummary;
-    }
+  Refresh: {
+    readonly observation: WatchObservation;
+    readonly revision: number;
+    readonly summary: MonitorSummary;
+  };
   /** Nothing safe to do (logged). */
-  | { readonly _tag: "Skip"; readonly reason: string };
+  Skip: { readonly reason: string };
+}>;
+
+export const WatchdogAction = Data.taggedEnum<WatchdogAction>();
 
 /** Whether deciding on `row` needs the monitor's `status()`. */
 export const needsStatus = (row: WatchdogRow, now: number): boolean =>
@@ -115,41 +119,38 @@ export const decide = (
 ): WatchdogAction => {
   switch (row.lifecycle) {
     case "deleting": {
-      return { _tag: "Destroy" };
+      return WatchdogAction.Destroy();
     }
     case "creating": {
       if (now - row.createdAt < creatingGraceMs) {
-        return { _tag: "Wait" };
+        return WatchdogAction.Wait();
       }
       if (status === null) {
-        return { _tag: "Skip", reason: "monitor status unavailable" };
+        return WatchdogAction.Skip({ reason: "monitor status unavailable" });
       }
       return status.snapshot !== null && status.tombstonedAt === null
-        ? { _tag: "Activate", opId: row.opId }
-        : { _tag: "Abandon", opId: row.opId };
+        ? WatchdogAction.Activate({ opId: row.opId })
+        : WatchdogAction.Abandon({ opId: row.opId });
     }
     case "active": {
       if (status === null) {
-        return { _tag: "Skip", reason: "monitor status unavailable" };
+        return WatchdogAction.Skip({ reason: "monitor status unavailable" });
       }
       if (status.tombstonedAt !== null) {
-        return {
-          _tag: "Skip",
+        return WatchdogAction.Skip({
           reason: "the row is active but its monitor was deleted",
-        };
+        });
       }
       if (status.snapshot === null) {
-        return {
-          _tag: "Skip",
+        return WatchdogAction.Skip({
           reason: "the row is active but its monitor is not configured",
-        };
+        });
       }
-      return {
-        _tag: "Refresh",
+      return WatchdogAction.Refresh({
         observation: observe(status.snapshot, now),
         revision: status.snapshot.state.summaryRevision,
         summary: summaryOf(status.snapshot.config, status.snapshot.state),
-      };
+      });
     }
     default: {
       return row.lifecycle satisfies never;
@@ -172,6 +173,12 @@ export interface WatchState {
  */
 export type WatchChange = "close" | "none" | "open" | "resolve";
 
+/** One watchdog run's effect on a monitor's stale counter. */
+export interface WatchStep {
+  readonly change: WatchChange;
+  readonly staleRuns: number;
+}
+
 /**
  * Advance the stale counter by one watchdog run. An episode opens on the
  * {@link staleRunsToAlert}th consecutive stale run and stays open (no new
@@ -180,7 +187,7 @@ export type WatchChange = "close" | "none" | "open" | "resolve";
 export const watchTransition = (
   previous: WatchState,
   observation: Pick<WatchObservation, "enabled" | "stale">
-): { readonly change: WatchChange; readonly staleRuns: number } => {
+): WatchStep => {
   const open = previous.episodeId !== null;
   if (!observation.enabled) {
     return { change: open ? "close" : "none", staleRuns: 0 };

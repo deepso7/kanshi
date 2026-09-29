@@ -2,13 +2,17 @@ import type { RuntimeContext } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { deliver } from "../alerts/delivery.ts";
-import type { DeliveryResult } from "../alerts/delivery.ts";
-import { alertRequest, idempotencyKey } from "../alerts/message.ts";
+import { deliver, DeliveryResult } from "../alerts/delivery.ts";
+import {
+  alertRequest,
+  idempotencyKey,
+  incidentMessage,
+} from "../alerts/message.ts";
 import type { Notification, OutboxEntry } from "../domain/alert.ts";
 import type {
   IncidentWithAlerts,
@@ -29,6 +33,7 @@ import { probe } from "../domain/probe.ts";
 import { Registry, registryName } from "../registry/registry.ts";
 import { openDurableSql } from "../storage/sqlite.ts";
 import {
+  Completion,
   completeCheck,
   dueCheck,
   expireInflight,
@@ -67,6 +72,7 @@ import {
   dueOutbox,
   notificationFailed,
   notificationsDueAt,
+  OutboxDecision,
   outboxDecision,
   outboxDueAt,
   skipped,
@@ -511,7 +517,7 @@ export const MonitorLive = Monitor.make(
               outcome,
               Date.now()
             );
-            if (completion._tag === "Stale") {
+            if (Completion.$is("Stale")(completion)) {
               yield* Effect.logInfo(
                 `stale result discarded for check ${inflight.checkId}`
               );
@@ -602,7 +608,7 @@ export const MonitorLive = Monitor.make(
           const recipients = yield* registry()
             .recipients(config.channels)
             .pipe(Effect.exit);
-          if (recipients._tag === "Failure") {
+          if (Exit.isFailure(recipients)) {
             yield* Effect.logWarning(
               `resolving recipients for incident ${current.incidentId} failed`,
               recipients.cause
@@ -648,21 +654,23 @@ export const MonitorLive = Monitor.make(
           }
           const incident = yield* withSql(readIncident(entry.incidentId));
           const decision = outboxDecision(entry, pair.down, incident);
-          if (decision._tag === "Done" || decision._tag === "Wait") {
+          if (
+            OutboxDecision.$is("Done")(decision) ||
+            OutboxDecision.$is("Wait")(decision)
+          ) {
             return;
           }
-          if (decision._tag === "Skip" || incident === null) {
-            const reason =
-              decision._tag === "Skip"
-                ? decision.reason
-                : "incident no longer exists";
+          if (OutboxDecision.$is("Skip")(decision) || incident === null) {
+            const reason = OutboxDecision.$is("Skip")(decision)
+              ? decision.reason
+              : "incident no longer exists";
             yield* transact(writeOutbox(skipped(entry, reason, Date.now())));
             return;
           }
           const target = yield* registry()
             .channelTarget(entry.channelId)
             .pipe(Effect.exit);
-          if (target._tag === "Failure") {
+          if (Exit.isFailure(target)) {
             yield* Effect.logWarning(
               `resolving channel ${entry.channelId} failed`,
               target.cause
@@ -679,37 +687,39 @@ export const MonitorLive = Monitor.make(
             return;
           }
           if (target.value === null) {
-            const gone: DeliveryResult = {
-              _tag: "Failed",
+            const gone = DeliveryResult.Failed({
               error: "channel deleted",
               permanent: true,
               status: null,
-            };
+            });
             yield* transact(
               writeOutbox(afterAttempt(entry, gone, false, Date.now()))
             );
             return;
           }
           const result = yield* deliver(
-            alertRequest(target.value.kind, target.value.url, {
-              _tag: decision.message,
-              idempotencyKey: idempotencyKey(
-                entry.incidentId,
-                entry.event,
-                entry.channelId
-              ),
-              incident: {
-                cause: incident.cause,
-                id: incident.id,
-                lastHttpStatus: incident.lastHttpStatus,
-                resolvedAt: incident.resolvedAt,
-                startedAt: incident.startedAt,
-              },
-              monitor: { id: config.id, name: config.name, url: config.url },
-              sentAt: Date.now(),
-            })
+            alertRequest(
+              target.value.kind,
+              target.value.url,
+              incidentMessage(decision.message, {
+                idempotencyKey: idempotencyKey(
+                  entry.incidentId,
+                  entry.event,
+                  entry.channelId
+                ),
+                incident: {
+                  cause: incident.cause,
+                  id: incident.id,
+                  lastHttpStatus: incident.lastHttpStatus,
+                  resolvedAt: incident.resolvedAt,
+                  startedAt: incident.startedAt,
+                },
+                monitor: { id: config.id, name: config.name, url: config.url },
+                sentAt: Date.now(),
+              })
+            )
           );
-          if (result._tag === "Failed") {
+          if (DeliveryResult.$is("Failed")(result)) {
             yield* Effect.logWarning(
               `alert ${entry.incidentId}:${entry.event} to ${entry.channelId} failed: ${result.error}`
             );

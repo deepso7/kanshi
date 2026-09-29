@@ -1,8 +1,8 @@
 import * as Clock from "effect/Clock";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 
-import type { DeliveryResult } from "../alerts/delivery.ts";
-import { backoffMs, maxAttempts } from "../alerts/delivery.ts";
+import { backoffMs, DeliveryResult, maxAttempts } from "../alerts/delivery.ts";
 import type { AlertEvent, Notification, OutboxEntry } from "../domain/alert.ts";
 import type { IncidentResolution } from "../domain/monitor.ts";
 
@@ -85,16 +85,20 @@ export const notificationFailed = (
   };
 };
 
-export type OutboxDecision =
+export type OutboxDecision = Data.TaggedEnum<{
   /** Nothing to do: the row is no longer pending. */
-  | { readonly _tag: "Done" }
+  Done: Record<never, never>;
+  Send: { readonly message: "Down" | "DownRecovered" | "Recovered" };
+  Skip: { readonly reason: string };
   /** An `up` whose `down` is still pending. */
-  | { readonly _tag: "Wait" }
-  | { readonly _tag: "Skip"; readonly reason: string }
-  | {
-      readonly _tag: "Send";
-      readonly message: "Down" | "DownRecovered" | "Recovered";
-    };
+  Wait: Record<never, never>;
+}>;
+
+/**
+ * Constructors (`OutboxDecision.Done`, `.Send`, `.Skip`, `.Wait`), `$is`
+ * and `$match`.
+ */
+export const OutboxDecision = Data.taggedEnum<OutboxDecision>();
 
 /**
  * What to do with an outbox row, per channel:
@@ -113,41 +117,41 @@ export const outboxDecision = (
   incident: IncidentStatus | null
 ): OutboxDecision => {
   if (entry.state !== "pending") {
-    return { _tag: "Done" };
+    return OutboxDecision.Done();
   }
   if (entry.event === "down") {
     if (incident === null) {
-      return { _tag: "Skip", reason: "incident no longer exists" };
+      return OutboxDecision.Skip({ reason: "incident no longer exists" });
     }
     if (
       incident.resolution === "disabled" ||
       incident.resolution === "deleted"
     ) {
-      return {
-        _tag: "Skip",
+      return OutboxDecision.Skip({
         reason: `incident closed (${incident.resolution}) before the alert was sent`,
-      };
+      });
     }
-    return {
-      _tag: "Send",
+    return OutboxDecision.Send({
       message: incident.resolvedAt === null ? "Down" : "DownRecovered",
-    };
+    });
   }
   if (down === null) {
-    return { _tag: "Skip", reason: "no down alert for this channel" };
+    return OutboxDecision.Skip({ reason: "no down alert for this channel" });
   }
   switch (down.state) {
     case "pending": {
-      return { _tag: "Wait" };
+      return OutboxDecision.Wait();
     }
     case "failed":
     case "skipped": {
-      return { _tag: "Skip", reason: `down alert ${down.state}` };
+      return OutboxDecision.Skip({ reason: `down alert ${down.state}` });
     }
     case "delivered": {
       return down.combined
-        ? { _tag: "Skip", reason: "the down alert already reported recovery" }
-        : { _tag: "Send", message: "Recovered" };
+        ? OutboxDecision.Skip({
+            reason: "the down alert already reported recovery",
+          })
+        : OutboxDecision.Send({ message: "Recovered" });
     }
     default: {
       return down.state satisfies never;
@@ -215,25 +219,27 @@ export const afterAttempt = (
   now: number
 ): OutboxEntry => {
   const attempts = entry.attempts + 1;
-  if (result._tag === "Delivered") {
-    return {
+  return DeliveryResult.$match(result, {
+    Delivered: (): OutboxEntry => ({
       ...entry,
       attempts,
       combined,
       lastError: null,
       state: "delivered",
       updatedAt: now,
-    };
-  }
-  const final = result.permanent || attempts >= maxAttempts;
-  return {
-    ...entry,
-    attempts,
-    lastError: result.error,
-    nextAttemptAt: final ? entry.nextAttemptAt : now + backoffMs(attempts),
-    state: final ? "failed" : "pending",
-    updatedAt: now,
-  };
+    }),
+    Failed: (failed): OutboxEntry => {
+      const final = failed.permanent || attempts >= maxAttempts;
+      return {
+        ...entry,
+        attempts,
+        lastError: failed.error,
+        nextAttemptAt: final ? entry.nextAttemptAt : now + backoffMs(attempts),
+        state: final ? "failed" : "pending",
+        updatedAt: now,
+      };
+    },
+  });
 };
 
 /** Mark a row skipped (never sent). */

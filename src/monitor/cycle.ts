@@ -1,3 +1,5 @@
+import * as Data from "effect/Data";
+
 import type {
   CheckKind,
   Inflight,
@@ -81,6 +83,11 @@ export const dueCheck = (
   return state.manualRequestedAt === null ? null : "manual";
 };
 
+export interface StartedCheck {
+  readonly inflight: Inflight;
+  readonly state: MonitorState;
+}
+
 /** Record the in-flight check. Must be committed before probing. */
 export const startCheck = (
   config: MonitorConfig,
@@ -88,7 +95,7 @@ export const startCheck = (
   kind: CheckKind,
   checkId: string,
   now: number
-): { readonly inflight: Inflight; readonly state: MonitorState } => {
+): StartedCheck => {
   const inflight: Inflight = {
     checkId,
     generation: config.generation,
@@ -118,16 +125,19 @@ export interface IncidentClose {
   readonly resolvedAt: number;
 }
 
-export type Completion =
-  | { readonly _tag: "Stale" }
-  | {
-      readonly _tag: "Committed";
-      readonly check: CheckRecord;
-      readonly closeIncident: IncidentClose | null;
-      readonly openIncident: IncidentOpen | null;
-      readonly state: MonitorState;
-      readonly transition: Transition;
-    };
+export type Completion = Data.TaggedEnum<{
+  Committed: {
+    readonly check: CheckRecord;
+    readonly closeIncident: IncidentClose | null;
+    readonly openIncident: IncidentOpen | null;
+    readonly state: MonitorState;
+    readonly transition: Transition;
+  };
+  Stale: Record<never, never>;
+}>;
+
+/** Constructors (`Completion.Committed`, `Completion.Stale`), `$is`, `$match`. */
+export const Completion = Data.taggedEnum<Completion>();
 
 const incidentCause = (outcome: ProbeOutcome): string =>
   outcome.message ?? outcome.errorKind ?? "check failed";
@@ -224,7 +234,7 @@ export const completeCheck = (
     state.inflight.checkId !== inflight.checkId ||
     inflight.generation !== config.generation
   ) {
-    return { _tag: "Stale" };
+    return Completion.Stale();
   }
 
   const {
@@ -259,14 +269,13 @@ export const completeCheck = (
   };
 
   if (!fed) {
-    return {
-      _tag: "Committed",
+    return Completion.Committed({
       check,
       closeIncident: null,
       openIncident: null,
       state: base,
       transition: "none",
-    };
+    });
   }
 
   const evaluated = evaluate(base, config, outcome);
@@ -277,33 +286,30 @@ export const completeCheck = (
       lastHttpStatus: outcome.status,
       startedAt: now,
     };
-    return {
-      _tag: "Committed",
+    return Completion.Committed({
       check,
       closeIncident: null,
       openIncident,
       state: { ...evaluated.state, openIncidentId: openIncident.id },
       transition: "down",
-    };
+    });
   }
   if (evaluated.transition === "up" && state.openIncidentId !== null) {
-    return {
-      _tag: "Committed",
+    return Completion.Committed({
       check,
       closeIncident: { id: state.openIncidentId, resolvedAt: now },
       openIncident: null,
       state: { ...evaluated.state, openIncidentId: null },
       transition: "up",
-    };
+    });
   }
-  return {
-    _tag: "Committed",
+  return Completion.Committed({
     check,
     closeIncident: null,
     openIncident: null,
     state: evaluated.state,
     transition: evaluated.transition,
-  };
+  });
 };
 
 /**

@@ -9,6 +9,11 @@ export type Transition = "down" | "none" | "up";
 type Thresholds = Pick<MonitorConfig, "failureThreshold" | "successThreshold">;
 type Streaks = Pick<MonitorState, "failureStreak" | "status" | "successStreak">;
 
+export interface Evaluation<S extends Streaks> {
+  readonly state: S;
+  readonly transition: Transition;
+}
+
 /**
  * The status state machine. Feed it only results that count toward status
  * (successes, confirmed failures). Down after `failureThreshold` failures in
@@ -20,7 +25,7 @@ export const evaluate = <S extends Streaks>(
   state: S,
   config: Thresholds,
   result: { readonly ok: boolean }
-): { readonly state: S; readonly transition: Transition } => {
+): Evaluation<S> => {
   if (result.ok) {
     const successStreak = state.successStreak + 1;
     const status: MonitorStatus =

@@ -14,7 +14,7 @@ export interface ConfigChange {
   readonly state: MonitorState;
 }
 
-const sameValue = (left: unknown, right: unknown): boolean =>
+const sameValue = <T>(left: T, right: T): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
 export const isProbeAffecting = (

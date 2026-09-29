@@ -6,16 +6,20 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import type { DeliveryResult } from "../alerts/delivery.ts";
-import { deliver } from "../alerts/delivery.ts";
+import { DeliveryResult, deliver } from "../alerts/delivery.ts";
 import type { WatchdogMessageTag } from "../alerts/message.ts";
-import { alertRequest, idempotencyKey } from "../alerts/message.ts";
+import {
+  alertRequest,
+  idempotencyKey,
+  watchdogMessage,
+} from "../alerts/message.ts";
 import type { OutboxEntry } from "../domain/alert.ts";
 import type { ChannelTarget, ChannelView } from "../domain/channel.ts";
 import { ChannelKind, maskUrl } from "../domain/channel.ts";
 import { MonitorStatus } from "../domain/monitor.ts";
 import type { ChannelSelection, MonitorSummary } from "../domain/monitor.ts";
 import {
+  OutboxDecision,
   afterAttempt,
   deliverDue,
   dueOutbox,
@@ -89,7 +93,7 @@ export interface WatchdogAlertsView {
 }
 
 /** The watchdog message for an outbox decision about an episode. */
-const watchdogMessage: Record<
+const watchdogTag: Record<
   "Down" | "DownRecovered" | "Recovered",
   WatchdogMessageTag
 > = {
@@ -160,6 +164,18 @@ export interface DevEvent {
   readonly kind: string;
 }
 
+/** `dev_events` rows; `detail` is stored as JSON text. */
+const DevEventRows = Schema.Array(
+  Schema.Struct({
+    at: Schema.Number,
+    detail: Schema.fromJsonString(Schema.Json),
+    id: Schema.Number,
+    kind: Schema.String,
+  })
+);
+
+const noWatchdogWork: readonly OutboxEntry[] = [];
+
 export class Registry extends Cloudflare.DurableObject<
   Registry,
   {
@@ -212,7 +228,7 @@ export class Registry extends Cloudflare.DurableObject<
     ) => Effect.Effect<boolean, never, RuntimeContext>;
     recordDevEvent: (
       kind: string,
-      detail: unknown
+      detail: Schema.Json
     ) => Effect.Effect<number, never, RuntimeContext>;
     devEvents: () => Effect.Effect<readonly DevEvent[], never, RuntimeContext>;
     /** Set a dev flip target up/down, or toggle it when `up` is null. */
@@ -597,14 +613,16 @@ export const RegistryLive = Registry.make(
           }
           const episode = yield* withSql(readEpisode(entry.incidentId));
           const decision = outboxDecision(entry, pair.down, episode);
-          if (decision._tag === "Done" || decision._tag === "Wait") {
+          if (
+            OutboxDecision.$is("Done")(decision) ||
+            OutboxDecision.$is("Wait")(decision)
+          ) {
             return;
           }
-          if (decision._tag === "Skip" || episode === null) {
-            const reason =
-              decision._tag === "Skip"
-                ? decision.reason
-                : "episode no longer exists";
+          if (!OutboxDecision.$is("Send")(decision) || episode === null) {
+            const reason = OutboxDecision.$is("Skip")(decision)
+              ? decision.reason
+              : "episode no longer exists";
             yield* transact(
               writeWatchdogOutbox(skipped(entry, reason, Date.now()))
             );
@@ -612,41 +630,43 @@ export const RegistryLive = Registry.make(
           }
           const target = yield* getChannel(entry.channelId);
           if (target === null) {
-            const gone: DeliveryResult = {
-              _tag: "Failed",
+            const gone = DeliveryResult.Failed({
               error: "channel deleted",
               permanent: true,
               status: null,
-            };
+            });
             yield* transact(
               writeWatchdogOutbox(afterAttempt(entry, gone, false, Date.now()))
             );
             return;
           }
           const result = yield* deliver(
-            alertRequest(target.kind, target.url, {
-              _tag: watchdogMessage[decision.message],
-              episode: {
-                id: episode.id,
-                intervalSeconds: episode.intervalSeconds,
-                lastCheckedAt: episode.lastCheckedAt,
-                resolvedAt: episode.resolvedAt,
-                startedAt: episode.startedAt,
-              },
-              idempotencyKey: idempotencyKey(
-                entry.incidentId,
-                entry.event,
-                entry.channelId
-              ),
-              monitor: {
-                id: episode.monitorId,
-                name: episode.monitorName,
-                url: episode.monitorUrl,
-              },
-              sentAt: Date.now(),
-            })
+            alertRequest(
+              target.kind,
+              target.url,
+              watchdogMessage(watchdogTag[decision.message], {
+                episode: {
+                  id: episode.id,
+                  intervalSeconds: episode.intervalSeconds,
+                  lastCheckedAt: episode.lastCheckedAt,
+                  resolvedAt: episode.resolvedAt,
+                  startedAt: episode.startedAt,
+                },
+                idempotencyKey: idempotencyKey(
+                  entry.incidentId,
+                  entry.event,
+                  entry.channelId
+                ),
+                monitor: {
+                  id: episode.monitorId,
+                  name: episode.monitorName,
+                  url: episode.monitorUrl,
+                },
+                sentAt: Date.now(),
+              })
+            )
           );
-          if (result._tag === "Failed") {
+          if (DeliveryResult.$is("Failed")(result)) {
             yield* Effect.logWarning(
               `watchdog alert ${entry.incidentId}:${entry.event} to ${entry.channelId} failed: ${result.error}`
             );
@@ -668,7 +688,7 @@ export const RegistryLive = Registry.make(
           const work = yield* withSql(readWatchdogWork).pipe(
             Effect.catchCause((cause) =>
               Effect.logError("reading watchdog alerts failed", cause).pipe(
-                Effect.as([] as readonly OutboxEntry[])
+                Effect.as(noWatchdogWork)
               )
             )
           );
@@ -737,18 +757,8 @@ export const RegistryLive = Registry.make(
             Effect.orDie
           ),
         devEvents: () =>
-          sql<{
-            at: number;
-            detail: string;
-            id: number;
-            kind: string;
-          }>`SELECT * FROM dev_events ORDER BY id`.pipe(
-            Effect.map((rows) =>
-              rows.map((row) => ({
-                ...row,
-                detail: JSON.parse(row.detail) as unknown,
-              }))
-            ),
+          sql`SELECT * FROM dev_events ORDER BY id`.pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(DevEventRows)),
             Effect.orDie
           ),
         devRewindSummary: (id: string) =>
@@ -790,7 +800,7 @@ export const RegistryLive = Registry.make(
         observe,
         pruneWatchdog: (before: number) => transact(pruneEpisodes(before)),
         recipients,
-        recordDevEvent: (kind: string, detail: unknown) =>
+        recordDevEvent: (kind: string, detail: Schema.Json) =>
           sql<{ id: number }>`INSERT INTO dev_events (at, kind, detail)
             VALUES (${Date.now()}, ${kind}, ${JSON.stringify(detail)})
             RETURNING id`.pipe(
