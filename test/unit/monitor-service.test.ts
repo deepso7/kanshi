@@ -56,7 +56,7 @@ const entry: RegistryEntry = {
   summary: summaryOf(config, snapshot.state),
   summaryRevision: 0,
   updatedAt: t0,
-  watch: { episodeId: null, staleRuns: 0 },
+  watch: { episodeId: null },
 };
 
 type RegistryStub = ReturnType<MonitorServiceDeps["registries"]["getByName"]>;
@@ -163,7 +163,7 @@ const entryOf = (
   id,
   key: id,
   summary: { ...entry.summary, ...overrides, name: id },
-  watch: { episodeId, staleRuns: episodeId === null ? 0 : 2 },
+  watch: { episodeId },
 });
 
 describe(statusCounts, () => {

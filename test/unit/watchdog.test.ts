@@ -1,4 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
+import { RuntimeContext } from "alchemy";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -12,9 +14,15 @@ import type {
   MonitorConfig,
   MonitorSnapshot,
 } from "../../src/domain/monitor.ts";
+import { summaryOf } from "../../src/domain/monitor.ts";
 import { initialState } from "../../src/monitor/cycle.ts";
 import { applyConfigChange } from "../../src/monitor/reset.ts";
 import type {
+  ReconcileReport,
+  RegistryEntry,
+} from "../../src/registry/registry.ts";
+import type {
+  ReconcileItem,
   WatchdogRow,
   WatchdogStatus,
   WatchState,
@@ -24,12 +32,14 @@ import {
   decide,
   isStale,
   lastSignOfLife,
-  needsStatus,
-  staleRunsToAlert,
+  needsReconcile,
+  staleFloorMs,
   staleThresholdMs,
   WatchdogAction,
   watchTransition,
 } from "../../src/watchdog/rules.ts";
+import type { WatchdogDeps } from "../../src/watchdog/run.ts";
+import { runWatchdog } from "../../src/watchdog/run.ts";
 
 const minute = 60_000;
 const t0 = 1_700_000_000_000;
@@ -90,14 +100,14 @@ describe("watchdog decisions", () => {
   it("leaves a young creating row alone and needs no status for it", () => {
     const young = row({ lifecycle: "creating" });
     const now = t0 + creatingGraceMs - 1;
-    assert.isFalse(needsStatus(young, now));
+    assert.isFalse(needsReconcile(young, now));
     assert.deepStrictEqual(decide(young, null, now), WatchdogAction.Wait());
   });
 
   it("activates a stuck create whose monitor was configured", () => {
     const stuck = row({ lifecycle: "creating", opId: "op9" });
     const now = t0 + creatingGraceMs;
-    assert.isTrue(needsStatus(stuck, now));
+    assert.isTrue(needsReconcile(stuck, now));
     assert.deepStrictEqual(
       decide(stuck, live(), now),
       WatchdogAction.Activate({ opId: "op9" })
@@ -127,7 +137,7 @@ describe("watchdog decisions", () => {
 
   it("retries a stuck delete whatever its age, without a status", () => {
     const deleting = row({ lifecycle: "deleting" });
-    assert.isFalse(needsStatus(deleting, t0));
+    assert.isFalse(needsReconcile(deleting, t0));
     assert.deepStrictEqual(
       decide(deleting, null, t0),
       WatchdogAction.Destroy()
@@ -137,7 +147,7 @@ describe("watchdog decisions", () => {
   it("refreshes an active monitor with its summary and revision", () => {
     const now = t0 + minute;
     const value = snapshot({ lastCheckedAt: t0 + 30_000, summaryRevision: 12 });
-    assert.isTrue(needsStatus(row(), t0));
+    assert.isTrue(needsReconcile(row(), t0));
     assert.deepStrictEqual(
       decide(row(), live(value), now),
       WatchdogAction.Refresh({
@@ -179,9 +189,12 @@ describe("watchdog decisions", () => {
 });
 
 describe("staleness", () => {
-  it("allows two intervals plus two minutes", () => {
-    assert.strictEqual(staleThresholdMs(60), 4 * minute);
-    assert.strictEqual(staleThresholdMs(5), 2 * minute + 10_000);
+  it("allows two intervals plus two minutes, and at least the floor", () => {
+    assert.strictEqual(staleFloorMs, 10 * minute);
+    assert.strictEqual(staleThresholdMs(60), 10 * minute);
+    assert.strictEqual(staleThresholdMs(5), 10 * minute);
+    assert.strictEqual(staleThresholdMs(300), 12 * minute);
+    assert.strictEqual(staleThresholdMs(3600), 122 * minute);
   });
 
   it("measures from the last check, creation or schedule reset, whichever is latest", () => {
@@ -212,9 +225,9 @@ describe("staleness", () => {
   });
 
   describe("edits of an already-stale monitor", () => {
-    // Last checked at t0, stale since t0 + 4 minutes; edited at t0 + 10.
+    // Last checked at t0, stale since t0 + 10 minutes; edited at t0 + 20.
     const stale = snapshot({ lastCheckedAt: t0 });
-    const editedAt = t0 + 10 * minute;
+    const editedAt = t0 + 20 * minute;
     const edit = (patch: Partial<MonitorConfig>) => {
       const after = { ...stale.config, ...patch, updatedAt: editedAt };
       const change = applyConfigChange(
@@ -242,8 +255,8 @@ describe("staleness", () => {
     it("restarts the clock on a probe-affecting edit", () => {
       const edited = edit({ timeoutMs: 5000 });
       assert.strictEqual(lastSignOfLife(edited), editedAt);
-      assert.isFalse(isStale(edited, editedAt + 4 * minute));
-      assert.isTrue(isStale(edited, editedAt + 4 * minute + 1));
+      assert.isFalse(isStale(edited, editedAt + 10 * minute));
+      assert.isTrue(isStale(edited, editedAt + 10 * minute + 1));
     });
 
     it("restarts the clock on enable", () => {
@@ -262,14 +275,14 @@ describe("staleness", () => {
       );
       const value = { config: enabled.config, state: enabled.state };
       assert.strictEqual(lastSignOfLife(value), editedAt);
-      assert.isFalse(isStale(value, editedAt + 4 * minute));
+      assert.isFalse(isStale(value, editedAt + 10 * minute));
     });
   });
 
   it("is stale only strictly past the threshold, and only when enabled", () => {
     const value = snapshot({ lastCheckedAt: t0 });
-    assert.isFalse(isStale(value, t0 + 4 * minute));
-    assert.isTrue(isStale(value, t0 + 4 * minute + 1));
+    assert.isFalse(isStale(value, t0 + 10 * minute));
+    assert.isTrue(isStale(value, t0 + 10 * minute + 1));
     const disabled = snapshot({
       config: { enabled: false },
       lastCheckedAt: t0,
@@ -278,65 +291,45 @@ describe("staleness", () => {
   });
 
   it("counts a never-checked monitor from its creation", () => {
-    assert.isFalse(isStale(snapshot(), t0 + 4 * minute));
-    assert.isTrue(isStale(snapshot(), t0 + 5 * minute));
+    assert.isFalse(isStale(snapshot(), t0 + 10 * minute));
+    assert.isTrue(isStale(snapshot(), t0 + 11 * minute));
   });
 });
 
-describe("stale counter and dedup", () => {
+describe("episodes and dedup", () => {
   const fresh = { enabled: true, stale: false };
   const stale = { enabled: true, stale: true };
   const disabled = { enabled: false, stale: false };
 
-  /** Run the transition over observations, starting from a clean state. */
+  /** Run the transition over observations, starting with no episode. */
   const run = (observations: readonly (typeof fresh)[]) => {
-    let state: WatchState = { episodeId: null, staleRuns: 0 };
+    let state: WatchState = { episodeId: null };
     const changes: string[] = [];
     for (const observation of observations) {
-      const next = watchTransition(state, observation);
-      changes.push(next.change);
-      let { episodeId } = state;
-      if (next.change === "open") {
-        episodeId = "ep";
-      } else if (next.change !== "none") {
-        episodeId = null;
+      const change = watchTransition(state, observation);
+      changes.push(change);
+      if (change === "open") {
+        state = { episodeId: "ep" };
+      } else if (change !== "none") {
+        state = { episodeId: null };
       }
-      state = { episodeId, staleRuns: next.staleRuns };
     }
     return { changes, state };
   };
 
-  it("alerts on the second consecutive stale run", () => {
-    assert.strictEqual(staleRunsToAlert, 2);
-    assert.deepStrictEqual(run([stale]).changes, ["none"]);
-    assert.deepStrictEqual(run([stale, stale]).changes, ["none", "open"]);
-  });
-
-  it("needs the stale runs to be consecutive", () => {
-    assert.deepStrictEqual(run([stale, fresh, stale, fresh]).changes, [
-      "none",
-      "none",
-      "none",
-      "none",
-    ]);
+  it("opens an episode on a single stale observation", () => {
+    assert.deepStrictEqual(run([stale]).changes, ["open"]);
+    assert.deepStrictEqual(run([fresh, stale]).changes, ["none", "open"]);
   });
 
   it("alerts once per episode, however long it lasts", () => {
-    const result = run([stale, stale, stale, stale, stale]);
-    assert.deepStrictEqual(result.changes, [
-      "none",
-      "open",
-      "none",
-      "none",
-      "none",
-    ]);
-    assert.strictEqual(result.state.staleRuns, 5);
+    const result = run([stale, stale, stale, stale]);
+    assert.deepStrictEqual(result.changes, ["open", "none", "none", "none"]);
     assert.strictEqual(result.state.episodeId, "ep");
   });
 
   it("resolves when checks resume, and can alert again later", () => {
-    assert.deepStrictEqual(run([stale, stale, fresh, stale, stale]).changes, [
-      "none",
+    assert.deepStrictEqual(run([stale, fresh, fresh, stale]).changes, [
       "open",
       "resolve",
       "none",
@@ -345,14 +338,10 @@ describe("stale counter and dedup", () => {
   });
 
   it("closes silently when the monitor is disabled", () => {
-    const result = run([stale, stale, disabled]);
-    assert.deepStrictEqual(result.changes, ["none", "open", "close"]);
-    assert.deepStrictEqual(result.state, { episodeId: null, staleRuns: 0 });
-    assert.deepStrictEqual(run([stale, disabled, stale]).changes, [
-      "none",
-      "none",
-      "none",
-    ]);
+    const result = run([stale, disabled]);
+    assert.deepStrictEqual(result.changes, ["open", "close"]);
+    assert.deepStrictEqual(result.state, { episodeId: null });
+    assert.deepStrictEqual(run([disabled, disabled]).changes, ["none", "none"]);
   });
 });
 
@@ -458,4 +447,213 @@ describe("not-being-checked messages", () => {
     assert.strictEqual(again.event, "checked");
     assert.isTrue(again.recovered);
   });
+});
+
+type RegistryStub = ReturnType<WatchdogDeps["registries"]["getByName"]>;
+type MonitorStub = ReturnType<WatchdogDeps["monitors"]["getByName"]>;
+
+const registryRow = (
+  id: string,
+  overrides: Partial<RegistryEntry> = {}
+): RegistryEntry => ({
+  createdAt: t0,
+  id,
+  key: id,
+  lifecycle: "active",
+  managed: false,
+  opId: `op-${id}`,
+  public: false,
+  summary: summaryOf(config, snapshot().state),
+  summaryRevision: 7,
+  updatedAt: t0,
+  watch: { episodeId: null },
+  ...overrides,
+});
+
+/**
+ * A watchdog over fake objects that records every call as
+ * `<object>.<method>`: `snapshots` are the monitors' `reconcile()` answers,
+ * `batch` the Registry's `reconcile` (null: it fails).
+ */
+const fakeWatchdog = (
+  rows: readonly RegistryEntry[],
+  snapshots: ReadonlyMap<string, MonitorSnapshot>,
+  batch: ((items: readonly ReconcileItem[]) => ReconcileReport) | null
+) => {
+  const calls: string[] = [];
+  const batches: (readonly ReconcileItem[])[] = [];
+  const registry: Pick<
+    RegistryStub,
+    "activate" | "list" | "markDeleting" | "reconcile" | "remove"
+  > = {
+    activate: () => Effect.sync(() => calls.push("registry.activate") > 0),
+    list: () =>
+      Effect.sync(() => {
+        calls.push("registry.list");
+        return rows;
+      }),
+    markDeleting: () =>
+      Effect.sync(() => calls.push("registry.markDeleting") > 0),
+    reconcile: (items: readonly ReconcileItem[]) =>
+      Effect.suspend(() => {
+        calls.push("registry.reconcile");
+        batches.push(items);
+        return batch === null
+          ? Effect.die(new Error("registry unavailable"))
+          : Effect.succeed(batch(items));
+      }),
+    remove: () =>
+      Effect.sync(() => {
+        calls.push("registry.remove");
+      }),
+  };
+  const monitorOf = (
+    id: string
+  ): Pick<MonitorStub, "destroy" | "reconcile"> => ({
+    destroy: () =>
+      Effect.sync(() => {
+        calls.push(`${id}.destroy`);
+      }),
+    reconcile: () =>
+      Effect.sync(() => {
+        calls.push(`${id}.reconcile`);
+        return {
+          alarmAt: t0 + 1,
+          snapshot: snapshots.get(id) ?? null,
+          tombstonedAt: null,
+        };
+      }),
+  });
+  const deps: WatchdogDeps = {
+    // SAFETY: the run only calls `getByName` on the namespace, then
+    // `destroy` and `reconcile` on the stub; this double implements those.
+    monitors: {
+      getByName: (name: string) => monitorOf(name),
+    } as WatchdogDeps["monitors"],
+    // SAFETY: the run only calls `getByName` on the namespace, then
+    // `activate`, `list`, `markDeleting`, `reconcile` and `remove` on the
+    // stub; this double implements exactly those.
+    registries: {
+      getByName: (_name: string) => registry,
+    } as WatchdogDeps["registries"],
+  };
+  return { batches, calls, deps };
+};
+
+describe(runWatchdog, () => {
+  const now = t0 + 60 * minute;
+  const fresh = snapshot({ lastCheckedAt: now - minute, summaryRevision: 9 });
+  const stale = snapshot({ lastCheckedAt: t0, summaryRevision: 3 });
+  const rows = [
+    registryRow("fresh"),
+    registryRow("stale"),
+    registryRow("young", { createdAt: now, lifecycle: "creating" }),
+    registryRow("gone", { lifecycle: "deleting" }),
+  ];
+  const snapshots = new Map([
+    ["fresh", fresh],
+    ["stale", stale],
+  ]);
+  const answer = (items: readonly ReconcileItem[]): ReconcileReport => ({
+    alarmAt: t0 + 5,
+    pruned: 0,
+    results: items.map((item) => ({
+      error: null,
+      id: item.id,
+      summaryUpdated: item.id === "fresh",
+      watch: {
+        applied: true,
+        change: item.observation.stale ? "open" : "none",
+        episodeId: item.observation.stale ? "watchdog-1" : null,
+      },
+    })),
+  });
+
+  it.effect("makes one call per active monitor and one batched write", () =>
+    Effect.gen(function* batchTest() {
+      const { batches, calls, deps } = fakeWatchdog(rows, snapshots, answer);
+      const report = yield* runWatchdog(deps, now);
+      assert.deepStrictEqual(calls.toSorted(), [
+        "fresh.reconcile",
+        "gone.destroy",
+        "registry.list",
+        "registry.reconcile",
+        "registry.remove",
+        "stale.reconcile",
+      ]);
+      assert.strictEqual(batches.length, 1);
+      assert.deepStrictEqual(batches[0], [
+        {
+          id: "fresh",
+          observation: {
+            enabled: true,
+            intervalSeconds: 60,
+            lastCheckedAt: now - minute,
+            name: "Site",
+            stale: false,
+            url: "https://example.com/",
+          },
+          revision: 9,
+          summary: summaryOf(fresh.config, fresh.state),
+        },
+        {
+          id: "stale",
+          observation: {
+            enabled: true,
+            intervalSeconds: 60,
+            lastCheckedAt: t0,
+            name: "Site",
+            stale: true,
+            url: "https://example.com/",
+          },
+          revision: 3,
+          summary: summaryOf(stale.config, stale.state),
+        },
+      ]);
+      assert.deepStrictEqual(
+        report.results.map((result) => [
+          result.id,
+          result.action,
+          result.outcome,
+          result.summaryUpdated ?? null,
+          result.watch?.change ?? null,
+        ]),
+        [
+          ["fresh", "Refresh", "refreshed", true, "none"],
+          ["stale", "Refresh", "refreshed", false, "open"],
+          ["young", "Wait", "waiting", null, null],
+          ["gone", "Destroy", "removed", null, null],
+        ]
+      );
+      assert.strictEqual(report.results[0]?.alarmAt, t0 + 1);
+      assert.strictEqual(report.registryAlarmAt, t0 + 5);
+      assert.strictEqual(report.failed, 0);
+    }).pipe(Effect.provide(RuntimeContext.phantom))
+  );
+
+  it.effect("still makes the batched write with no active monitors", () =>
+    Effect.gen(function* emptyTest() {
+      const { batches, calls, deps } = fakeWatchdog([], new Map(), answer);
+      yield* runWatchdog(deps, now);
+      assert.deepStrictEqual(calls, ["registry.list", "registry.reconcile"]);
+      assert.deepStrictEqual(batches, [[]]);
+    }).pipe(Effect.provide(RuntimeContext.phantom))
+  );
+
+  it.effect("reports every refresh as failed when the batch fails", () =>
+    Effect.gen(function* failedBatchTest() {
+      const { deps } = fakeWatchdog(rows, snapshots, null);
+      const report = yield* runWatchdog(deps, now);
+      const refreshed = report.results.filter(
+        (result) => result.action === "Refresh"
+      );
+      assert.strictEqual(refreshed.length, 2);
+      for (const result of refreshed) {
+        assert.strictEqual(result.outcome, "partly failed");
+        assert.match(result.errors[0] ?? "", /^reconcile: /u);
+      }
+      assert.strictEqual(report.failed, 2);
+      assert.isNull(report.registryAlarmAt);
+    }).pipe(Effect.provide(RuntimeContext.phantom))
+  );
 });

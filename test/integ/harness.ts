@@ -80,9 +80,26 @@ const RegistryEntry = Schema.Struct({
   updatedAt: Schema.Number,
   watch: Schema.Struct({
     episodeId: Schema.NullOr(Schema.String),
-    staleRuns: Schema.Number,
   }),
 });
+
+/** `RegistryCalls`, as `GET /_dev/registry/calls` returns it. */
+export const RegistryCalls = Schema.Struct({
+  counts: Schema.Record(Schema.String, Schema.Number),
+  instanceId: Schema.String,
+  startedAt: Schema.Number,
+});
+export type RegistryCalls = typeof RegistryCalls.Type;
+
+/** Calls of `method` in `after` since `before` (same Registry instance). */
+export const callsSince = (
+  before: RegistryCalls,
+  after: RegistryCalls,
+  method: string
+): number => {
+  expect(after.instanceId).toBe(before.instanceId);
+  return (after.counts[method] ?? 0) - (before.counts[method] ?? 0);
+};
 
 /** A `/_dev/events` row for a request the `/_dev/webhook` sink received. */
 export const SinkEvent = Schema.Struct({
@@ -244,6 +261,11 @@ export const setup = (stage: string) => {
     Effect.flatMap(bodyOf(Schema.Array(RegistryEntry)))
   );
 
+  /** Registry calls per method since it started (dev inspection). */
+  const registryCalls = send("GET", "/_dev/registry/calls").pipe(
+    Effect.flatMap(bodyOf(RegistryCalls))
+  );
+
   const create = Effect.fn("Test.create")(function* createMonitor(
     body: Partial<typeof MonitorCreateInput.Encoded>
   ) {
@@ -265,6 +287,7 @@ export const setup = (stage: string) => {
     detail,
     devUrl,
     raw,
+    registryCalls,
     registryRows,
     send,
     setFlip,

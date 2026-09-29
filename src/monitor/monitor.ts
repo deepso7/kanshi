@@ -244,11 +244,15 @@ export class Monitor extends Cloudflare.DurableObject<
     ) => Effect.Effect<MonitorAlertsView, never, RuntimeContext>;
     /** Delete all data and leave a tombstone. Idempotent. */
     destroy: () => Effect.Effect<void, never, RuntimeContext>;
-    /** Recompute and set the alarm from persisted state. */
-    ensureAlarm: () => Effect.Effect<number | null, never, RuntimeContext>;
+    /**
+     * The watchdog's one call per run: recompute and set the alarm from
+     * persisted state (restoring a lost one), then report the status (the
+     * alarm, snapshot and tombstone) it decides on.
+     */
+    reconcile: () => Effect.Effect<MonitorStatusView, never, RuntimeContext>;
     /**
      * Dev stage: delete the alarm without touching state, as if it had been
-     * lost. Only the watchdog's `ensureAlarm()` brings it back.
+     * lost. Only the watchdog's `reconcile()` brings it back.
      */
     devClearAlarm: () => Effect.Effect<void, never, RuntimeContext>;
     alarm: (
@@ -969,7 +973,6 @@ export const MonitorLive = Monitor.make(
         destroy,
         devClearAlarm: () =>
           alarmLock.withPermits(1)(state.storage.deleteAlarm()),
-        ensureAlarm: () => rearm,
         incidents,
         maintain: (now: number) =>
           maintain(now, true).pipe(
@@ -999,6 +1002,11 @@ export const MonitorLive = Monitor.make(
             } satisfies MonitorOverview;
           }),
         recent,
+        reconcile: () =>
+          rearm.pipe(
+            Effect.andThen(status()),
+            Effect.withSpan("Monitor.reconcile")
+          ),
         runNow,
         snapshot: () =>
           withSql(loadLive).pipe(Effect.catchTag("SqlError", Effect.die)),

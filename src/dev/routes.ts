@@ -84,6 +84,8 @@ const monitorNotFound = () =>
  * - `POST /_dev/webhook?fail=500&failTimes=1&tag=x` alert sink, recorded
  *   in `dev_events` and logged; `GET /_dev/events` lists them
  * - `GET /_dev/registry` every Registry row, whatever its lifecycle
+ * - `GET /_dev/registry/calls` Registry calls per method (RPCs and alarm
+ *   runs) since the Registry object started, with its instance id
  * - `GET /_dev/monitors/:id` a monitor's raw status, checks, incidents and
  *   alert rows (notifications, recipients, outbox)
  * - `POST /_dev/monitors/:id/maintain?now=<ms>` run maintenance (rollups,
@@ -264,6 +266,11 @@ export const makeDevRoutes = (deps: DevDeps) => {
       "GET",
       "registry",
       () => Effect.flatMap(registry().list(), HttpServerResponse.json),
+    ],
+    [
+      "GET",
+      "registry/calls",
+      () => Effect.flatMap(registry().devCalls(), HttpServerResponse.json),
     ],
     [
       "POST",

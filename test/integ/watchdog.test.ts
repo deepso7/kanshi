@@ -19,10 +19,25 @@ import { OutboxEntry } from "../../src/domain/alert.ts";
 import { ChannelView } from "../../src/domain/channel.ts";
 import { Episode } from "../../src/domain/watchdog.ts";
 import { watchdogCron } from "../../src/worker.ts";
-import { SinkEvent, WebhookAlert, bodyOf, setup, waitFor } from "./harness.ts";
+import {
+  SinkEvent,
+  WebhookAlert,
+  bodyOf,
+  callsSince,
+  setup,
+  waitFor,
+} from "./harness.ts";
 
-const { create, detail, devUrl, registryRows, send, stack, test } =
-  setup("integ-watchdog");
+const {
+  create,
+  detail,
+  devUrl,
+  registryCalls,
+  registryRows,
+  send,
+  stack,
+  test,
+} = setup("integ-watchdog");
 
 const minute = 60_000;
 
@@ -40,7 +55,6 @@ const RowReport = Schema.Struct({
       applied: Schema.Boolean,
       change: Schema.String,
       episodeId: Schema.NullOr(Schema.String),
-      staleRuns: Schema.Number,
     })
   ),
 });
@@ -124,11 +138,18 @@ test(
     expect(stopped.status.alarmAt).toBeNull();
     expect(stopped.status.snapshot?.state.lastCheckedAt).toBe(stoppedAt);
 
+    const before = yield* registryCalls;
     const report = yield* watchdog();
+    const after = yield* registryCalls;
     const result = resultFor(report, monitor.id);
     expect(result?.action).toBe("Refresh");
     expect(result?.errors).toEqual([]);
     expect(result?.alarmAt).toBeNumber();
+    // One list and one batched write, whatever the number of monitors; no
+    // per-monitor Registry call.
+    expect(callsSince(before, after, "list")).toBe(1);
+    expect(callsSince(before, after, "reconcile")).toBe(1);
+    expect(callsSince(before, after, "upsertSummary")).toBe(0);
     expect((yield* detail(monitor.id)).status.alarmAt).toBeNumber();
     yield* waitFor(
       "checks resume",
@@ -384,18 +405,14 @@ test(
       (at) => at !== null
     );
 
-    // An hour on, the last check is far older than 2 x 5s + 2m.
+    // An hour on, the last check is far older than the 10 minute floor:
+    // one stale observation opens the episode.
     const later = Date.now() + 60 * minute;
     const first = resultFor(yield* watchdog(later), monitor.id);
-    expect(first?.watch).toMatchObject({ change: "none", staleRuns: 1 });
-    const second = resultFor(yield* watchdog(later), monitor.id);
-    expect(second?.watch).toMatchObject({ change: "open", staleRuns: 2 });
-    const episodeId = second?.watch?.episodeId ?? "";
+    expect(first?.watch).toMatchObject({ change: "open" });
+    const episodeId = first?.watch?.episodeId ?? "";
     expect(episodeId).toStartWith("watchdog-");
-    expect((yield* rowOf(monitor.id))?.watch).toEqual({
-      episodeId,
-      staleRuns: 2,
-    });
+    expect((yield* rowOf(monitor.id))?.watch).toEqual({ episodeId });
     // The API shows the open episode and flags the monitor.
     const open = yield* openEpisodes;
     expect(open.find((entry) => entry.id === episodeId)).toMatchObject({
@@ -405,8 +422,8 @@ test(
     });
     expect(yield* notCheckedFlags(monitor.id)).toEqual([true, true, true]);
     // Still stale: deduplicated, no second alert.
-    const third = resultFor(yield* watchdog(later), monitor.id);
-    expect(third?.watch).toMatchObject({ change: "none", staleRuns: 3 });
+    const again = resultFor(yield* watchdog(later), monitor.id);
+    expect(again?.watch).toMatchObject({ change: "none", episodeId });
 
     const down = yield* waitFor(
       "not-being-checked alert",
@@ -424,7 +441,6 @@ test(
     expect(resumed?.watch).toMatchObject({
       change: "resolve",
       episodeId: null,
-      staleRuns: 0,
     });
     expect((yield* openEpisodes).some((entry) => entry.id === episodeId)).toBe(
       false
@@ -462,4 +478,48 @@ test(
     );
   }),
   { timeout: 90_000 }
+);
+
+test(
+  "converges a lost status push that later checks do not repeat",
+  Effect.gen(function* lostPushTest() {
+    const target = yield* devUrl("/target");
+    const monitor = yield* create({
+      intervalSeconds: 5,
+      name: "lost push",
+      url: target,
+    });
+    const listed = send("GET", "/api/monitors").pipe(
+      Effect.flatMap(bodyOf(Schema.Array(MonitorListItem))),
+      Effect.map((items) => items.find((item) => item.id === monitor.id))
+    );
+    yield* waitFor(
+      "up in the Registry",
+      listed,
+      (item) => item?.status === "up"
+    );
+
+    // As if the up push had been lost: the Registry still says unknown.
+    yield* send("POST", `/_dev/registry/${monitor.id}/rewind`);
+    const checks = detail(monitor.id).pipe(
+      Effect.map((value) => value.checks.length)
+    );
+    const start = yield* checks;
+    yield* waitFor("two more checks", checks, (count) => count >= start + 2);
+    // Nothing changed for the monitor, so nothing was pushed.
+    expect(yield* listed).toMatchObject({ name: "(stale)", status: "unknown" });
+
+    const report = yield* watchdog();
+    expect(resultFor(report, monitor.id)).toMatchObject({
+      action: "Refresh",
+      summaryUpdated: true,
+    });
+    expect(yield* listed).toMatchObject({
+      name: "lost push",
+      status: "up",
+      url: target,
+    });
+    yield* remove(monitor.id);
+  }),
+  { timeout: 60_000 }
 );

@@ -41,8 +41,12 @@ import { runWatchdog } from "./watchdog/run.ts";
  */
 export const webAssetsDirectory = "web/dist";
 
-/** The watchdog's Cron Trigger. */
-export const watchdogCron = "*/5 * * * *";
+/**
+ * The watchdog's Cron Trigger: hourly, off the hour. It re-arms lost
+ * alarms, converges lost summary pushes and finds monitors that stopped
+ * being checked, so a silently stuck monitor is noticed within 1-2 hours.
+ */
+export const watchdogCron = "17 * * * *";
 
 // Workers have no file system; the API never serves files.
 const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
