@@ -35,5 +35,6 @@
       }
     ]
   },
-  "exclude": ["node_modules"]
+  // `web/` has its own tsconfig (DOM, JSX); only its Vite config is here.
+  "exclude": ["node_modules", "web/src", "web/dist"]
 }

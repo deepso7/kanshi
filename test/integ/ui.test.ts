@@ -1,7 +1,14 @@
-// Integration tests for the dashboard and the public status page: sign-in
-// and cookie auth (`/api/session`, pages and /api), the Origin check on form posts, and
-// that the status page and GET /api/public/status only ever show monitors
-// that are public right now, without URLs. Run with `pnpm test:integ`.
+// Integration tests for the dashboard and the public status page: the SPA
+// shell (static assets), sign-in and cookie auth (`/api/session`, the
+// legacy pages and /api), the Origin check on form posts, and that GET
+// /api/public/status only ever shows monitors that are public right now,
+// without URLs. Run with `pnpm test:integ` (it builds the SPA first).
+//
+// UI rework: `/` and `/status` are now the SPA (its placeholder), so the
+// legacy dashboard and status page HTML are no longer checked here. The
+// phases that port those pages must add their checks (e.g. that the SPA
+// status page lists only public monitors), and drop the legacy-page tests
+// (`/login`, `/monitors/*`, `/channels`) along with `src/ui/`.
 import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
@@ -38,16 +45,53 @@ const publicStatus = send("GET", "/api/public/status", { auth: null }).pipe(
   })
 );
 
-const statusHtml = raw("GET", "/status").pipe(
-  Effect.map((reply) => {
-    expect(reply.status).toBe(200);
-    expect(reply.headers.get("cache-control")).toBe("no-store");
-    return reply.text;
-  })
-);
+/** The SPA's `index.html`, as the asset layer serves it for `path`. */
+const spaShell = (path: string) =>
+  raw("GET", path).pipe(
+    Effect.map((reply) => {
+      expect(reply.status).toBe(200);
+      expect(reply.headers.get("content-type")).toContain("text/html");
+      expect(reply.text).toContain('<div id="root"></div>');
+      return reply;
+    })
+  );
 
 const publicNames = publicStatus.pipe(
   Effect.map((status) => status.monitors.map((monitor) => monitor.name))
+);
+
+test(
+  "the SPA is served as static assets, with the Worker's paths first",
+  Effect.gen(function* spaTest() {
+    // The shell for the root, the public status page and any client route.
+    const home = yield* spaShell("/");
+    const csp = home.headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).not.toContain("unsafe-inline");
+    expect(home.headers.get("x-frame-options")).toBe("DENY");
+    yield* spaShell("/status");
+    yield* spaShell("/some/client/route");
+
+    // Content-hashed files are cached for good.
+    const script = /src="(?<path>\/assets\/[^"]+\.js)"/u.exec(home.text)?.groups
+      ?.path;
+    expect(script).toBeDefined();
+    const asset = yield* raw("GET", script ?? "");
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get("content-type")).toContain("javascript");
+    expect(asset.headers.get("cache-control")).toContain("immutable");
+
+    // The Worker's own paths never fall back to the shell.
+    const unknownApi = yield* raw("GET", "/api/nope");
+    expect(unknownApi.status).toBe(404);
+    expect(unknownApi.text).not.toContain('id="root"');
+    const legacy = yield* raw("GET", "/login");
+    expect(legacy.status).toBe(200);
+    expect(legacy.text).toContain('name="token"');
+  }),
+  { timeout: 60_000 }
 );
 
 test(
@@ -128,8 +172,8 @@ test(
   Effect.gen(function* loginTest() {
     const own = yield* origin;
 
-    // Signed-out pages redirect to the login form.
-    const home = yield* raw("GET", "/");
+    // Signed-out legacy pages redirect to the login form.
+    const home = yield* raw("GET", "/channels");
     expect(home.status).toBe(303);
     expect(home.headers.get("location")).toBe("/login");
     // A signed-out form post is redirected too (its body is read first).
@@ -175,9 +219,6 @@ test(
     expect(setCookie).not.toContain(apiToken);
 
     const cookie = yield* signIn;
-    const dashboard = yield* raw("GET", "/", { headers: { cookie } });
-    expect(dashboard.status).toBe(200);
-    expect(dashboard.text).toContain("<h1>Monitors</h1>");
     for (const path of ["/monitors/new", "/channels"]) {
       expect((yield* raw("GET", path, { headers: { cookie } })).status).toBe(
         200
@@ -216,7 +257,7 @@ test(
     // A forged or tampered cookie is worth nothing.
     const forged = "kanshi_session=99999999999999.".concat("0".repeat(64));
     expect(
-      (yield* raw("GET", "/", { headers: { cookie: forged } })).status
+      (yield* raw("GET", "/channels", { headers: { cookie: forged } })).status
     ).toBe(303);
     expect(
       (yield* send("GET", "/api/monitors", {
@@ -308,18 +349,16 @@ test(
       url: `${url}/_dev/target?secret=${secret}`,
     });
 
-    // Public: listed (and its history cached) on both.
+    // Public: listed (and its history cached).
     expect(yield* publicNames).toContain(name);
-    expect(yield* statusHtml).toContain(name);
 
-    // Private via the API: gone from both on the very next request.
+    // Private via the API: gone on the very next request.
     const patched = yield* send("PATCH", `/api/monitors/${monitor.id}`, {
       body: { public: false },
     });
     expect(patched.status).toBe(200);
     expect((yield* bodyOf(MonitorResponse)(patched)).public).toBe(false);
     expect(yield* publicNames).not.toContain(name);
-    expect(yield* statusHtml).not.toContain(name);
 
     // Public again via the API, then private via the dashboard button.
     yield* send("PATCH", `/api/monitors/${monitor.id}`, {
@@ -332,7 +371,6 @@ test(
     });
     expect(button.status).toBe(303);
     expect(yield* publicNames).not.toContain(name);
-    expect(yield* statusHtml).not.toContain(name);
 
     expect((yield* send("DELETE", `/api/monitors/${monitor.id}`)).status).toBe(
       204
@@ -376,13 +414,6 @@ test(
         "uptimePercent",
       ]);
     }
-
-    const html = yield* statusHtml;
-    expect(html).toContain(`shown-${secret}`);
-    expect(html).not.toContain(`hidden-${secret}`);
-    expect(html).not.toContain("/_dev/target");
-    expect(html).not.toContain(`shown=${secret}`);
-    expect(html).not.toContain(shown.id);
 
     for (const monitor of [shown, hidden]) {
       expect(

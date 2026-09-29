@@ -1,3 +1,4 @@
+import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
@@ -17,6 +18,7 @@ import { PublicHandlers } from "./api/public.ts";
 import { SessionHandlers } from "./api/session.ts";
 import { KanshiApi } from "./api/spec.ts";
 import { DevRoutes, isLoopbackHost } from "./dev/routes.ts";
+import { localRunWorkerFirst, runWorkerFirst } from "./http/worker-paths.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
 import { ChannelService } from "./service/channels.ts";
@@ -25,6 +27,12 @@ import { StatusService } from "./service/status.ts";
 import { KanshiSettings } from "./settings.ts";
 import { UiRoutes } from "./ui/routes.ts";
 import { runWatchdog } from "./watchdog/run.ts";
+
+/**
+ * The SPA's build output (`pnpm build`, run by `pnpm run deploy` and
+ * `pnpm test:integ`), relative to the directory alchemy runs in.
+ */
+export const webAssetsDirectory = "web/dist";
 
 /** The watchdog's Cron Trigger. */
 export const watchdogCron = "*/5 * * * *";
@@ -54,18 +62,29 @@ const ServicesLive = Layer.mergeAll(UiRoutes.layer, DevRoutes.layer).pipe(
 );
 
 /**
- * The single Kanshi Worker: the `/api` HttpApi, the watchdog cron and, in
- * the dev stage, the `/_dev/*` fixtures. It hosts the Monitor and Registry
- * Durable Objects. Its config is read by {@link KanshiSettings}.
+ * The single Kanshi Worker: the SPA (static assets), the `/api` HttpApi,
+ * the legacy pages, the watchdog cron and, in the dev stage, the `/_dev/*`
+ * fixtures. It hosts the Monitor and Registry Durable Objects. Its config
+ * is read by {@link KanshiSettings}.
  */
 export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
   "Kanshi",
-  {
-    dev: {
-      port: Config.Number("PORT").pipe(Config.withDefault(1337)),
-    },
-    main: import.meta.url,
-  },
+  Effect.gen(function* KanshiProps() {
+    const local = (yield* Alchemy.ProviderMode.defaultProviderMode) === "local";
+    return {
+      // The SPA is served by Cloudflare's asset layer; unknown paths get
+      // `index.html`. The Worker only runs for its own paths.
+      assets: {
+        directory: webAssetsDirectory,
+        notFoundHandling: "single-page-application",
+        runWorkerFirst: local ? localRunWorkerFirst : runWorkerFirst,
+      },
+      dev: {
+        port: Config.Number("PORT").pipe(Config.withDefault(1337)),
+      },
+      main: import.meta.url,
+    };
+  }),
   Effect.gen(function* KanshiInit() {
     const { apiToken, devMode } = yield* KanshiSettings;
     const monitors = yield* Monitor;

@@ -1,0 +1,12 @@
+# Cloudflare static assets: headers for the SPA and its files (the Worker's
+# own responses set theirs). StyleX emits a static stylesheet and Vite a
+# module script, so the CSP needs no inline script or style.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+  Referrer-Policy: same-origin
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+
+# Vite's content-hashed build output.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

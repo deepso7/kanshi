@@ -1,15 +1,19 @@
-// The Kanshi stack: one Worker (API, dashboard, status page, watchdog cron
-// every 5 minutes) hosting the Monitor and Registry Durable Objects.
+// The Kanshi stack: one Worker (the SPA as static assets, API, watchdog
+// cron every 5 minutes) hosting the Monitor and Registry Durable Objects.
 // `KANSHI_API_TOKEN` (from .env or the environment) is deployed as a secret.
-// - `pnpm dev`: stage `dev`, run locally by `alchemy dev` (dev mode on).
-// - `pnpm deploy` / `pnpm destroy`: stage `prod` on Cloudflare. State is
-//   kept in `.alchemy/` on the machine that deploys.
+// - `pnpm dev`: stage `dev`, run locally by `alchemy dev` (dev mode on),
+//   plus the SPA's Vite dev server (HMR) proxying the API to the Worker.
+// - `pnpm run deploy` / `pnpm run destroy`: stage `prod` on Cloudflare (`deploy`
+//   builds the SPA first). State is kept in `.alchemy/` on the machine that
+//   deploys.
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Command from "alchemy/Command";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 
-import Kanshi from "./src/worker.ts";
+import Kanshi, { webAssetsDirectory } from "./src/worker.ts";
 
 /**
  * Stages that get dev mode: `/_dev/*` fixtures, 5s intervals, localhost.
@@ -29,6 +33,14 @@ export default Alchemy.Stack(
     const stage = yield* Alchemy.Stage;
     // "local" only under `alchemy dev` (and not forced remote).
     const local = (yield* Alchemy.ProviderMode.defaultProviderMode) === "local";
+    if (local) {
+      // The local runtime refuses a missing assets directory; `pnpm dev`
+      // serves the SPA from Vite, so it need not be built.
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs
+        .makeDirectory(webAssetsDirectory, { recursive: true })
+        .pipe(Effect.orDie);
+    }
     const config = yield* ConfigProvider.ConfigProvider;
     const worker = yield* Kanshi.pipe(
       Effect.provideService(
@@ -41,6 +53,19 @@ export default Alchemy.Stack(
         )
       )
     );
+    if (local && devStages.has(stage)) {
+      // The SPA with HMR; it proxies the Worker's paths to `worker.url`.
+      const web = yield* Command.Dev("Web", {
+        command: "pnpm exec vite web",
+        env: {
+          KANSHI_WORKER_URL: worker.url,
+          // The alchemy CLI sets NODE_ENV for itself; with "production"
+          // Vite would drop React Fast Refresh and StyleX its dev output.
+          NODE_ENV: "development",
+        },
+      });
+      return { url: worker.url, web: web.url };
+    }
     return { url: worker.url };
   })
 );

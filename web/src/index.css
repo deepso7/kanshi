@@ -1,0 +1,14 @@
+/*
+ * Global base styles. StyleX appends its generated CSS to this file's
+ * build output (one stylesheet), so it must stay imported from main.tsx.
+ * Component styles belong in `stylex.create`, not here.
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
