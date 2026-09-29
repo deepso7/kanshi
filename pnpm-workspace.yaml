@@ -16,7 +16,7 @@ overrides:
   "@effect/sql-sqlite-do": 4.0.0-rc.117
   "@effect/vitest": 4.0.0-rc.117
 minimumReleaseAgeExclude:
-  - "@cloudflare/workers-types@5.20260928.1"
+  - "@cloudflare/workers-types@5.20260929.1"
   - "@effect/language-service@0.87.3"
   - "@oxfmt/binding-android-arm-eabi@0.71.0"
   - "@oxfmt/binding-android-arm64@0.71.0"

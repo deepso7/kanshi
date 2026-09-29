@@ -31,7 +31,7 @@
     "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260928.1",
+    "@cloudflare/workers-types": "5.20260929.1",
     "@effect/language-service": "0.87.3",
     "@effect/platform-bun": "4.0.0-rc.117",
     "@effect/vitest": "4.0.0-rc.117",
