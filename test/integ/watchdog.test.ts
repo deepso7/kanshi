@@ -10,10 +10,14 @@ import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
-import { MonitorListItem, MonitorResponse } from "../../src/api/spec.ts";
+import {
+  MonitorListItem,
+  MonitorResponse,
+  Overview,
+} from "../../src/api/spec.ts";
 import { OutboxEntry } from "../../src/domain/alert.ts";
 import { ChannelView } from "../../src/domain/channel.ts";
-import { Episode } from "../../src/registry/watchdog-store.ts";
+import { Episode } from "../../src/domain/watchdog.ts";
 import { watchdogCron } from "../../src/worker.ts";
 import { SinkEvent, WebhookAlert, bodyOf, setup, waitFor } from "./harness.ts";
 
@@ -309,6 +313,34 @@ test(
   { timeout: 60_000 }
 );
 
+/** `GET /api/watchdog/episodes`: the open episodes. */
+const openEpisodes = send("GET", "/api/watchdog/episodes").pipe(
+  Effect.flatMap((reply) => {
+    expect(reply.status).toBe(200);
+    return bodyOf(Schema.Array(Episode))(reply);
+  })
+);
+
+/** `notChecked` in the monitor's detail, list item and overview row. */
+const notCheckedFlags = (id: string) =>
+  Effect.all([
+    send("GET", `/api/monitors/${id}`).pipe(
+      Effect.flatMap(bodyOf(MonitorResponse)),
+      Effect.map((monitor) => monitor.notChecked)
+    ),
+    send("GET", "/api/monitors").pipe(
+      Effect.flatMap(bodyOf(Schema.Array(MonitorListItem))),
+      Effect.map((items) => items.find((item) => item.id === id)?.notChecked)
+    ),
+    send("GET", "/api/overview").pipe(
+      Effect.flatMap(bodyOf(Overview)),
+      Effect.map(
+        (overview) =>
+          overview.monitors.find((item) => item.id === id)?.notChecked
+      )
+    ),
+  ]);
+
 /** Webhook alerts the sink received for `tag` about `monitorId`. */
 const alertsAbout = (tag: string, monitorId: string) =>
   send("GET", "/_dev/events").pipe(
@@ -362,6 +394,14 @@ test(
       episodeId,
       staleRuns: 2,
     });
+    // The API shows the open episode and flags the monitor.
+    const open = yield* openEpisodes;
+    expect(open.find((entry) => entry.id === episodeId)).toMatchObject({
+      monitorId: monitor.id,
+      monitorName: "watched",
+      resolvedAt: null,
+    });
+    expect(yield* notCheckedFlags(monitor.id)).toEqual([true, true, true]);
     // Still stale: deduplicated, no second alert.
     const third = resultFor(yield* watchdog(later), monitor.id);
     expect(third?.watch).toMatchObject({ change: "none", staleRuns: 3 });
@@ -384,6 +424,10 @@ test(
       episodeId: null,
       staleRuns: 0,
     });
+    expect((yield* openEpisodes).some((entry) => entry.id === episodeId)).toBe(
+      false
+    );
+    expect(yield* notCheckedFlags(monitor.id)).toEqual([false, false, false]);
     const all = yield* waitFor(
       "checked-again alert",
       alertsAbout(tag, monitor.id),

@@ -4,7 +4,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import type { AlertEvent } from "../domain/alert.ts";
 import { OutboxEntry } from "../domain/alert.ts";
-import { IncidentResolution } from "../domain/monitor.ts";
+import type { IncidentResolution } from "../domain/monitor.ts";
+import { Episode } from "../domain/watchdog.ts";
 import type { WatchChange, WatchObservation } from "../watchdog/rules.ts";
 import { watchTransition } from "../watchdog/rules.ts";
 
@@ -14,20 +15,6 @@ import { watchTransition } from "../watchdog/rules.ts";
  * outbox has the Monitor's outbox shape (`incident_id` holds the episode
  * id), so the same pure ordering and retry rules apply.
  */
-
-/** A "not being checked" episode, the watchdog's incident. */
-export const Episode = Schema.Struct({
-  id: Schema.String,
-  intervalSeconds: Schema.Number,
-  lastCheckedAt: Schema.NullOr(Schema.Number),
-  monitorId: Schema.String,
-  monitorName: Schema.String,
-  monitorUrl: Schema.String,
-  resolution: Schema.NullOr(IncidentResolution),
-  resolvedAt: Schema.NullOr(Schema.Number),
-  startedAt: Schema.Number,
-});
-export type Episode = typeof Episode.Type;
 
 const OutboxRow = Schema.Struct({
   ...OutboxEntry.fields,
@@ -282,6 +269,14 @@ export const writeWatchdogOutbox = Effect.fn(
       AND event = ${entry.event}
       AND channel_id = ${entry.channelId}
       AND state = 'pending'`;
+});
+
+/** The open "not being checked" episodes, oldest first. */
+export const readOpenEpisodes = Effect.gen(function* readOpenEpisodesEffect() {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql`SELECT * FROM watchdog_episodes
+    WHERE resolved_at IS NULL
+    ORDER BY started_at, id`.pipe(Effect.flatMap(decodeEpisodes));
 });
 
 /** Recent episodes and their alert rows, newest first. */

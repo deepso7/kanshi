@@ -1,8 +1,8 @@
-import * as Option from "effect/Option";
-import * as Predicate from "effect/Predicate";
-import * as Schema from "effect/Schema";
-
-import type { ChannelTestResult, MonitorResponse } from "../api/spec.ts";
+import type {
+  ChannelTestResult,
+  DevEventView,
+  MonitorResponse,
+} from "../api/spec.ts";
 import type { ChannelKind, ChannelView } from "../domain/channel.ts";
 import type {
   IncidentWithAlerts,
@@ -10,8 +10,11 @@ import type {
   UptimeReport,
 } from "../domain/history.ts";
 import { minIntervalSeconds } from "../domain/monitor-input.ts";
+import type { DisplayStatus } from "../domain/monitor.ts";
+import { displayStatus } from "../domain/monitor.ts";
 import type { CheckRow } from "../monitor/storage.ts";
-import type { DevEvent, RegistryEntry } from "../registry/registry.ts";
+import type { MonitorWithRecent } from "../service/monitors.ts";
+import { statusCounts } from "../service/monitors.ts";
 import { sparkline, uptimeBars } from "./charts.ts";
 import { agoTag, formatDuration, formatPercent, timeTag } from "./format.ts";
 import type { FormFields } from "./forms.ts";
@@ -19,13 +22,6 @@ import type { Html } from "./html.ts";
 import { html, safeHref } from "./html.ts";
 import type { Flash } from "./layout.ts";
 import { flashBox, page } from "./layout.ts";
-
-type DisplayStatus = "up" | "down" | "unknown" | "paused";
-
-const displayStatus = (summary: {
-  readonly enabled: boolean;
-  readonly status: "up" | "down" | "unknown";
-}): DisplayStatus => (summary.enabled ? summary.status : "paused");
 
 const statusLabel: Record<DisplayStatus, string> = {
   down: "Down",
@@ -97,57 +93,17 @@ export const loginPage = (error: string | null): Html =>
 // ---------------------------------------------------------------------------
 // Dashboard
 
-export interface DashboardRow {
-  readonly entry: RegistryEntry;
-  /** Null when the monitor could not be read. */
-  readonly recent: RecentActivity | null;
-}
+export type DashboardRow = MonitorWithRecent;
 
 export interface DashboardData {
   /** Dev stage only: the webhook sink's latest events, newest first. */
-  readonly devEvents: readonly DevEvent[] | null;
+  readonly devEvents: readonly DevEventView[] | null;
   readonly flash: Flash | null;
   readonly now: number;
   readonly rows: readonly DashboardRow[];
 }
 
-/** The fields of a dev sink event the dashboard shows. */
-const DevEventDetail = Schema.Struct({
-  body: Schema.optionalKey(Schema.Json),
-  query: Schema.optionalKey(Schema.Json),
-  respondedWith: Schema.optionalKey(Schema.Json),
-});
-const decodeDevEventDetail = Schema.decodeUnknownOption(DevEventDetail);
-
-const devEventDetail = (event: DevEvent) =>
-  Option.getOrUndefined(decodeDevEventDetail(event.detail));
-
-/** A JSON alert body's candidate message fields (Slack, Discord, webhook). */
-const AlertBody = Schema.fromJsonString(
-  Schema.Struct({
-    content: Schema.optionalKey(Schema.Json),
-    text: Schema.optionalKey(Schema.Json),
-    title: Schema.optionalKey(Schema.Json),
-  })
-);
-const decodeAlertBody = Schema.decodeUnknownOption(AlertBody);
-
-const devEventText = (event: DevEvent): string => {
-  const body = devEventDetail(event)?.body;
-  const raw = Predicate.isString(body) ? body : "";
-  // Not JSON (ntfy): the body is the message.
-  const text = decodeAlertBody(raw).pipe(
-    Option.flatMap((parsed) =>
-      Option.fromUndefinedOr(
-        [parsed.text, parsed.content, parsed.title].find(Predicate.isString)
-      )
-    ),
-    Option.getOrElse(() => raw)
-  );
-  return text.replaceAll("\n", " · ").slice(0, 240);
-};
-
-const devEventsPanel = (events: readonly DevEvent[], now: number): Html =>
+const devEventsPanel = (events: readonly DevEventView[], now: number): Html =>
   html`<h2>
       Dev webhook sink <span class="muted small">(dev stage only)</span>
     </h2>
@@ -165,17 +121,14 @@ const devEventsPanel = (events: readonly DevEvent[], now: number): Html =>
                 </tr>
               </thead>
               <tbody>
-                ${events.map((event) => {
-                  const detail = devEventDetail(event);
-                  return html`<tr>
+                ${events.map(
+                  (event) => html`<tr>
                     <td class="small">${agoTag(event.at, now)}</td>
-                    <td class="small">
-                      ${String(detail?.respondedWith ?? "")}
-                    </td>
-                    <td class="mono">${String(detail?.query ?? "")}</td>
-                    <td class="small">${devEventText(event)}</td>
-                  </tr>`;
-                })}
+                    <td class="small">${String(event.respondedWith ?? "")}</td>
+                    <td class="mono">${event.query ?? ""}</td>
+                    <td class="small">${event.message}</td>
+                  </tr>`
+                )}
               </tbody>
             </table>`
       }
@@ -225,10 +178,7 @@ const dashboardRow = (row: DashboardRow, now: number): Html => {
 };
 
 export const dashboardPage = (data: DashboardData): Html => {
-  const counts = { down: 0, paused: 0, unknown: 0, up: 0 };
-  for (const row of data.rows) {
-    counts[displayStatus(row.entry.summary)] += 1;
-  }
+  const counts = statusCounts(data.rows.map((row) => row.entry));
   return page({
     body: html`${flashBox(data.flash)} ${notCheckedBanner(data.rows)}
       <div class="row spread">

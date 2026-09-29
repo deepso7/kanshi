@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import { displayStatus } from "../domain/monitor.ts";
 import type {
   PublicMonitor,
   PublicMonitorStatus,
@@ -90,7 +91,7 @@ export interface StatusDeps {
 }
 
 const publicStatusOf = (entry: RegistryEntry): PublicMonitorStatus =>
-  entry.summary.enabled ? entry.summary.status : "paused";
+  displayStatus(entry.summary);
 
 const emptyHistory: PublicHistory = { days: [], uptimePercent: null };
 

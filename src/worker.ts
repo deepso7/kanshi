@@ -13,6 +13,12 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { ApiAuthLive, credentialValidatorLayer } from "./api/auth.ts";
 import { ChannelsHandlers } from "./api/channels.ts";
+import {
+  DevHandlers,
+  MetaHandlers,
+  OverviewHandlers,
+  WatchdogHandlers,
+} from "./api/dashboard.ts";
 import { MonitorsHandlers } from "./api/handlers.ts";
 import { PublicHandlers } from "./api/public.ts";
 import { SessionHandlers } from "./api/session.ts";
@@ -22,6 +28,7 @@ import { localRunWorkerFirst, runWorkerFirst } from "./http/worker-paths.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
 import { ChannelService } from "./service/channels.ts";
+import { DevService } from "./service/dev.ts";
 import { MonitorService } from "./service/monitors.ts";
 import { StatusService } from "./service/status.ts";
 import { KanshiSettings } from "./settings.ts";
@@ -55,6 +62,7 @@ const ServicesLive = Layer.mergeAll(UiRoutes.layer, DevRoutes.layer).pipe(
     Layer.mergeAll(
       MonitorService.layer,
       ChannelService.layer,
+      DevService.layer,
       StatusService.layer
     )
   ),
@@ -102,12 +110,20 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
     );
 
     const services = yield* Effect.context<
-      ChannelService | KanshiSettings | MonitorService | StatusService
+      | ChannelService
+      | DevService
+      | KanshiSettings
+      | MonitorService
+      | StatusService
     >();
     const api = HttpApiBuilder.layer(KanshiApi).pipe(
       Layer.provide([
         MonitorsHandlers,
         ChannelsHandlers,
+        OverviewHandlers,
+        WatchdogHandlers,
+        DevHandlers,
+        MetaHandlers,
         PublicHandlers,
         SessionHandlers,
       ]),

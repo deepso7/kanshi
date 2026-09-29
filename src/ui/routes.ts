@@ -8,6 +8,11 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import { requestIsSameOrigin, tokenMatches } from "../api/auth.ts";
+import {
+  defaultDevEventsLimit,
+  defaultRecentBuckets,
+  defaultRecentHours,
+} from "../api/spec.ts";
 import type {
   BadRequest,
   Conflict,
@@ -29,8 +34,9 @@ import {
   readFormBody,
 } from "../http/body.ts";
 import { matchPattern } from "../http/route.ts";
-import { Registry, registryName } from "../registry/registry.ts";
 import { ChannelService } from "../service/channels.ts";
+import { DevService } from "../service/dev.ts";
+import type { RecentWindow } from "../service/monitors.ts";
 import { MonitorService } from "../service/monitors.ts";
 import { StatusService } from "../service/status.ts";
 import { KanshiSettings } from "../settings.ts";
@@ -45,7 +51,7 @@ import type { Html } from "./html.ts";
 import { html } from "./html.ts";
 import type { Flash } from "./layout.ts";
 import { page } from "./layout.ts";
-import type { ChannelsData, DashboardRow } from "./pages.ts";
+import type { ChannelsData } from "./pages.ts";
 import {
   channelsPage,
   dashboardPage,
@@ -63,13 +69,19 @@ import { statusPage } from "./status-page.ts";
 export interface UiDeps {
   readonly apiToken: Redacted.Redacted<string>;
   readonly channels: ChannelService["Service"];
+  readonly dev: DevService["Service"];
   readonly devMode: boolean;
   readonly monitors: MonitorService["Service"];
-  readonly registries: Effect.Success<typeof Registry>;
   readonly status: StatusService["Service"];
 }
 
 type ServiceError = BadRequest | Conflict | NotFound | Unavailable;
+
+/** The last 24 hours in half-hour buckets. */
+const dayWindow: RecentWindow = {
+  buckets: defaultRecentBuckets,
+  hours: defaultRecentHours,
+};
 
 /** Headers on every HTML page: never cached, never framed. */
 const pageHeaders = {
@@ -250,7 +262,6 @@ const run = (
  */
 export const makeUiRoutes = (deps: UiDeps) => {
   const token = Redacted.value(deps.apiToken);
-  const registry = () => deps.registries.getByName(registryName);
 
   const hasSession = (request: HttpServerRequest.HttpServerRequest) => {
     const value = request.cookies[sessionCookieName];
@@ -288,18 +299,9 @@ export const makeUiRoutes = (deps: UiDeps) => {
 
   const dashboard = (input: RouteInput) =>
     Effect.gen(function* dashboardRoute() {
-      const entries = yield* deps.monitors.list();
-      const rows = yield* Effect.forEach(
-        entries,
-        (entry) =>
-          deps.monitors.recent(entry.id).pipe(
-            Effect.catchCause(() => Effect.succeed(null)),
-            Effect.map((recent): DashboardRow => ({ entry, recent }))
-          ),
-        { concurrency: 8 }
-      );
+      const rows = yield* deps.monitors.listWithRecent(dayWindow);
       const devEvents = deps.devMode
-        ? (yield* registry().devEvents()).slice(-20).toReversed()
+        ? yield* deps.dev.events(defaultDevEventsLimit)
         : null;
       return htmlResponse(
         dashboardPage({
@@ -315,14 +317,13 @@ export const makeUiRoutes = (deps: UiDeps) => {
     Effect.gen(function* monitorRoute() {
       const id = param(input);
       const monitor = yield* deps.monitors.get(id);
-      const entry = yield* deps.monitors.activeEntry(id);
       const loaded = yield* Effect.all(
         {
           channels: deps.channels.list(),
           checks: deps.monitors.checks(id, { limit: 50 }),
           incidents: deps.monitors.incidents(id, 20),
           recent: deps.monitors
-            .recent(id)
+            .recent(id, dayWindow)
             .pipe(Effect.catchCause(() => Effect.succeed(null))),
           uptime: deps.monitors
             .uptime(id, 90)
@@ -335,7 +336,7 @@ export const makeUiRoutes = (deps: UiDeps) => {
           ...loaded,
           flash: flashFrom(input.url),
           monitor,
-          notChecked: entry.watch.episodeId !== null,
+          notChecked: monitor.notChecked,
           now: Date.now(),
         })
       );
@@ -636,9 +637,9 @@ export class UiRoutes extends Context.Service<
       return makeUiRoutes({
         apiToken,
         channels: yield* ChannelService,
+        dev: yield* DevService,
         devMode,
         monitors: yield* MonitorService,
-        registries: yield* Registry,
         status: yield* StatusService,
       });
     })

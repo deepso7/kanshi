@@ -18,6 +18,7 @@ import type { ChannelTarget, ChannelView } from "../domain/channel.ts";
 import { ChannelKind, maskUrl } from "../domain/channel.ts";
 import { MonitorStatus } from "../domain/monitor.ts";
 import type { ChannelSelection, MonitorSummary } from "../domain/monitor.ts";
+import type { Episode } from "../domain/watchdog.ts";
 import {
   OutboxDecision,
   afterAttempt,
@@ -30,12 +31,13 @@ import {
 import { openDurableSql } from "../storage/sqlite.ts";
 import type { WatchObservation } from "../watchdog/rules.ts";
 import { KeyTaken, QuotaExceeded, registryErrors } from "./errors.ts";
-import type { Episode, ObserveResult } from "./watchdog-store.ts";
+import type { ObserveResult } from "./watchdog-store.ts";
 import {
   closeMonitorEpisode,
   observeMonitor,
   pruneEpisodes,
   readEpisode,
+  readOpenEpisodes,
   readWatchdogPair,
   readWatchdogWork,
   recentWatchdogAlerts,
@@ -159,7 +161,7 @@ const channelRows = (rows: Effect.Effect<readonly unknown[], unknown>) =>
 
 export interface DevEvent {
   readonly at: number;
-  readonly detail: unknown;
+  readonly detail: Schema.Json;
   readonly id: number;
   readonly kind: string;
 }
@@ -288,6 +290,12 @@ export class Registry extends Cloudflare.DurableObject<
     pruneWatchdog: (
       before: number
     ) => Effect.Effect<number, never, RuntimeContext>;
+    /** The open "not being checked" episodes, oldest first. */
+    openEpisodes: () => Effect.Effect<
+      readonly Episode[],
+      never,
+      RuntimeContext
+    >;
     watchdogAlerts: (
       limit: number
     ) => Effect.Effect<WatchdogAlertsView, never, RuntimeContext>;
@@ -798,6 +806,7 @@ export const RegistryLive = Registry.make(
             })
           ),
         observe,
+        openEpisodes: () => withSql(readOpenEpisodes).pipe(Effect.orDie),
         pruneWatchdog: (before: number) => transact(pruneEpisodes(before)),
         recipients,
         recordDevEvent: (kind: string, detail: Schema.Json) =>

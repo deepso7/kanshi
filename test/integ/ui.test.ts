@@ -1,6 +1,8 @@
 // Integration tests for the dashboard and the public status page: the SPA
 // shell (static assets), sign-in and cookie auth (`/api/session`, the
-// legacy pages and /api), the Origin check on form posts, and that GET
+// legacy pages and /api), the Origin check on form posts, the dashboard's
+// reads (`/api/overview`, `/api/monitors/:id/recent`, `/api/meta`,
+// `/api/watchdog/episodes`, `/api/dev/events`), and that GET
 // /api/public/status only ever shows monitors that are public right now,
 // without URLs. Run with `pnpm test:integ` (it builds the SPA first).
 //
@@ -12,11 +14,21 @@
 import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
-import { MonitorResponse } from "../../src/api/spec.ts";
+import {
+  DevEventView,
+  Meta,
+  MonitorResponse,
+  Overview,
+} from "../../src/api/spec.ts";
+import { ChannelView } from "../../src/domain/channel.ts";
+import { RecentActivity } from "../../src/domain/history.ts";
+import { minIntervalSeconds } from "../../src/domain/monitor-input.ts";
 import { PublicStatus } from "../../src/domain/public-status.ts";
-import { apiToken } from "./alchemy.run.ts";
-import { bodyOf, setup } from "./harness.ts";
+import { Episode } from "../../src/domain/watchdog.ts";
+import { apiToken, monitorQuota } from "./alchemy.run.ts";
+import { bodyOf, setup, waitFor } from "./harness.ts";
 
 const { create, raw, registryRows, send, stack, test } = setup("integ-ui");
 
@@ -420,6 +432,150 @@ test(
         (yield* send("DELETE", `/api/monitors/${monitor.id}`)).status
       ).toBe(204);
     }
+  }),
+  { timeout: 60_000 }
+);
+
+/** GET `path` with the token; expects a 200 and decodes the body. */
+const read = <S extends Schema.ConstraintDecoder<unknown>>(
+  path: string,
+  schema: S
+) =>
+  send("GET", path).pipe(
+    Effect.flatMap((reply) => {
+      expect(reply.status).toBe(200);
+      return bodyOf(schema)(reply);
+    })
+  );
+
+const halfHour = 30 * 60_000;
+
+/** The dashboard's reads, each needing the token or the session cookie. */
+const dashboardPaths = [
+  "/api/overview",
+  "/api/meta",
+  "/api/watchdog/episodes",
+  "/api/dev/events",
+];
+
+test(
+  "the dashboard's reads need auth; meta, episodes and dev events",
+  Effect.gen(function* dashboardAuthTest() {
+    const { url } = yield* stack;
+    for (const path of [...dashboardPaths, "/api/monitors/some-id/recent"]) {
+      expect((yield* send("GET", path, { auth: null })).status).toBe(401);
+      expect((yield* send("GET", path, { auth: "wrong" })).status).toBe(401);
+    }
+    const cookie = yield* signIn;
+    for (const path of dashboardPaths) {
+      expect((yield* raw("GET", path, { headers: { cookie } })).status).toBe(
+        200
+      );
+    }
+
+    expect(yield* read("/api/meta", Meta)).toEqual({
+      devMode: true,
+      minIntervalSeconds: minIntervalSeconds(true),
+      monitorQuota,
+    });
+    // Open episodes only (the watchdog tests open one).
+    const episodes = yield* read(
+      "/api/watchdog/episodes",
+      Schema.Array(Episode)
+    );
+    expect(episodes.every((entry) => entry.resolvedAt === null)).toBe(true);
+
+    // Dev events: the sink's latest requests, newest first.
+    const tag = `events-${crypto.randomUUID()}`;
+    const channel = yield* send("POST", "/api/channels", {
+      body: {
+        kind: "webhook",
+        name: "events sink",
+        url: `${url}/_dev/webhook?tag=${tag}`,
+      },
+    }).pipe(Effect.flatMap(bodyOf(ChannelView)));
+    const tested = yield* send("POST", `/api/channels/${channel.id}/test`);
+    expect(tested.body).toMatchObject({ delivered: true });
+    const events = yield* read(
+      "/api/dev/events?limit=5",
+      Schema.Array(DevEventView)
+    );
+    expect(events.length).toBeLessThanOrEqual(5);
+    const ids = events.map((event) => event.id);
+    expect(ids).toEqual(ids.toSorted((left, right) => right - left));
+    expect(events.find((event) => event.query === `?tag=${tag}`)).toMatchObject(
+      { kind: "webhook", respondedWith: 200 }
+    );
+    expect(
+      events.find((event) => event.query === `?tag=${tag}`)?.message
+    ).toContain("events sink");
+    expect((yield* send("GET", "/api/dev/events?limit=0")).status).toBe(400);
+    expect((yield* send("DELETE", `/api/channels/${channel.id}`)).status).toBe(
+      204
+    );
+  }),
+  { timeout: 60_000 }
+);
+
+test(
+  "recent activity and the overview",
+  Effect.gen(function* recentTest() {
+    const { url } = yield* stack;
+    const monitor = yield* create({
+      intervalSeconds: 5,
+      name: `overview-${crypto.randomUUID()}`,
+      url: `${url}/_dev/target`,
+    });
+    const recentPath = `/api/monitors/${monitor.id}/recent`;
+
+    // 24h in 48 half-hour buckets by default.
+    const recent = yield* waitFor(
+      "a counted check",
+      read(recentPath, RecentActivity),
+      (value) => value.counted >= 1
+    );
+    expect(recent.buckets).toHaveLength(48);
+    expect(recent.up).toBe(recent.counted);
+    expect(recent.uptimePercent).toBe(100);
+    const [first, second] = recent.buckets;
+    expect((second?.at ?? 0) - (first?.at ?? 0)).toBe(halfHour);
+    expect(recent.buckets.at(-1)?.latencyMs).toBeNumber();
+    const hour = yield* read(
+      `${recentPath}?hours=1&buckets=12`,
+      RecentActivity
+    );
+    expect(hour.buckets).toHaveLength(12);
+    const [hourFirst, hourSecond] = hour.buckets;
+    expect((hourSecond?.at ?? 0) - (hourFirst?.at ?? 0)).toBe(5 * 60_000);
+    for (const query of ["buckets=0", "buckets=289", "hours=169", "hours=x"]) {
+      expect((yield* send("GET", `${recentPath}?${query}`)).status).toBe(400);
+    }
+    expect((yield* send("GET", "/api/monitors/nope/recent")).status).toBe(404);
+
+    // Every monitor with its flags and recent activity.
+    const overview = yield* read("/api/overview", Overview);
+    const item = overview.monitors.find((entry) => entry.id === monitor.id);
+    expect(item).toMatchObject({
+      managed: false,
+      name: monitor.name,
+      notChecked: false,
+      public: false,
+    });
+    expect(item?.recent?.buckets).toHaveLength(48);
+    expect(item?.recent?.counted).toBeGreaterThanOrEqual(1);
+    const { down, paused, unknown, up } = overview.counts;
+    expect(down + paused + unknown + up).toBe(overview.monitors.length);
+    const small = yield* read("/api/overview?hours=2&buckets=4", Overview);
+    const smallItem = small.monitors.find((entry) => entry.id === monitor.id);
+    expect(smallItem?.recent?.buckets).toHaveLength(4);
+    expect((yield* send("GET", "/api/overview?buckets=0")).status).toBe(400);
+    const detail = yield* read(`/api/monitors/${monitor.id}`, MonitorResponse);
+    expect(detail.notChecked).toBe(false);
+
+    expect((yield* send("DELETE", `/api/monitors/${monitor.id}`)).status).toBe(
+      204
+    );
+    expect((yield* send("GET", recentPath)).status).toBe(404);
   }),
   { timeout: 60_000 }
 );

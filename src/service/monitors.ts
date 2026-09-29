@@ -4,16 +4,21 @@ import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 
 import { BadRequest, Conflict, NotFound, Unavailable } from "../api/spec.ts";
-import type { MonitorListItem, MonitorResponse } from "../api/spec.ts";
+import type {
+  MonitorListItem,
+  MonitorResponse,
+  Overview,
+  StatusCounts,
+} from "../api/spec.ts";
+import type { RecentActivity } from "../domain/history.ts";
 import type {
   MonitorCreateInput,
   MonitorPatchInput,
 } from "../domain/monitor-input.ts";
 import { buildConfig, patchConfig } from "../domain/monitor-input.ts";
 import type { ChannelSelection, MonitorSnapshot } from "../domain/monitor.ts";
-import { summaryOf } from "../domain/monitor.ts";
+import { displayStatus, summaryOf } from "../domain/monitor.ts";
 import { initialState } from "../monitor/cycle.ts";
-import { recentBuckets, recentWindowMs } from "../monitor/history.ts";
 import { Monitor } from "../monitor/monitor.ts";
 import type { ChecksQuery } from "../monitor/monitor.ts";
 import type { RegistryEntry } from "../registry/registry.ts";
@@ -35,15 +40,42 @@ export interface CreateOptions {
   readonly skipActivate?: boolean;
 }
 
+/** A window of recent activity: `hours` back, in `buckets` buckets. */
+export interface RecentWindow {
+  readonly buckets: number;
+  readonly hours: number;
+}
+
+/** How many monitors the overview reads at once. */
+export const overviewConcurrency = 8;
+
+const hourMs = 3_600_000;
+
 const notFound = (id: string) =>
   new NotFound({ message: `monitor ${id} not found` });
 
+/** Whether the watchdog has an open "not being checked" episode. */
+const isNotChecked = (entry: Pick<RegistryEntry, "watch">): boolean =>
+  entry.watch.episodeId !== null;
+
+/** The Registry's flags a response carries next to the snapshot. */
+interface ResponseFlags {
+  readonly notChecked: boolean;
+  readonly public: boolean;
+}
+
+const flagsOf = (entry: RegistryEntry): ResponseFlags => ({
+  notChecked: isNotChecked(entry),
+  public: entry.public,
+});
+
 const toResponse = (
-  entry: Pick<RegistryEntry, "public">,
+  flags: ResponseFlags,
   snapshot: MonitorSnapshot
 ): MonitorResponse => ({
   ...snapshot.config,
-  public: entry.public,
+  notChecked: flags.notChecked,
+  public: flags.public,
   state: snapshot.state,
 });
 
@@ -52,7 +84,38 @@ const toListItem = (entry: RegistryEntry): MonitorListItem => ({
   id: entry.id,
   key: entry.key,
   managed: entry.managed,
+  notChecked: isNotChecked(entry),
   public: entry.public,
+});
+
+/** Count monitors by displayed status. */
+export const statusCounts = (
+  entries: readonly Pick<RegistryEntry, "summary">[]
+): StatusCounts => {
+  const counts = { down: 0, paused: 0, unknown: 0, up: 0 };
+  for (const entry of entries) {
+    counts[displayStatus(entry.summary)] += 1;
+  }
+  return counts;
+};
+
+/** A monitor's Registry row and its recent activity (null if unreadable). */
+export interface MonitorWithRecent {
+  readonly entry: RegistryEntry;
+  readonly recent: RecentActivity | null;
+}
+
+/** The overview's shape from the rows, as of `now`. */
+export const toOverview = (
+  rows: readonly MonitorWithRecent[],
+  now: number
+): Overview => ({
+  counts: statusCounts(rows.map((row) => row.entry)),
+  generatedAt: now,
+  monitors: rows.map((row) => ({
+    ...toListItem(row.entry),
+    recent: row.recent,
+  })),
 });
 
 /** The patch's fields other than `public`, if any. */
@@ -195,7 +258,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
         );
 
       if (deps.devMode && options.skipActivate === true) {
-        return toResponse({ public: isPublic }, snapshot);
+        return toResponse({ notChecked: false, public: isPublic }, snapshot);
       }
       const activated = yield* registry().activate(id, opId);
       if (!activated) {
@@ -203,7 +266,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
           message: `monitor ${id} was deleted while being created`,
         });
       }
-      return toResponse({ public: isPublic }, snapshot);
+      return toResponse({ notChecked: false, public: isPublic }, snapshot);
     });
 
   const get = (id: string) =>
@@ -212,7 +275,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
       const snapshot = yield* monitor(id)
         .snapshot()
         .pipe(Effect.mapError(() => notFound(id)));
-      return toResponse(entry, snapshot);
+      return toResponse(flagsOf(entry), snapshot);
     });
 
   /**
@@ -307,7 +370,13 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
             )
           )
         : yield* applyRest;
-      return toResponse({ public: patch.public ?? entry.public }, snapshot);
+      return toResponse(
+        {
+          notChecked: isNotChecked(entry),
+          public: patch.public ?? entry.public,
+        },
+        snapshot
+      );
     });
 
   const remove = (id: string) =>
@@ -333,7 +402,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
             MonitorTombstoned: () => Effect.fail(notFound(id)),
           })
         );
-      return toResponse(entry, snapshot);
+      return toResponse(flagsOf(entry), snapshot);
     });
 
   const checks = (id: string, query: ChecksQuery) =>
@@ -351,9 +420,50 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
   const incidents = (id: string, limit: number) =>
     activeEntry(id).pipe(Effect.andThen(monitor(id).incidents(limit)));
 
-  /** The last 24h: counted samples and half-hour latency buckets. */
-  const recent = (id: string) =>
-    monitor(id).recent(recentWindowMs, recentBuckets);
+  /** Counted samples and latency buckets, without the Registry check. */
+  const recentOf = (id: string, window: RecentWindow) =>
+    monitor(id).recent(window.hours * hourMs, window.buckets);
+
+  /** A monitor's recent activity: counted samples and latency buckets. */
+  const recent = (id: string, window: RecentWindow) =>
+    activeEntry(id).pipe(Effect.andThen(recentOf(id, window)));
+
+  /**
+   * Every listed monitor with its recent activity, read from the Monitor
+   * objects with bounded concurrency. A monitor that cannot be read has
+   * `recent: null` rather than failing the whole list.
+   */
+  const listWithRecent = (window: RecentWindow) =>
+    list().pipe(
+      Effect.flatMap((entries) =>
+        Effect.forEach(
+          entries,
+          (entry) =>
+            recentOf(entry.id, window).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  `recent activity of ${entry.id} failed`,
+                  cause
+                ).pipe(Effect.as(null))
+              ),
+              Effect.map((activity): MonitorWithRecent => ({
+                entry,
+                recent: activity,
+              }))
+            ),
+          { concurrency: overviewConcurrency }
+        )
+      )
+    );
+
+  /** The dashboard's data in one call. */
+  const overview = (window: RecentWindow) =>
+    listWithRecent(window).pipe(
+      Effect.map((rows) => toOverview(rows, Date.now()))
+    );
+
+  /** The watchdog's open "not being checked" episodes. */
+  const openEpisodes = () => registry().openEpisodes();
 
   return {
     activeEntry,
@@ -363,6 +473,9 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
     get,
     incidents,
     list,
+    listWithRecent,
+    openEpisodes,
+    overview,
     recent,
     remove,
     toListItem,

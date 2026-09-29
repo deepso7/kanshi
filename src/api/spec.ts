@@ -11,7 +11,12 @@ import {
   ChannelPatchInput,
   ChannelView,
 } from "../domain/channel.ts";
-import { Check, IncidentWithAlerts, UptimeReport } from "../domain/history.ts";
+import {
+  Check,
+  IncidentWithAlerts,
+  RecentActivity,
+  UptimeReport,
+} from "../domain/history.ts";
 import {
   MonitorCreateInput,
   MonitorPatchInput,
@@ -22,6 +27,7 @@ import {
   MonitorSummary,
 } from "../domain/monitor.ts";
 import { PublicStatus } from "../domain/public-status.ts";
+import { Episode } from "../domain/watchdog.ts";
 import { ApiAuth } from "./middleware.ts";
 
 export class NotFound extends Schema.TaggedError<NotFound>()(
@@ -52,9 +58,13 @@ export class Unavailable extends Schema.TaggedError<Unavailable>()(
   { httpApiStatus: 503 }
 ) {}
 
-/** A monitor's configuration, its `public` flag and its current state. */
+/**
+ * A monitor's configuration, its `public` flag, its current state and
+ * whether the watchdog has an open "not being checked" episode for it.
+ */
 export const MonitorResponse = Schema.Struct({
   ...MonitorConfig.fields,
+  notChecked: Schema.Boolean,
   public: Schema.Boolean,
   state: MonitorState,
 });
@@ -66,6 +76,8 @@ export const MonitorListItem = Schema.Struct({
   id: Schema.String,
   key: Schema.String,
   managed: Schema.Boolean,
+  /** The watchdog has an open "not being checked" episode for it. */
+  notChecked: Schema.Boolean,
   public: Schema.Boolean,
 });
 export type MonitorListItem = typeof MonitorListItem.Type;
@@ -84,6 +96,10 @@ const intParam = (minimum: number, maximum: number) =>
 export const defaultChecksLimit = 100;
 export const defaultIncidentsLimit = 50;
 export const defaultUptimeDays = 90;
+/** The dashboard's window: the last 24 hours in 48 half-hour buckets. */
+export const defaultRecentHours = 24;
+export const defaultRecentBuckets = 48;
+export const defaultDevEventsLimit = 20;
 
 /** `since`: epoch ms (inclusive); `limit`: newest first, 1..1000. */
 const ChecksQuery = Schema.Struct({
@@ -92,6 +108,11 @@ const ChecksQuery = Schema.Struct({
 });
 const UptimeQuery = Schema.Struct({ days: intParam(1, 365) });
 const IncidentsQuery = Schema.Struct({ limit: intParam(1, 500) });
+/** `hours`: the window, 1..168 (a week); `buckets`: 1..288. */
+const RecentQuery = Schema.Struct({
+  buckets: intParam(1, 288),
+  hours: intParam(1, 168),
+});
 
 const monitorsGroup = HttpApiGroup.make("monitors")
   .add(
@@ -141,9 +162,109 @@ const monitorsGroup = HttpApiGroup.make("monitors")
       params: MonitorIdParams,
       query: IncidentsQuery,
       success: Schema.Array(IncidentWithAlerts),
+    }),
+    HttpApiEndpoint.get("recent", "/:id/recent", {
+      error: NotFound,
+      params: MonitorIdParams,
+      query: RecentQuery,
+      success: RecentActivity,
     })
   )
   .prefix("/api/monitors")
+  .middleware(ApiAuth);
+
+/** Monitors by displayed status (`paused` while disabled). */
+export const StatusCounts = Schema.Struct({
+  down: Schema.Number,
+  paused: Schema.Number,
+  unknown: Schema.Number,
+  up: Schema.Number,
+});
+export type StatusCounts = typeof StatusCounts.Type;
+
+/** A dashboard row: the listed monitor and its recent activity. */
+export const OverviewMonitor = Schema.Struct({
+  ...MonitorListItem.fields,
+  /** Null when the monitor could not be read. */
+  recent: Schema.NullOr(RecentActivity),
+});
+export type OverviewMonitor = typeof OverviewMonitor.Type;
+
+/** `GET /api/overview`: every monitor with its recent activity. */
+export const Overview = Schema.Struct({
+  counts: StatusCounts,
+  generatedAt: Schema.Number,
+  monitors: Schema.Array(OverviewMonitor),
+});
+export type Overview = typeof Overview.Type;
+
+/** The dashboard in one call (instead of one `recent` per monitor). */
+const overviewGroup = HttpApiGroup.make("overview")
+  .add(
+    HttpApiEndpoint.get("get", "/", {
+      query: RecentQuery,
+      success: Overview,
+    })
+  )
+  .prefix("/api/overview")
+  .middleware(ApiAuth);
+
+/** The watchdog's open "not being checked" episodes. */
+const watchdogGroup = HttpApiGroup.make("watchdog")
+  .add(
+    HttpApiEndpoint.get("episodes", "/episodes", {
+      success: Schema.Array(Episode),
+    })
+  )
+  .prefix("/api/watchdog")
+  .middleware(ApiAuth);
+
+/** A request the dev webhook sink (`POST /_dev/webhook/*`) received. */
+export const DevEventView = Schema.Struct({
+  at: Schema.Number,
+  /** The recorded request, as stored. */
+  detail: Schema.Json,
+  id: Schema.Number,
+  kind: Schema.String,
+  /** The alert's text (from `text`, `content` or `title`, or the body). */
+  message: Schema.String,
+  /** The sink URL's query string (e.g. `?tag=x`). */
+  query: Schema.NullOr(Schema.String),
+  /** The status the sink answered with. */
+  respondedWith: Schema.NullOr(Schema.Number),
+});
+export type DevEventView = typeof DevEventView.Type;
+
+const DevEventsQuery = Schema.Struct({ limit: intParam(1, 500) });
+
+/**
+ * Dev stage only: the webhook sink's latest events, newest first. Outside
+ * dev mode it answers 404 (after auth).
+ */
+const devGroup = HttpApiGroup.make("dev")
+  .add(
+    HttpApiEndpoint.get("events", "/events", {
+      error: NotFound,
+      query: DevEventsQuery,
+      success: Schema.Array(DevEventView),
+    })
+  )
+  .prefix("/api/dev")
+  .middleware(ApiAuth);
+
+/** `GET /api/meta`: what the dashboard's forms need to know. */
+export const Meta = Schema.Struct({
+  devMode: Schema.Boolean,
+  /** The smallest `intervalSeconds` a monitor accepts. */
+  minIntervalSeconds: Schema.Number,
+  /** The maximum number of monitors. */
+  monitorQuota: Schema.Number,
+});
+export type Meta = typeof Meta.Type;
+
+const metaGroup = HttpApiGroup.make("meta")
+  .add(HttpApiEndpoint.get("get", "/", { success: Meta }))
+  .prefix("/api/meta")
   .middleware(ApiAuth);
 
 /** The result of `POST /api/channels/:id/test`. */
@@ -227,5 +348,9 @@ const sessionGroup = HttpApiGroup.make("session")
 export const KanshiApi = HttpApi.make("KanshiApi")
   .add(monitorsGroup)
   .add(channelsGroup)
+  .add(overviewGroup)
+  .add(watchdogGroup)
+  .add(devGroup)
+  .add(metaGroup)
   .add(publicGroup)
   .add(sessionGroup);

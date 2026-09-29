@@ -6,6 +6,8 @@ import {
   KanshiApi,
   defaultChecksLimit,
   defaultIncidentsLimit,
+  defaultRecentBuckets,
+  defaultRecentHours,
   defaultUptimeDays,
 } from "./spec.ts";
 
@@ -54,6 +56,12 @@ export const MonitorsHandlers = HttpApiBuilder.group(
       )
       .handle("incidents", ({ params, query }) =>
         service.incidents(params.id, query.limit ?? defaultIncidentsLimit)
+      )
+      .handle("recent", ({ params, query }) =>
+        service.recent(params.id, {
+          buckets: query.buckets ?? defaultRecentBuckets,
+          hours: query.hours ?? defaultRecentHours,
+        })
       );
   })
 );

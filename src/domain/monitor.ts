@@ -132,6 +132,19 @@ export const MonitorSummary = Schema.Struct({
 });
 export type MonitorSummary = typeof MonitorSummary.Type;
 
+/** A monitor's status as shown: `paused` while disabled. */
+export const DisplayStatus = Schema.Literals([
+  "up",
+  "down",
+  "unknown",
+  "paused",
+]);
+export type DisplayStatus = typeof DisplayStatus.Type;
+
+export const displayStatus = (
+  summary: Pick<MonitorSummary, "enabled" | "status">
+): DisplayStatus => (summary.enabled ? summary.status : "paused");
+
 export const summaryOf = (
   config: MonitorConfig,
   state: MonitorState
