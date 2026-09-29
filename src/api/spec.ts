@@ -2,6 +2,7 @@
 import * as Schema from "effect/Schema";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
+import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 
@@ -194,7 +195,37 @@ const publicGroup = HttpApiGroup.make("public")
   )
   .prefix("/api/public");
 
+/** `GET /api/session`: whether the request carries a valid session. */
+export const SessionState = Schema.Struct({ signedIn: Schema.Boolean });
+export type SessionState = typeof SessionState.Type;
+
+/** `POST /api/session`: sign in with the API token. */
+export const SignIn = Schema.Struct({ token: Schema.String });
+export type SignIn = typeof SignIn.Type;
+
+/**
+ * The dashboard session cookie, for the SPA. No `ApiAuth`: signing in and
+ * out are Origin-checked (403 otherwise); a wrong token is a 401.
+ */
+const sessionGroup = HttpApiGroup.make("session")
+  .add(
+    HttpApiEndpoint.get("get", "/", {
+      success: SessionState,
+    }),
+    HttpApiEndpoint.post("signIn", "/", {
+      error: [HttpApiError.Unauthorized, HttpApiError.Forbidden],
+      payload: SignIn.pipe(HttpApiSchema.asJson()),
+      success: HttpApiSchema.NoContent,
+    }),
+    HttpApiEndpoint.delete("signOut", "/", {
+      error: HttpApiError.Forbidden,
+      success: HttpApiSchema.NoContent,
+    })
+  )
+  .prefix("/api/session");
+
 export const KanshiApi = HttpApi.make("KanshiApi")
   .add(monitorsGroup)
   .add(channelsGroup)
-  .add(publicGroup);
+  .add(publicGroup)
+  .add(sessionGroup);

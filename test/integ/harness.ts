@@ -198,22 +198,26 @@ export const setup = (stage: string) => {
     options: {
       readonly form?: Readonly<Record<string, string>>;
       readonly headers?: Readonly<Record<string, string>>;
+      /** A JSON body (instead of `form`). */
+      readonly json?: Schema.Json;
     } = {}
   ) {
     const { url } = yield* stack;
     const headers = new Headers();
+    let body: string | undefined;
     if (options.form !== undefined) {
       headers.set("content-type", "application/x-www-form-urlencoded");
+      body = new URLSearchParams(options.form).toString();
+    } else if (options.json !== undefined) {
+      headers.set("content-type", "application/json");
+      body = JSON.stringify(options.json);
     }
     for (const [name, value] of Object.entries(options.headers ?? {})) {
       headers.set(name, value);
     }
     const response = yield* Effect.promise(() =>
       fetch(`${url}${path}`, {
-        body:
-          options.form === undefined
-            ? undefined
-            : new URLSearchParams(options.form).toString(),
+        body,
         headers,
         method,
         redirect: "manual",

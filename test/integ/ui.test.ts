@@ -1,5 +1,5 @@
 // Integration tests for the dashboard and the public status page: sign-in
-// and cookie auth (pages and /api), the Origin check on form posts, and
+// and cookie auth (`/api/session`, pages and /api), the Origin check on form posts, and
 // that the status page and GET /api/public/status only ever show monitors
 // that are public right now, without URLs. Run with `pnpm test:integ`.
 import { expect } from "bun:test";
@@ -48,6 +48,79 @@ const statusHtml = raw("GET", "/status").pipe(
 
 const publicNames = publicStatus.pipe(
   Effect.map((status) => status.monitors.map((monitor) => monitor.name))
+);
+
+test(
+  "/api/session signs in and out with the Origin check",
+  Effect.gen(function* sessionTest() {
+    const own = yield* origin;
+    const state = (cookie?: string) =>
+      raw("GET", "/api/session", {
+        headers: cookie === undefined ? {} : { cookie },
+      }).pipe(Effect.map((reply) => reply.text));
+
+    expect(yield* state()).toBe('{"signedIn":false}');
+
+    const wrong = yield* raw("POST", "/api/session", {
+      headers: { origin: own },
+      json: { token: "wrong" },
+    });
+    expect(wrong.status).toBe(401);
+    expect(wrong.headers.get("set-cookie")).toBeNull();
+    const attempts: readonly Readonly<Record<string, string>>[] = [
+      { origin: evilOrigin },
+      {},
+    ];
+    for (const headers of attempts) {
+      const rejected = yield* raw("POST", "/api/session", {
+        headers,
+        json: { token: apiToken },
+      });
+      expect(rejected.status).toBe(403);
+      expect(rejected.headers.get("set-cookie")).toBeNull();
+    }
+
+    const ok = yield* raw("POST", "/api/session", {
+      headers: { origin: own },
+      json: { token: apiToken },
+    });
+    expect(ok.status).toBe(204);
+    const setCookie = ok.headers.get("set-cookie") ?? "";
+    for (const attribute of [
+      "HttpOnly",
+      "Secure",
+      "SameSite=Strict",
+      "Path=/",
+    ]) {
+      expect(setCookie).toContain(attribute);
+    }
+    expect(setCookie).not.toContain(apiToken);
+    const value = /kanshi_session=(?<value>[^;]+)/u.exec(setCookie)?.groups
+      ?.value;
+    expect(value).toBeDefined();
+    const cookie = `kanshi_session=${value}`;
+    expect(yield* state(cookie)).toBe('{"signedIn":true}');
+    expect(yield* state(`kanshi_session=1.${"0".repeat(64)}`)).toBe(
+      '{"signedIn":false}'
+    );
+    // The same session as the legacy pages: it works for /api.
+    const listed = yield* send("GET", "/api/monitors", {
+      auth: null,
+      headers: { cookie },
+    });
+    expect(listed.status).toBe(200);
+
+    const crossSite = yield* raw("DELETE", "/api/session", {
+      headers: { cookie, origin: evilOrigin },
+    });
+    expect(crossSite.status).toBe(403);
+    const signedOut = yield* raw("DELETE", "/api/session", {
+      headers: { cookie, origin: own },
+    });
+    expect(signedOut.status).toBe(204);
+    expect(signedOut.headers.get("set-cookie")).toContain("Max-Age=0");
+  }),
+  { timeout: 60_000 }
 );
 
 test(

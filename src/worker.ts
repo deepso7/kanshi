@@ -14,6 +14,7 @@ import { ApiAuthLive, credentialValidatorLayer } from "./api/auth.ts";
 import { ChannelsHandlers } from "./api/channels.ts";
 import { MonitorsHandlers } from "./api/handlers.ts";
 import { PublicHandlers } from "./api/public.ts";
+import { SessionHandlers } from "./api/session.ts";
 import { KanshiApi } from "./api/spec.ts";
 import { DevRoutes, isLoopbackHost } from "./dev/routes.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
@@ -82,10 +83,15 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
     );
 
     const services = yield* Effect.context<
-      ChannelService | MonitorService | StatusService
+      ChannelService | KanshiSettings | MonitorService | StatusService
     >();
     const api = HttpApiBuilder.layer(KanshiApi).pipe(
-      Layer.provide([MonitorsHandlers, ChannelsHandlers, PublicHandlers]),
+      Layer.provide([
+        MonitorsHandlers,
+        ChannelsHandlers,
+        PublicHandlers,
+        SessionHandlers,
+      ]),
       Layer.provide(ApiAuthLive),
       Layer.provide(credentialValidatorLayer(apiToken)),
       Layer.provide([
