@@ -305,9 +305,11 @@ export class Registry extends Cloudflare.DurableObject<
      * store the summary (same revision rule as `upsertSummary`, so a lost
      * push converges and a newer one is never overwritten) and record the
      * observation, opening (alerting every channel), resolving or closing
-     * its "not being checked" episode. Then prune old episodes and re-arm
-     * the alarm, which is set only while watchdog alerts are due. `at` is
-     * the run's clock. Each item is its own transaction.
+     * its "not being checked" episode, unless the observation is out of
+     * date (the row has a newer summary revision, or is no longer active).
+     * Then prune old episodes and re-arm the alarm, which is set only while
+     * watchdog alerts are due. `at` is the run's clock. Each item is its
+     * own transaction.
      */
     reconcile: (
       items: readonly ReconcileItem[],
@@ -777,12 +779,9 @@ export const RegistryLive = Registry.make(
               item.summary,
               item.revision
             );
-            const watch = yield* observeMonitor(
-              item.id,
-              item.observation,
-              at,
-              Date.now()
-            );
+            // Skipped if a newer summary was pushed since the watchdog read
+            // the monitor (a disable, say), or the row is being deleted.
+            const watch = yield* observeMonitor(item.id, item, at, Date.now());
             return { summaryUpdated, watch };
           })
         ).pipe(

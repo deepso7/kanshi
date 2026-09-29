@@ -33,12 +33,19 @@ export interface WatchdogRow {
 
 /** The fields of a monitor's `reconcile()` the watchdog decides on. */
 export interface WatchdogStatus {
+  /** `reconcile()` had to restore a lost (or late) alarm. */
+  readonly alarmRestored: boolean;
   readonly snapshot: MonitorSnapshot | null;
   readonly tombstonedAt: number | null;
 }
 
 /** What the watchdog saw of an active monitor, for its episode. */
 export interface WatchObservation {
+  /**
+   * The monitor's alarm was lost and `reconcile()` just restored it, so a
+   * stale monitor may already be checked again (see `watchTransition`).
+   */
+  readonly alarmRestored: boolean;
   readonly enabled: boolean;
   readonly intervalSeconds: number;
   readonly lastCheckedAt: number | null;
@@ -117,10 +124,25 @@ export const isStale = (snapshot: MonitorSnapshot, now: number): boolean =>
   now - lastSignOfLife(snapshot) >
     staleThresholdMs(snapshot.config.intervalSeconds);
 
+/**
+ * Whether re-arming restored a lost alarm: one is due (`at`) but none was
+ * set, or the one set was later than due. An earlier alarm is not a loss
+ * (it fires and re-arms). `alarmRunning`: the alarm handler is running, so
+ * a missing alarm is its own (it re-arms when done), not a lost one.
+ */
+export const alarmRestored = (
+  previous: number | null,
+  at: number | null,
+  alarmRunning: boolean
+): boolean =>
+  !alarmRunning && at !== null && (previous === null || previous > at);
+
 export const observe = (
   snapshot: MonitorSnapshot,
-  now: number
+  now: number,
+  restored: boolean
 ): WatchObservation => ({
+  alarmRestored: restored,
   enabled: snapshot.config.enabled,
   intervalSeconds: snapshot.config.intervalSeconds,
   lastCheckedAt: snapshot.state.lastCheckedAt,
@@ -169,7 +191,7 @@ export const decide = (
         });
       }
       return WatchdogAction.Refresh({
-        observation: observe(status.snapshot, now),
+        observation: observe(status.snapshot, now, status.alarmRestored),
         revision: status.snapshot.state.summaryRevision,
         summary: summaryOf(status.snapshot.config, status.snapshot.state),
       });
@@ -198,10 +220,17 @@ export type WatchChange = "close" | "none" | "open" | "resolve";
  * stale observation opens one (the run is hourly, and the threshold is
  * already several intervals); it stays open, with no further alert, until
  * an observation finds the monitor checked again or disabled.
+ *
+ * A stale monitor whose lost alarm this run restored changes nothing: the
+ * restored alarm is due at once, so it is likely checked again before the
+ * batch is applied, and alerting it would be a false alarm followed by a
+ * recovery. If the restored alarm did not bring checks back, the next run
+ * finds it stale with its alarm in place and opens the episode then (so a
+ * lost alarm alerts about an hour later than a wedged monitor).
  */
 export const watchTransition = (
   previous: WatchState,
-  observation: Pick<WatchObservation, "enabled" | "stale">
+  observation: Pick<WatchObservation, "alarmRestored" | "enabled" | "stale">
 ): WatchChange => {
   const open = previous.episodeId !== null;
   if (!observation.enabled) {
@@ -210,5 +239,44 @@ export const watchTransition = (
   if (!observation.stale) {
     return open ? "resolve" : "none";
   }
+  if (observation.alarmRestored) {
+    return "none";
+  }
   return open ? "none" : "open";
 };
+
+/** The Registry row an observation is applied to, as stored. */
+export interface WatchedRow {
+  readonly episodeId: string | null;
+  readonly lifecycle: WatchdogRow["lifecycle"];
+  readonly summaryRevision: number;
+}
+
+/** What applying one `ReconcileItem`'s observation does to its episode. */
+export interface WatchOutcome {
+  /** False when the observation is out of date (nothing recorded). */
+  readonly applied: boolean;
+  readonly change: WatchChange;
+}
+
+/**
+ * Apply an observation only while it is current. The watchdog reads the
+ * monitor, then applies the whole batch later, so by then the row may be
+ * gone, `deleting`, or carry a newer summary revision than the observation
+ * (a disable, edit or status change pushed in between); such an
+ * observation is ignored, and the next run decides on a fresh one. An
+ * equal or older stored revision means the observation is at least as new
+ * as anything the Registry knows (the caller stores its summary first).
+ */
+export const watchOutcome = (
+  row: WatchedRow | null,
+  item: Pick<ReconcileItem, "observation" | "revision">
+): WatchOutcome =>
+  row === null ||
+  row.lifecycle !== "active" ||
+  row.summaryRevision > item.revision
+    ? { applied: false, change: "none" }
+    : {
+        applied: true,
+        change: watchTransition({ episodeId: row.episodeId }, item.observation),
+      };

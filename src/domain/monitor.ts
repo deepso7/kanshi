@@ -214,3 +214,21 @@ export const shouldPushSummary = (
   after: MonitorSnapshot
 ): boolean =>
   before === null || after.state.summaryRevision > before.state.summaryRevision;
+
+/**
+ * The summary revision a Monitor still owes the Registry after a push of
+ * `revision` failed (`owed`: what it already owed, or null). Pushes can run
+ * concurrently (an edit's and a check's), so the newest failed one counts.
+ */
+export const owePush = (owed: number | null, revision: number): number =>
+  owed === null ? revision : Math.max(owed, revision);
+
+/**
+ * What is still owed after a push of `revision` succeeded: nothing if it
+ * covers the owed revision, otherwise the owed one (a newer push failed
+ * and this older one finished after it).
+ */
+export const settlePush = (
+  owed: number | null,
+  revision: number
+): number | null => (owed !== null && owed > revision ? owed : null);

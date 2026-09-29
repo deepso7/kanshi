@@ -138,13 +138,18 @@ test(
     expect(stopped.status.alarmAt).toBeNull();
     expect(stopped.status.snapshot?.state.lastCheckedAt).toBe(stoppedAt);
 
+    // Run as of an hour on, so the monitor counts as stale: its alarm is
+    // restored, but it is not alerted in the same run (checks resume on
+    // the restored alarm before anyone would read the alert).
+    const later = Date.now() + 60 * minute;
     const before = yield* registryCalls;
-    const report = yield* watchdog();
+    const report = yield* watchdog(later);
     const after = yield* registryCalls;
     const result = resultFor(report, monitor.id);
     expect(result?.action).toBe("Refresh");
     expect(result?.errors).toEqual([]);
     expect(result?.alarmAt).toBeNumber();
+    expect(result?.watch).toMatchObject({ applied: true, change: "none" });
     // One list and one batched write, whatever the number of monitors; no
     // per-monitor Registry call.
     expect(callsSince(before, after, "list")).toBe(1);
@@ -157,6 +162,11 @@ test(
       (at) => at !== null && stoppedAt !== null && at > stoppedAt,
       15_000
     );
+    // Still stale as of that time with its alarm in place: alerted now.
+    const next = resultFor(yield* watchdog(later), monitor.id);
+    expect(next?.watch).toMatchObject({ applied: true, change: "open" });
+    const resumed = resultFor(yield* watchdog(), monitor.id);
+    expect(resumed?.watch).toMatchObject({ change: "resolve" });
     yield* remove(monitor.id);
   }),
   { timeout: 60_000 }

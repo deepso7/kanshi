@@ -1638,9 +1638,12 @@ Estimate, 10 monitors at 60s:
   correctly.
 - `shouldPushSummary(before, after)`: a new monitor, or the revision
   moved. The Monitor pushes after `configure` (new only), `update` and a
-  committed check only then. A failed push sets an in-memory `pushOwed`
+  committed check only then. A failed push sets an in-memory owed
   flag and the next check retries it; after an eviction the watchdog
-  converges it.
+  converges it. The flag is the owed revision (`owedRevision`, via
+  `owePush`/`settlePush`): pushes can overlap (an edit's and a check's),
+  and only a successful push of that revision or a newer one clears it, so
+  an older push finishing after a newer failed one does not.
 - Other Registry calls from a monitor are unchanged and happen only for
   alerts (`recipients` when a `down` notification is resolved,
   `channelTarget` per delivery). The dev flip target reads the Registry
@@ -1687,10 +1690,27 @@ Estimate, 10 monitors at 60s:
   episode (the consecutive-runs counter is gone; migration
   `6_watchdog_single_observation` drops `stale_runs`,
   `RegistryEntry.watch` is `{ episodeId }`). With runs an hour apart a
-  second observation would only delay the alert by an hour. A monitor
-  whose alarm was lost is re-armed and reported in the same run, so it
-  alerts once and sends the recovery on the next run. Dedup, the recovery
-  notice and the silent close on disable are unchanged.
+  second observation would only delay the alert by an hour. Dedup, the
+  recovery notice and the silent close on disable are unchanged.
+- **Decision (review round 1):** a stale monitor whose lost alarm this
+  run restored is **not** alerted in that run. `Monitor.reconcile()`
+  reports `alarmRestored` (`alarmRestored(previous, at, alarmRunning)`:
+  an alarm was due but none was set, or the one set was later; the alarm
+  handler's own missing alarm while it runs does not count), carried in
+  the observation; `watchTransition` returns `none` for a stale, restored
+  observation (no open, no resolve). The restored alarm is due at once, so
+  the monitor is usually checked again before the batch is applied, and
+  alerting would send a false "not being checked" and a recovery an hour
+  later. If the restored alarm does not bring checks back, the next run
+  finds it stale with its alarm in place and opens the episode, so a lost
+  alarm alerts about an hour later than a wedged monitor.
+- **Out-of-date observations are ignored** (`watchOutcome`): the batch is
+  applied after the reads, so `observeMonitor` records nothing
+  (`applied: false`) if the row is gone or not active, or its stored
+  summary revision is newer than the item's (a disable, edit or status
+  change pushed in between). The next run decides on a fresh one. A
+  disable whose push was lost is not caught (the Registry cannot know);
+  the next run closes the episode.
 - The old open issue (a real cron run between the two `now = +1h` test
   runs) is gone with the counter.
 

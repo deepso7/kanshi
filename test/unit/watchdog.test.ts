@@ -25,9 +25,11 @@ import type {
   ReconcileItem,
   WatchdogRow,
   WatchdogStatus,
+  WatchedRow,
   WatchState,
 } from "../../src/watchdog/rules.ts";
 import {
+  alarmRestored,
   creatingGraceMs,
   decide,
   isStale,
@@ -36,6 +38,7 @@ import {
   staleFloorMs,
   staleThresholdMs,
   WatchdogAction,
+  watchOutcome,
   watchTransition,
 } from "../../src/watchdog/rules.ts";
 import type { WatchdogDeps } from "../../src/watchdog/run.ts";
@@ -90,11 +93,20 @@ const row = (overrides: Partial<WatchdogRow> = {}): WatchdogRow => ({
 });
 
 const live = (value: MonitorSnapshot = snapshot()): WatchdogStatus => ({
+  alarmRestored: false,
   snapshot: value,
   tombstonedAt: null,
 });
-const unconfigured: WatchdogStatus = { snapshot: null, tombstonedAt: null };
-const tombstoned: WatchdogStatus = { snapshot: null, tombstonedAt: t0 };
+const unconfigured: WatchdogStatus = {
+  alarmRestored: false,
+  snapshot: null,
+  tombstonedAt: null,
+};
+const tombstoned: WatchdogStatus = {
+  alarmRestored: false,
+  snapshot: null,
+  tombstonedAt: t0,
+};
 
 describe("watchdog decisions", () => {
   it("leaves a young creating row alone and needs no status for it", () => {
@@ -125,7 +137,11 @@ describe("watchdog decisions", () => {
     }
     // A tombstone wins even if a snapshot were somehow reported.
     assert.deepStrictEqual(
-      decide(stuck, { snapshot: snapshot(), tombstonedAt: t0 }, now),
+      decide(
+        stuck,
+        { alarmRestored: false, snapshot: snapshot(), tombstonedAt: t0 },
+        now
+      ),
       WatchdogAction.Abandon({ opId: "op9" })
     );
   });
@@ -152,6 +168,7 @@ describe("watchdog decisions", () => {
       decide(row(), live(value), now),
       WatchdogAction.Refresh({
         observation: {
+          alarmRestored: false,
           enabled: true,
           intervalSeconds: 60,
           lastCheckedAt: t0 + 30_000,
@@ -297,9 +314,11 @@ describe("staleness", () => {
 });
 
 describe("episodes and dedup", () => {
-  const fresh = { enabled: true, stale: false };
-  const stale = { enabled: true, stale: true };
-  const disabled = { enabled: false, stale: false };
+  const fresh = { alarmRestored: false, enabled: true, stale: false };
+  const stale = { alarmRestored: false, enabled: true, stale: true };
+  const disabled = { alarmRestored: false, enabled: false, stale: false };
+  /** Stale, but this run's `reconcile()` restored its lost alarm. */
+  const restored = { alarmRestored: true, enabled: true, stale: true };
 
   /** Run the transition over observations, starting with no episode. */
   const run = (observations: readonly (typeof fresh)[]) => {
@@ -342,6 +361,113 @@ describe("episodes and dedup", () => {
     assert.deepStrictEqual(result.changes, ["open", "close"]);
     assert.deepStrictEqual(result.state, { episodeId: null });
     assert.deepStrictEqual(run([disabled, disabled]).changes, ["none", "none"]);
+  });
+
+  it("waits a run before alerting a monitor whose lost alarm it restored", () => {
+    // Checks resumed on the restored alarm: never alerted.
+    assert.deepStrictEqual(run([restored, fresh]).changes, ["none", "none"]);
+    // Still stale with its alarm in place: alerted on the next run.
+    assert.deepStrictEqual(run([restored, stale]).changes, ["none", "open"]);
+    // An open episode is neither resolved nor re-alerted by a restore.
+    const result = run([stale, restored]);
+    assert.deepStrictEqual(result.changes, ["open", "none"]);
+    assert.strictEqual(result.state.episodeId, "ep");
+    // Not stale despite the restore: the episode resolves as usual.
+    assert.deepStrictEqual(
+      run([stale, { ...restored, stale: false }]).changes,
+      ["open", "resolve"]
+    );
+  });
+});
+
+describe(alarmRestored, () => {
+  it("counts a missing or late alarm as restored", () => {
+    assert.isTrue(alarmRestored(null, t0, false));
+    assert.isTrue(alarmRestored(t0 + minute, t0, false));
+  });
+
+  it("does not count an alarm that was already due, or none needed", () => {
+    assert.isFalse(alarmRestored(t0, t0, false));
+    assert.isFalse(alarmRestored(t0 - minute, t0, false));
+    assert.isFalse(alarmRestored(null, null, false));
+  });
+
+  it("does not count the running alarm handler's own missing alarm", () => {
+    assert.isFalse(alarmRestored(null, t0, true));
+  });
+});
+
+const watched = (overrides: Partial<WatchedRow> = {}): WatchedRow => ({
+  episodeId: null,
+  lifecycle: "active",
+  summaryRevision: 5,
+  ...overrides,
+});
+
+describe(watchOutcome, () => {
+  const stale: ReconcileItem["observation"] = {
+    alarmRestored: false,
+    enabled: true,
+    intervalSeconds: 60,
+    lastCheckedAt: t0,
+    name: "Site",
+    stale: true,
+    url: "https://example.com/",
+  };
+
+  it("opens an episode for a current stale observation", () => {
+    assert.deepStrictEqual(
+      watchOutcome(watched(), { observation: stale, revision: 5 }),
+      { applied: true, change: "open" }
+    );
+  });
+
+  it("ignores a stale observation superseded by a newer revision", () => {
+    // Read at revision 5; a status change was pushed as 6 before the batch.
+    assert.deepStrictEqual(
+      watchOutcome(watched({ summaryRevision: 6 }), {
+        observation: stale,
+        revision: 5,
+      }),
+      { applied: false, change: "none" }
+    );
+  });
+
+  it("ignores an observation taken before a disable", () => {
+    // The monitor was read enabled and stale at revision 5, then disabled
+    // (revision 6, pushed) before the batch was applied.
+    const disabledSince = watched({ summaryRevision: 6 });
+    assert.deepStrictEqual(
+      watchOutcome(disabledSince, { observation: stale, revision: 5 }),
+      { applied: false, change: "none" }
+    );
+    // An open episode is left for the next run too (which closes it).
+    assert.deepStrictEqual(
+      watchOutcome(
+        { ...disabledSince, episodeId: "ep" },
+        { observation: { ...stale, stale: false }, revision: 5 }
+      ),
+      { applied: false, change: "none" }
+    );
+  });
+
+  it("ignores a row that is gone or no longer active", () => {
+    const item = { observation: stale, revision: 5 };
+    assert.isFalse(watchOutcome(null, item).applied);
+    assert.isFalse(
+      watchOutcome(watched({ lifecycle: "deleting" }), item).applied
+    );
+  });
+
+  it("applies an observation newer than a lost push", () => {
+    // The Registry missed revision 5 (stored 3); the item carries it.
+    assert.deepStrictEqual(
+      watchOutcome(watched({ summaryRevision: 3 }), {
+        observation: stale,
+        revision: 5,
+      }),
+      { applied: true, change: "open" }
+    );
   });
 });
 
@@ -473,12 +599,14 @@ const registryRow = (
 /**
  * A watchdog over fake objects that records every call as
  * `<object>.<method>`: `snapshots` are the monitors' `reconcile()` answers,
- * `batch` the Registry's `reconcile` (null: it fails).
+ * `batch` the Registry's `reconcile` (null: it fails), `restored` the
+ * monitors whose `reconcile()` restored a lost alarm.
  */
 const fakeWatchdog = (
   rows: readonly RegistryEntry[],
   snapshots: ReadonlyMap<string, MonitorSnapshot>,
-  batch: ((items: readonly ReconcileItem[]) => ReconcileReport) | null
+  batch: ((items: readonly ReconcileItem[]) => ReconcileReport) | null,
+  restored: ReadonlySet<string> = new Set()
 ) => {
   const calls: string[] = [];
   const batches: (readonly ReconcileItem[])[] = [];
@@ -519,6 +647,7 @@ const fakeWatchdog = (
         calls.push(`${id}.reconcile`);
         return {
           alarmAt: t0 + 1,
+          alarmRestored: restored.has(id),
           snapshot: snapshots.get(id) ?? null,
           tombstonedAt: null,
         };
@@ -571,7 +700,12 @@ describe(runWatchdog, () => {
 
   it.effect("makes one call per active monitor and one batched write", () =>
     Effect.gen(function* batchTest() {
-      const { batches, calls, deps } = fakeWatchdog(rows, snapshots, answer);
+      const { batches, calls, deps } = fakeWatchdog(
+        rows,
+        snapshots,
+        answer,
+        new Set(["stale"])
+      );
       const report = yield* runWatchdog(deps, now);
       assert.deepStrictEqual(calls.toSorted(), [
         "fresh.reconcile",
@@ -586,6 +720,7 @@ describe(runWatchdog, () => {
         {
           id: "fresh",
           observation: {
+            alarmRestored: false,
             enabled: true,
             intervalSeconds: 60,
             lastCheckedAt: now - minute,
@@ -599,6 +734,7 @@ describe(runWatchdog, () => {
         {
           id: "stale",
           observation: {
+            alarmRestored: true,
             enabled: true,
             intervalSeconds: 60,
             lastCheckedAt: t0,

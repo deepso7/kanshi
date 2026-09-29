@@ -5,7 +5,11 @@ import type {
   MonitorState,
   ProbeOutcome,
 } from "../../src/domain/monitor.ts";
-import { shouldPushSummary } from "../../src/domain/monitor.ts";
+import {
+  owePush,
+  settlePush,
+  shouldPushSummary,
+} from "../../src/domain/monitor.ts";
 import {
   alignSlot,
   completeCheck,
@@ -602,5 +606,31 @@ describe(shouldPushSummary, () => {
       enabled.state.summaryRevision,
       disabled.state.summaryRevision
     );
+  });
+});
+
+describe("owed summary pushes", () => {
+  it("owes the newest failed revision", () => {
+    assert.strictEqual(owePush(null, 4), 4);
+    assert.strictEqual(owePush(4, 6), 6);
+    assert.strictEqual(owePush(6, 4), 6);
+  });
+
+  it("settles only on a push of the owed revision or newer", () => {
+    assert.isNull(settlePush(null, 4));
+    assert.isNull(settlePush(6, 6));
+    assert.isNull(settlePush(6, 7));
+    assert.strictEqual(settlePush(6, 5), 6);
+  });
+
+  it("keeps a newer failed push owed when an older one finishes after it", () => {
+    // An edit pushes revision 5 while a check pushes 6; 6 fails first,
+    // then 5 succeeds: 6 is still owed, and the next check retries it.
+    let owed: number | null = null;
+    owed = owePush(owed, 6);
+    owed = settlePush(owed, 5);
+    assert.strictEqual(owed, 6);
+    owed = settlePush(owed, 6);
+    assert.isNull(owed);
   });
 });
