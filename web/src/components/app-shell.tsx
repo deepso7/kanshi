@@ -140,10 +140,10 @@ const styles = stylex.create({
     flexDirection: { default: "row", [media.md]: "column" },
     flexWrap: { default: "wrap", [media.md]: "nowrap" },
     gap: { default: space.sm, [media.md]: space.lg },
-    minWidth: 0,
     // The viewport's height, or less inside a shorter container.
     height: { default: "auto", [media.md]: "100dvh" },
     maxHeight: "100%",
+    minWidth: 0,
     paddingBlock: { default: space.sm, [media.md]: space.lg },
     paddingInline: { default: space.md, [media.md]: space.md },
     position: "sticky",
