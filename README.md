@@ -115,6 +115,11 @@ invalid) or 503 (`Unavailable`); the message says so: retry it.
 | `GET /api/monitors/:id/checks?since&limit`                 | raw checks, newest first                 |
 | `GET /api/monitors/:id/uptime?days=90`                     | daily uptime and latency                 |
 | `GET /api/monitors/:id/incidents?limit`                    | incidents with their alert deliveries    |
+| `GET /api/monitors/:id/recent?hours=24&buckets=48`         | recent uptime and latency buckets        |
+| `GET /api/overview?hours=24&buckets=48`                    | every monitor, status counts, recent     |
+| `GET /api/watchdog/episodes`                               | open "not being checked" episodes        |
+| `GET /api/meta`                                            | dev mode, minimum interval, quota        |
+| `GET /api/dev/events?limit=20`                             | dev webhook sink events (dev mode only)  |
 | `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked + hash) |
 | `POST /api/channels/:id/test`                              | send a test alert                        |
 | `GET /api/public/status`                                   | public monitors only, no URLs (no auth)  |

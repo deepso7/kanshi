@@ -1307,8 +1307,120 @@ rendered in a browser with no CSP violations.
   its code in `src/ui/`, and move its integration checks to the SPA (for
   `/status`: that only public monitors appear). When the list is empty,
   drop `src/ui/` and the Worker's page fallback (answer 404 there).
-- The dashboard's dev events list (`registry.devEvents()`) and the 24h
-  "recent" data are not exposed over `/api` yet (the legacy pages read
-  them directly); the dashboard port needs endpoints for them.
+- Everything the legacy pages read is now in `/api` (phase 2b below); the
+  pages use `web/src/api/queries.ts` only.
 - Vitest runs `test/unit` only; component tests in `web/` would need a DOM
   environment (e.g. happy-dom) and an include pattern.
+
+### Phase 2b: the API covers everything the legacy pages did
+
+Gap analysis against `src/ui/` (what each page shows or does, and where it
+now comes from):
+
+- **Dashboard**: rows (status, name, `public`/`managed`/"not checked"
+  badges, last check, 24h uptime, latency sparkline, interval), status
+  counts, the "Not being checked" banner, the dev webhook sink panel, a 30s
+  refresh. Was: `registry.list()` + one `Monitor.recent` per row +
+  `registry.devEvents()`, read directly. Now `GET /api/overview`,
+  `GET /api/watchdog/episodes`, `GET /api/dev/events`.
+- **Monitor detail**: config, state, `public`, `managed`, the watchdog
+  flag (was `entry.watch.episodeId`, not in any API response), 24h
+  uptime and latency (was not in the API), 90-day uptime, 50 checks, 20
+  incidents with alert rows (channel names from the channel list). Now
+  `GET /api/monitors/:id` (with `notChecked`), `.../recent`, `.../uptime`,
+  `.../checks`, `.../incidents`, `GET /api/channels`.
+- **Actions**: check now, pause/resume (`PATCH { enabled }`), public
+  toggle (`PATCH { public }`), edit, delete, channel create/edit/delete
+  and test (the result is the `ChannelTestResult` reply). All were
+  already in the API.
+- **Monitor form**: its `min` interval depends on dev mode (was
+  `minIntervalSeconds(devMode)` server-side). Now `GET /api/meta`.
+- **Status page**: `GET /api/public/status` (already there).
+- **Flash messages and confirmations** (`?done=` codes, `data-confirm`)
+  are client-side behaviour: the SPA shows its own toasts and dialogs on
+  a mutation's success or error (the API's error `message` is the text the
+  legacy error pages showed). Nothing to add server-side.
+
+Endpoints added (all behind `ApiAuth`: bearer token or session cookie):
+
+- `GET /api/monitors/:id/recent?hours=24&buckets=48` -> `RecentActivity`
+  (`{ counted, up, uptimePercent, buckets: [{ at, failures, latencyMs
+}] }`, oldest first, empty buckets included). `hours` 1..168, `buckets`
+  1..288 (400 outside); 404 for an unknown monitor.
+- `GET /api/overview?hours=24&buckets=48` -> `{ generatedAt, counts: { up,
+down, unknown, paused }, monitors: [MonitorListItem & { recent:
+RecentActivity | null }] }`. One Registry list, then each Monitor
+  object's `recent` with `concurrency: 8` (`overviewConcurrency`); a
+  monitor that cannot be read is `recent: null` (logged) instead of
+  failing the page, as the legacy dashboard did.
+- `GET /api/watchdog/episodes` -> open `Episode`s (`{ id, monitorId,
+monitorName, monitorUrl, intervalSeconds, lastCheckedAt, startedAt,
+resolvedAt: null, resolution: null }`), oldest first. New Registry RPC
+  `openEpisodes` (`resolved_at IS NULL`; no schema change).
+- `GET /api/dev/events?limit=20` -> `DevEventView[]` newest first (`{ id,
+at, kind, respondedWith, query, message, detail }`), `limit` 1..500.
+- `GET /api/meta` -> `{ devMode, minIntervalSeconds, monitorQuota }`.
+- `MonitorResponse` and `MonitorListItem` gained `notChecked: boolean`
+  (an open watchdog episode). Additive, but `kanshi sync` decodes these
+  schemas, so a newer CLI needs a server with this change.
+
+Decisions:
+
+- **Dev events live under `/api/dev/events`, not `/_dev`.** `/_dev/*` is
+  unauthenticated fixtures for tests and curl (loopback-only, untyped
+  JSON). The dashboard needs a typed, authenticated read through the same
+  `HttpApiClient`, so it is an `HttpApi` group behind `ApiAuth`. The
+  endpoint is always in the spec (the client is derived from it) and
+  answers **404 `NotFound` outside dev mode** (after auth), from
+  `DevService.events`; the SPA reads `GET /api/meta`'s `devMode` before
+  querying it. `GET /_dev/events` (raw rows) stays for the tests.
+- **Service layer.** `MonitorService` gained `recent(id, window)`
+  (checks the Registry row, 404), `listWithRecent(window)` (the bounded
+  fan-out, shared with the legacy dashboard), `overview(window)` and
+  `openEpisodes()`; pure `statusCounts` and `toOverview` are exported for
+  tests. New `DevService` (`src/service/dev.ts`, `makeDevService` +
+  `DevService.layer`): the dev gating and `devEventView`/`sinkMessage`
+  (the message extraction moved from `src/ui/pages.ts`). `displayStatus`
+  (`paused` while disabled) moved to `src/domain/monitor.ts`, used by the
+  counts, the legacy pages and the public status. The legacy pages call
+  these services too.
+- **Browser-safe spec.** `Episode` moved from `src/registry/watchdog-
+store.ts` (imports `SqlClient`) to `src/domain/watchdog.ts`; new response
+  schemas are plain `Schema`s in `src/api/spec.ts`. `tsc -p web` checks it.
+- **Handlers** for the four new groups are in `src/api/dashboard.ts`
+  (`OverviewHandlers`, `WatchdogHandlers`, `DevHandlers`, `MetaHandlers`).
+- **Client** (`web/src/api/queries.ts`): `queryKeys` (hierarchical:
+  `["monitors"]` > `["monitors", "list"]` / `["monitors", "detail", id,
+...]`, `["overview", params]`, `["channels"]`, `["watchdog-episodes"]`,
+  `["dev-events", ...]`, `["meta"]`, `["public-status"]`, `["session"]`);
+  `queryOptions` per read (factories for parameterised ones), and
+  `mutationOptions` per write whose `onSuccess` invalidates through the
+  mutation context's `client` (and seeds the monitor detail with the
+  reply). `invalidateMonitors(client, id?)` covers the list, overview,
+  episodes, public status and one or all monitor details;
+  `invalidateChannels(client)` the channel list. Errors reject with the
+  typed API error (`callApi`); TanStack's `TError` stays the default.
+
+Tests:
+
+- Unit: `test/unit/monitor-service.test.ts` (`statusCounts`,
+  `toOverview`; the overview skips non-active rows, maps a failing
+  monitor to `recent: null`, passes the window through and never exceeds
+  `overviewConcurrency` in flight; `recent` 404; `notChecked` in get and
+  list; `openEpisodes`), `test/unit/dev-service.test.ts` (`sinkMessage`,
+  `devEventView`, newest-first limit, 404 outside dev mode).
+- Integration: `test/integ/ui.test.ts` "the dashboard's reads need auth;
+  meta, episodes and dev events" (401 without or with a wrong token,
+  cookie auth, meta values, dev events newest first with the sink's tag,
+  reply and message, `limit` bounds) and "recent activity and the
+  overview" (default 48 half-hour buckets, custom window, 400 on bad
+  bounds, 404 unknown/deleted monitor, overview row flags and counts);
+  `test/integ/watchdog.test.ts` "not being checked" also checks the open
+  episode in `/api/watchdog/episodes` and `notChecked` in the detail, list
+  and overview, and that both clear on resolve. The integration stack
+  always runs in dev mode, so the non-dev 404 is covered by the unit test.
+
+Commands (end of UI phase 2b): `pnpm typecheck`, `pnpm check` pass for
+these paths (the parallel design-system work in `web/src/theme`,
+`web/src/pages` had WIP errors at the time); `pnpm test` 198 pass;
+`pnpm test:integ` 32 pass (about 3.7 minutes).
