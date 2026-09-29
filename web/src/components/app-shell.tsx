@@ -155,6 +155,8 @@ const logo = stylex.create({
 export interface AppShellProps {
   /** Top of the sidebar. Default: the Kanshi mark and name. */
   readonly brand?: ReactNode;
+  /** After the brand: a small tag such as a "Dev" badge. */
+  readonly brandBadge?: ReactNode;
   /** `AppShellNavLink`s. */
   readonly nav: ReactNode;
   /** Bottom of the sidebar: the theme toggle, a sign-out button. */
@@ -169,6 +171,7 @@ export interface AppShellProps {
  */
 export const AppShell = ({
   brand,
+  brandBadge,
   children,
   footer,
   nav,
@@ -183,6 +186,7 @@ export const AppShell = ({
             Kanshi
           </>
         )}
+        {brandBadge}
       </div>
       <nav aria-label="Main" {...stylex.props(styles.nav)}>
         <span {...stylex.props(shared.label, styles.navLabel)}>Navigation</span>

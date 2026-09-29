@@ -62,13 +62,18 @@ export const sessionQuery = queryOptions({
   queryKey: queryKeys.session,
 });
 
-/** `POST /api/session`: sign in with the API token (401 if wrong). */
+/**
+ * `POST /api/session`: sign in with the API token (401 if wrong). A 204
+ * means signed in: the session read is set, not refetched, so the route
+ * guard (`ensureQueryData(sessionQuery)`) sees it at once.
+ */
 export const signInMutation = mutationOptions({
   mutationFn: (token: string) =>
     callApi((api) => api.session.signIn({ payload: { token } })),
   mutationKey: ["session", "sign-in"],
-  onSuccess: (_data, _token, _result, { client }) =>
-    client.invalidateQueries({ queryKey: queryKeys.session }),
+  onSuccess: (_data, _token, _result, { client }) => {
+    client.setQueryData(sessionQuery.queryKey, { signedIn: true });
+  },
 });
 
 /** `DELETE /api/session`: sign out; drops every cached read. */
@@ -81,6 +86,15 @@ export const signOutMutation = mutationOptions({
 });
 
 // -- reads -------------------------------------------------------------------
+
+/**
+ * The windows the monitor page reads (the route loader prefetches exactly
+ * these, so the page must pass the same values to share the cache).
+ */
+export const monitorPageReads = {
+  checks: { limit: 50 },
+  incidentsLimit: 20,
+} as const satisfies { checks: ChecksParams; incidentsLimit: number };
 
 /** `GET /api/meta`: dev mode, the minimum interval and the monitor quota. */
 export const metaQuery = queryOptions({

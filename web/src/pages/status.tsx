@@ -1,20 +1,28 @@
-import { useQuery } from "@tanstack/react-query";
+import * as stylex from "@stylexjs/stylex";
 
-import { publicStatusQuery } from "../api/queries.ts";
+import { EmptyState } from "../components/empty-state.tsx";
+import { PageHeader } from "../components/page-header.tsx";
+import { space } from "../theme/tokens.stylex.ts";
 
-/** Placeholder until the public status page is ported. */
-export const StatusPage = () => {
-  const status = useQuery(publicStatusQuery);
-  return (
-    <>
-      <h1>Status</h1>
-      {status.data === undefined ? (
-        <p>Loading…</p>
-      ) : (
-        <p>
-          {status.data.overall}: {status.data.monitors.length} public monitors
-        </p>
-      )}
-    </>
-  );
-};
+const styles = stylex.create({
+  page: {
+    marginInline: "auto",
+    maxWidth: "56rem",
+    paddingBlock: space.xxl,
+    paddingInline: space.lg,
+  },
+});
+
+/**
+ * `/status`: the public status page (no session, no app shell; it gets
+ * its own minimal layout). Placeholder.
+ */
+export const StatusPage = () => (
+  <div {...stylex.props(styles.page)}>
+    <PageHeader eyebrow="Public" title="Status" />
+    <EmptyState
+      description="The status page is being ported to the new UI."
+      title="Coming soon"
+    />
+  </div>
+);

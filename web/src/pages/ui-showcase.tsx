@@ -134,6 +134,9 @@ const styles = stylex.create({
     display: "flex",
     flexDirection: "column",
     gap: space.xl,
+    marginInline: "auto",
+    maxWidth: "80rem",
+    padding: space.xl,
   },
   panel: {
     backgroundColor: colors.background,
