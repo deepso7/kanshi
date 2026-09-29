@@ -2,6 +2,7 @@ import * as stylex from "@stylexjs/stylex";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { useEffect, useSyncExternalStore } from "react";
 
+import { uptimeOfLastDays } from "../../../src/domain/history.ts";
 import type { PublicMonitor } from "../../../src/domain/public-status.ts";
 import { publicStatusQuery } from "../api/queries.ts";
 import { EmptyState } from "../components/empty-state.tsx";
@@ -243,7 +244,8 @@ const MonitorRow = ({
   readonly days: number;
   readonly monitor: PublicMonitor;
 }) => {
-  const uptime = formatPercent(monitor.uptimePercent);
+  // Over the days the bars show, not the 90 the API reports.
+  const uptime = formatPercent(uptimeOfLastDays(monitor.days, days));
   return (
     <li {...stylex.props(styles.monitor)}>
       <div {...stylex.props(styles.monitorHead)}>
@@ -253,7 +255,7 @@ const MonitorRow = ({
       <UptimeBars
         count={days}
         days={monitor.days}
-        label={`${monitor.name}: ${uptime} uptime over ${historyDays} days`}
+        label={`${monitor.name}: ${uptime} uptime over ${days} days`}
         showAxis={false}
       />
       <div aria-hidden {...stylex.props(styles.axis)}>
@@ -289,7 +291,7 @@ const OpenIncidents = ({
         {open.map((monitor) => {
           const since = monitor.downSince ?? now;
           return (
-            <li key={monitor.name} {...stylex.props(styles.incident)}>
+            <li key={monitor.ref} {...stylex.props(styles.incident)}>
               <span {...stylex.props(styles.incidentName)}>
                 {monitor.name} is down
               </span>
@@ -306,7 +308,8 @@ const OpenIncidents = ({
 
 /**
  * `/status`: the public status page (no session, no app shell): the
- * overall status, open incidents and each public monitor's 90 days. It
+ * overall status, open incidents and each public monitor's last 90 days
+ * (60 on narrow screens), its uptime over the same days. It
  * reads `GET /api/public/status` only, which never carries URLs.
  */
 export const StatusPage = () => {
@@ -372,7 +375,7 @@ export const StatusPage = () => {
             </div>
             <ul {...stylex.props(styles.list)}>
               {monitors.map((monitor) => (
-                <MonitorRow days={days} key={monitor.name} monitor={monitor} />
+                <MonitorRow days={days} key={monitor.ref} monitor={monitor} />
               ))}
             </ul>
           </section>

@@ -40,7 +40,7 @@ interface CacheLike {
 }
 
 const cacheKey = (id: string) =>
-  `https://kanshi.cache/status-history/v1/${encodeURIComponent(id)}`;
+  `https://kanshi.cache/status-history/v2/${encodeURIComponent(id)}`;
 
 const decodeHistory = Schema.decodeUnknownEffect(
   Schema.fromJsonString(PublicHistory)
@@ -95,6 +95,29 @@ const publicStatusOf = (entry: RegistryEntry): PublicMonitorStatus =>
 
 const emptyHistory: PublicHistory = { days: [], uptimePercent: null };
 
+/** Hex characters of a public ref (64 bits). */
+const publicRefLength = 16;
+
+/**
+ * A monitor's `ref` on the status page: SHA-256 over a fixed prefix and
+ * the id, truncated. Stable and, at 64 bits, unique in practice; the ids
+ * are random UUIDs, so the hash reveals nothing about them.
+ */
+export const publicRef = (id: string): Effect.Effect<string> =>
+  Effect.promise(() =>
+    crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`kanshi/public-ref/v1:${id}`)
+    )
+  ).pipe(
+    Effect.map((digest) =>
+      [...new Uint8Array(digest)]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("")
+        .slice(0, publicRefLength)
+    )
+  );
+
 /**
  * The public status: every request reads which monitors are public from
  * the Registry (so a monitor made private disappears at once); only each
@@ -113,8 +136,10 @@ export const makeStatusService = (deps: StatusDeps) => {
       const report = yield* monitor(id).uptime(statusHistoryDays);
       const fresh: PublicHistory = {
         days: report.days.map((day): PublicDay => ({
+          counted: day.counted,
           day: day.day,
           partial: day.partial,
+          up: day.up,
           uptimePercent: day.uptimePercent,
         })),
         uptimePercent: report.uptimePercent,
@@ -155,12 +180,14 @@ export const makeStatusService = (deps: StatusDeps) => {
           Effect.all({
             downSince: downSince(entry),
             history: history(entry.id),
+            ref: publicRef(entry.id),
           }).pipe(
             Effect.map((loaded): PublicMonitor => ({
               days: loaded.history.days,
               downSince: loaded.downSince,
               lastCheckedAt: entry.summary.lastCheckedAt,
               name: entry.summary.name,
+              ref: loaded.ref,
               status: publicStatusOf(entry),
               uptimePercent: loaded.history.uptimePercent,
             }))

@@ -911,15 +911,17 @@ the Worker. Not exposed over `/api`.
   monitor made private (the API's `PATCH` writes `public` to the Registry
   before answering) disappears on the next request. For each, the 90-day
   history comes from the Cache API (`caches.default`, key
-  `https://kanshi.cache/status-history/v1/<id>`, `max-age=300`) or from
+  `https://kanshi.cache/status-history/v2/<id>`, `max-age=300`) or from
   `monitor.uptime(90)`; a down monitor's open incident start is read live.
   Failures of one monitor render it without history.
 - `GET /api/public/status` (no auth, `no-store`,
   `Access-Control-Allow-Origin: *`): `{ generatedAt, overall:
 operational | partial_outage | major_outage, monitors: [{ name, status:
-up | down | unknown | paused, lastCheckedAt, uptimePercent, downSince,
-days: [{ day, partial, uptimePercent }] }] }`. No URLs, ids, keys or
-  incident causes (a cause can contain a hostname).
+up | down | unknown | paused, lastCheckedAt, uptimePercent, downSince, ref,
+days: [{ day, counted, up, partial, uptimePercent }] }] }`. No URLs, ids,
+  keys or incident causes (a cause can contain a hostname). `ref` is the
+  first 64 bits of SHA-256 over a fixed prefix and the monitor id: a stable
+  React key (names need not be unique) that reveals neither.
 - `/status` renders the same data: banner, open incidents ("X is down
   since ..."), per-monitor bars. Auto-refreshes every 60s.
 
@@ -1577,6 +1579,27 @@ Conventions the pages follow: reuse `web/src/components/ui/` and `shared`
 colour alone; one `h1` per page (`PageHeader`), sections `h2`. A field a
 page needs per row goes into the API response instead of a fetch per row.
 `/_ui` (dev only) shows the design system.
+
+### Review round 4
+
+- **Alert order per channel**: `deliverDue` groups due outbox rows per
+  channel (not per incident and channel); a group runs in `dueOutbox`
+  order (row creation time), so an older incident's "was down, recovered"
+  never lands after a newer "is down". Channels still run concurrently,
+  within the same time budget and row cap. The Registry's watchdog outbox
+  shares the helper.
+- **Unauthenticated bodies**: `src/http/body-limit.ts` lists the endpoints
+  without auth that read a body (only `POST /api/session`, 4 KB). The
+  Worker checks the Origin (403) and the size (413: a declared
+  `content-length` over the limit unread, a chunked body read up to it)
+  before the API decodes anything. Authenticated endpoints decode only
+  after the auth middleware. The token schema caps at 1024 characters,
+  and `KANSHI_API_TOKEN` must fit.
+- **Uptime next to the bars** is over the days the bars show (90, or 60 on
+  a narrow status page / 45 on a narrow detail page), weighted by samples
+  (`uptimeOfLastDays`); public days carry `counted` and `up` for it.
+- **Delete channel** keeps its dialog open while the request is pending,
+  like the monitor's.
 
 ## Lint conventions
 

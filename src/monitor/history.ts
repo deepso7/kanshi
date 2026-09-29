@@ -5,6 +5,7 @@ import type {
   UptimeDay,
   UptimeReport,
 } from "../domain/history.ts";
+import { uptimePercent } from "../domain/history.ts";
 
 /**
  * History and uptime, all pure. Days are UTC calendar days (`YYYY-MM-DD`).
@@ -154,10 +155,6 @@ export const rollupDay = (
 export const isPartial = (
   rollup: Pick<DailyRollup, "counted" | "expected">
 ): boolean => rollup.counted < partialThreshold * rollup.expected;
-
-/** Up share in percent (three decimals); null without samples. */
-export const uptimePercent = (up: number, counted: number): number | null =>
-  counted === 0 ? null : Math.round((up / counted) * 100_000) / 1000;
 
 /**
  * Closed days still to roll up, oldest first: after the watermark (or from

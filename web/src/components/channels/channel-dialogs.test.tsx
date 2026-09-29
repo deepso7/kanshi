@@ -4,6 +4,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import type { ReactNode } from "react";
 import {
@@ -54,10 +57,12 @@ interface ErrorReply {
 
 interface FakeServer {
   failNext: ErrorReply | null;
+  /** While set, replies wait for it (a slow server). */
+  hold: Deferred.Deferred<true> | null;
   readonly requests: SentRequest[];
 }
 
-const server: FakeServer = { failNext: null, requests: [] };
+const server: FakeServer = { failNext: null, hold: null, requests: [] };
 
 const json = (status: number, body: Schema.Json) =>
   Response.json(body, { status });
@@ -75,6 +80,9 @@ const fakeFetch = async (
     method: request.method,
     path: pathname,
   });
+  if (server.hold !== null) {
+    await Effect.runPromise(Deferred.await(server.hold));
+  }
   const failure = server.failNext;
   server.failNext = null;
   if (failure !== null) {
@@ -128,6 +136,7 @@ describe("channel dialogs", () => {
   beforeEach(() => {
     server.requests.length = 0;
     server.failNext = null;
+    server.hold = null;
   });
 
   afterAll(() => {
@@ -293,6 +302,39 @@ describe("channel dialogs", () => {
       expect(server.requests).toStrictEqual([
         { body: "", method: "DELETE", path: "/api/channels/c1" },
       ]);
+    });
+
+    it("stays open while deleting, so a failure is seen", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn<() => void>();
+      const hold = Deferred.makeUnsafe<true>();
+      server.hold = hold;
+      wrap(<DeleteChannelDialog channel={channel} onClose={onClose} />);
+      await user.click(screen.getByRole("button", { name: "Delete channel" }));
+      await waitFor(() => expect(server.requests).toHaveLength(1));
+      expect(screen.getByRole("button", { name: "Deleting…" })).toBeDefined();
+
+      // Escape and a click outside do not dismiss it mid-request.
+      await user.keyboard("{Escape}");
+      await user.click(document.body);
+      expect(onClose).not.toHaveBeenCalled();
+
+      server.failNext = {
+        message: "channel c1 no longer exists",
+        status: 404,
+        tag: "NotFound",
+      };
+      Deferred.doneUnsafe(hold, Exit.succeed(true));
+      await waitFor(() =>
+        expect(screen.getByRole("alertdialog").textContent).toMatch(
+          /channel c1 no longer exists/u
+        )
+      );
+      expect(onClose).not.toHaveBeenCalled();
+
+      // Once settled, it can be dismissed again.
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledWith();
     });
 
     it("warns that kanshi sync recreates a managed channel", () => {

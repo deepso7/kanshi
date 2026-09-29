@@ -160,6 +160,39 @@ test(
       expect(rejected.headers.get("set-cookie")).toBeNull();
     }
 
+    // Oversized bodies are refused before they are decoded: 413 whether
+    // the length is declared or the body is chunked; another origin is
+    // refused first (403). A token over 1024 characters is a 400.
+    const huge = { token: "x".repeat(64 * 1024) };
+    for (const streamed of [false, true]) {
+      const tooLarge = yield* raw("POST", "/api/session", {
+        headers: { origin: own },
+        json: huge,
+        streamed,
+      });
+      expect(tooLarge.status).toBe(413);
+      expect(tooLarge.headers.get("set-cookie")).toBeNull();
+    }
+    expect(
+      (yield* raw("POST", "/api/session", {
+        headers: { origin: evilOrigin },
+        json: huge,
+      })).status
+    ).toBe(403);
+    expect(
+      (yield* raw("POST", "/api/session", {
+        headers: { origin: own },
+        json: { token: "x".repeat(2000) },
+      })).status
+    ).toBe(400);
+    // A chunked body within the limit still signs in.
+    const streamedSignIn = yield* raw("POST", "/api/session", {
+      headers: { origin: own },
+      json: { token: apiToken },
+      streamed: true,
+    });
+    expect(streamedSignIn.status).toBe(204);
+
     const ok = yield* raw("POST", "/api/session", {
       headers: { origin: own },
       json: { token: apiToken },
@@ -342,16 +375,35 @@ test(
     expect(json).not.toContain("/_dev/target");
     expect(json).not.toContain(`shown=${secret}`);
     expect(json).not.toContain(shown.id);
+    expect(json).not.toContain(hidden.id);
     for (const item of status.monitors) {
       expect(Object.keys(item).toSorted()).toEqual([
         "days",
         "downSince",
         "lastCheckedAt",
         "name",
+        "ref",
         "status",
         "uptimePercent",
       ]);
+      // The ref is opaque: a short hash, never the id.
+      expect(item.ref).toMatch(/^[0-9a-f]{16}$/u);
+      for (const day of item.days) {
+        expect(Object.keys(day).toSorted()).toEqual([
+          "counted",
+          "day",
+          "partial",
+          "up",
+          "uptimePercent",
+        ]);
+      }
     }
+    // Refs are stable across requests and unique per monitor.
+    const refs = status.monitors.map((monitor) => monitor.ref);
+    expect(new Set(refs).size).toBe(refs.length);
+    expect(
+      (yield* publicStatus).monitors.map((monitor) => monitor.ref)
+    ).toEqual(refs);
 
     for (const monitor of [shown, hidden]) {
       expect(

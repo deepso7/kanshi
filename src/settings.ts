@@ -4,10 +4,12 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 
+import { maxSignInTokenLength } from "./api/spec.ts";
+
 /**
  * The Worker's settings, read from its config (bound at deploy time):
  * - `KANSHI_API_TOKEN` bearer token for `/api` and dashboard password
- *   (required, not empty)
+ *   (required, not empty, at most 1024 characters: the sign-in limit)
  * - `KANSHI_DEV_MODE` set by the stack for the dev stage run locally
  * - `KANSHI_MONITOR_QUOTA` maximum number of monitors (default 100)
  */
@@ -26,6 +28,13 @@ export class KanshiSettings extends Context.Service<
       if (Redacted.value(apiToken).trim().length === 0) {
         return yield* Effect.die(
           new Error("KANSHI_API_TOKEN must not be empty")
+        );
+      }
+      if (Redacted.value(apiToken).trim().length > maxSignInTokenLength) {
+        return yield* Effect.die(
+          new Error(
+            `KANSHI_API_TOKEN must be at most ${maxSignInTokenLength} characters`
+          )
         );
       }
       const devMode = yield* Config.Boolean("KANSHI_DEV_MODE").pipe(

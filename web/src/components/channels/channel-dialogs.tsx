@@ -630,45 +630,42 @@ export interface DeleteChannelDialogProps {
 
 const DeleteChannelBody = ({
   channel,
-  onDone,
+  error,
+  onDelete,
+  pending,
 }: {
   readonly channel: ChannelView;
-  readonly onDone: () => void;
-}) => {
-  const remove = useToastMutation(deleteChannelMutation, {
-    error: false,
-    success: () => `Deleted ${channel.name}`,
-  });
-  return (
-    <>
-      <AlertDialogHeader>
-        <AlertDialogTitle>Delete channel</AlertDialogTitle>
-        <AlertDialogDescription>
-          Delete <strong>{channel.name}</strong>? Monitors that list this
-          channel will stop alerting through it; monitors that alert every
-          channel keep alerting the others. This cannot be undone.
-        </AlertDialogDescription>
-      </AlertDialogHeader>
-      {channel.managed ? <ManagedNote action="delete" /> : null}
-      {remove.error === null ? null : (
-        <Callout tone="danger">{describeError(remove.error).message}</Callout>
-      )}
-      <AlertDialogFooter>
-        <AlertDialogCancel disabled={remove.isPending} />
-        <AlertDialogAction
-          disabled={remove.isPending}
-          onClick={() =>
-            remove.mutate(channel.id, { onSuccess: () => onDone() })
-          }
-        >
-          {remove.isPending ? "Deleting…" : "Delete channel"}
-        </AlertDialogAction>
-      </AlertDialogFooter>
-    </>
-  );
-};
+  readonly error: Error | null;
+  readonly onDelete: () => void;
+  readonly pending: boolean;
+}) => (
+  <>
+    <AlertDialogHeader>
+      <AlertDialogTitle>Delete channel</AlertDialogTitle>
+      <AlertDialogDescription>
+        Delete <strong>{channel.name}</strong>? Monitors that list this channel
+        will stop alerting through it; monitors that alert every channel keep
+        alerting the others. This cannot be undone.
+      </AlertDialogDescription>
+    </AlertDialogHeader>
+    {channel.managed ? <ManagedNote action="delete" /> : null}
+    {error === null ? null : (
+      <Callout tone="danger">{describeError(error).message}</Callout>
+    )}
+    <AlertDialogFooter>
+      <AlertDialogCancel disabled={pending} />
+      <AlertDialogAction disabled={pending} onClick={onDelete}>
+        {pending ? "Deleting…" : "Delete channel"}
+      </AlertDialogAction>
+    </AlertDialogFooter>
+  </>
+);
 
-/** Confirm, then delete; a failure stays in the dialog. */
+/**
+ * Confirm, then delete; a failure stays in the dialog. While the request
+ * is pending the dialog cannot be dismissed (Escape, outside click), so
+ * its outcome is always seen.
+ */
 export const DeleteChannelDialog = ({
   channel,
   onClose,
@@ -677,10 +674,16 @@ export const DeleteChannelDialog = ({
   if (channel !== null && channel !== shown) {
     setShown(channel);
   }
+  const remove = useToastMutation(deleteChannelMutation, {
+    error: false,
+    success: () => `Deleted ${shown?.name ?? "the channel"}`,
+  });
   return (
     <AlertDialog
       onOpenChange={(open) => {
-        if (!open) {
+        if (!open && !remove.isPending) {
+          // The next channel starts without this one's error.
+          remove.reset();
           onClose();
         }
       }}
@@ -688,7 +691,20 @@ export const DeleteChannelDialog = ({
     >
       <AlertDialogContent>
         {shown === null ? null : (
-          <DeleteChannelBody channel={shown} key={shown.id} onDone={onClose} />
+          <DeleteChannelBody
+            channel={shown}
+            error={remove.error}
+            key={shown.id}
+            onDelete={() =>
+              remove.mutate(shown.id, {
+                onSuccess: () => {
+                  remove.reset();
+                  onClose();
+                },
+              })
+            }
+            pending={remove.isPending}
+          />
         )}
       </AlertDialogContent>
     </AlertDialog>

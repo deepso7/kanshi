@@ -200,6 +200,8 @@ export const setup = (stage: string) => {
       readonly headers?: Readonly<Record<string, string>>;
       /** A JSON body (instead of `form`). */
       readonly json?: Schema.Json;
+      /** Send the body as a stream: chunked, without a `content-length`. */
+      readonly streamed?: boolean;
     } = {}
   ) {
     const { url } = yield* stack;
@@ -217,7 +219,11 @@ export const setup = (stage: string) => {
     }
     const response = yield* Effect.promise(() =>
       fetch(`${url}${path}`, {
-        body,
+        body:
+          options.streamed === true && body !== undefined
+            ? new Blob([body]).stream()
+            : body,
+        duplex: "half",
         headers,
         method,
         redirect: "manual",

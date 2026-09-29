@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 
+import { uptimeOfLastDays, uptimePercent } from "../../src/domain/history.ts";
 import type { EnabledPeriod, Sample } from "../../src/monitor/history.ts";
 import {
   addDays,
@@ -19,7 +20,6 @@ import {
   reportDays,
   rollupDay,
   uptimeDay,
-  uptimePercent,
   uptimeReport,
 } from "../../src/monitor/history.ts";
 
@@ -241,6 +241,19 @@ describe("rollups", () => {
     assert.isFalse(report.days[0]?.live);
     assert.isTrue(report.days[1]?.live);
     assert.strictEqual(uptimeReport([]).uptimePercent, null);
+  });
+
+  it("uptime over the last days shown matches their samples", () => {
+    const days = [
+      { counted: 100, up: 0 },
+      { counted: 100, up: 100 },
+      { counted: 300, up: 297 },
+    ];
+    // All three: 397 of 500.
+    assert.strictEqual(uptimeOfLastDays(days, 90), 79.4);
+    // The last two only: 397 of 400.
+    assert.strictEqual(uptimeOfLastDays(days, 2), 99.25);
+    assert.isNull(uptimeOfLastDays([{ counted: 0, up: 0 }], 1));
   });
 
   it("report days end today and start no earlier than creation", () => {

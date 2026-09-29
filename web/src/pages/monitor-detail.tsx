@@ -18,6 +18,7 @@ import type {
   RecentActivity,
   UptimeReport,
 } from "../../../src/domain/history.ts";
+import { uptimeOfLastDays } from "../../../src/domain/history.ts";
 import type { CheckErrorKind } from "../../../src/domain/monitor.ts";
 import { displayStatus } from "../../../src/domain/monitor.ts";
 import {
@@ -1101,11 +1102,16 @@ const UptimeCard = ({
 }: {
   readonly uptime: UseQueryResult<UptimeReport>;
 }) => {
-  const narrow = useNarrowScreen();
+  const count = useNarrowScreen() ? narrowUptimeDays : uptimeDays;
+  // Over the days the bars show, so the number matches them.
+  const percent =
+    uptime.data === undefined
+      ? null
+      : uptimeOfLastDays(uptime.data.days, count);
   return (
     <Card>
       <CardHeader>
-        <CardTitle heading="h2">Uptime · 90 days</CardTitle>
+        <CardTitle heading="h2">Uptime · {count} days</CardTitle>
         <CardDescription>
           One bar per UTC day; hover a bar for its uptime.
         </CardDescription>
@@ -1113,11 +1119,10 @@ const UptimeCard = ({
           <span
             {...stylex.props(
               styles.percent,
-              uptimeTone(uptime.data?.uptimePercent) === "danger" &&
-                styles.textDanger
+              uptimeTone(percent) === "danger" && styles.textDanger
             )}
           >
-            {formatPercent(uptime.data?.uptimePercent ?? null)}
+            {formatPercent(percent)}
           </span>
         </CardAction>
       </CardHeader>
@@ -1125,9 +1130,9 @@ const UptimeCard = ({
         <QueryView query={uptime}>
           {(report) => (
             <UptimeBars
-              count={narrow ? narrowUptimeDays : uptimeDays}
+              count={count}
               days={report.days}
-              label={`Uptime over 90 days: ${formatPercent(report.uptimePercent)}`}
+              label={`Uptime over ${count} days: ${formatPercent(uptimeOfLastDays(report.days, count))}`}
             />
           )}
         </QueryView>

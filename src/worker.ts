@@ -24,6 +24,7 @@ import { PublicHandlers } from "./api/public.ts";
 import { SessionHandlers } from "./api/session.ts";
 import { KanshiApi } from "./api/spec.ts";
 import { DevRoutes, isLoopbackHost } from "./dev/routes.ts";
+import { guardBody } from "./http/body-limit.ts";
 import { localRunWorkerFirst, runWorkerFirst } from "./http/worker-paths.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
@@ -150,7 +151,9 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
             const request = yield* HttpServerRequest.HttpServerRequest;
             const { pathname } = new URL(request.url, "http://internal");
             if (pathname === "/api" || pathname.startsWith("/api/")) {
-              return yield* apiOr404;
+              // Bodies read without auth are capped (and Origin-checked)
+              // before the API decodes them.
+              return yield* guardBody(request, pathname, apiOr404);
             }
             // Dev fixtures are unauthenticated: local dev only, and only for
             // requests addressed to a loopback host.

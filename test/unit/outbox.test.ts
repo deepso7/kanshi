@@ -358,18 +358,73 @@ describe("alarm computation with alert work", () => {
   });
 });
 
+const label = (entry: OutboxEntry) => `${entry.incidentId}@${entry.channelId}`;
+
 describe("delivery per alarm run", () => {
-  it("groups rows per incident and channel, keeping their order", () => {
+  it("groups rows per channel across incidents, keeping their order", () => {
     const down1 = row({ event: "down" });
     const down2 = row({ channelId: "c2", event: "down" });
     const up1 = row({ createdAt: t0 + 5, event: "up" });
-    const other = row({ event: "down", incidentId: "inc2" });
+    const other = row({
+      createdAt: t0 + 10,
+      event: "down",
+      incidentId: "inc2",
+    });
     assert.deepStrictEqual(deliveryGroups([down1, down2, up1, other]), [
-      [down1, up1],
+      [down1, up1, other],
       [down2],
-      [other],
     ]);
   });
+
+  it.effect(
+    "sends one channel's alerts in incident order, other channels alongside",
+    () =>
+      Effect.gen(function* channelOrderTest() {
+        // inc1 already recovered ("was down, recovered"); inc2 is newer and
+        // open ("is down"). Both are due for c1 in the same run; inc1's
+        // send is slow, so running them side by side would land inc2 first.
+        const older = row({ event: "down", incidentId: "inc1" });
+        const newer = row({
+          createdAt: t0 + 60_000,
+          event: "down",
+          incidentId: "inc2",
+        });
+        const elsewhere = row({
+          channelId: "c2",
+          createdAt: t0 + 60_000,
+          event: "down",
+          incidentId: "inc2",
+        });
+        const slowness = new Map([
+          [older, "10 seconds"],
+          [newer, "1 second"],
+          [elsewhere, "1 second"],
+        ] as const);
+        const events: string[] = [];
+        const fiber = yield* deliverDue(
+          dueOutbox([newer, elsewhere, older], t0 + 60_000),
+          (entry) =>
+            Effect.gen(function* timedAttempt() {
+              events.push(`start ${label(entry)}`);
+              yield* Effect.sleep(slowness.get(entry) ?? "1 second");
+              events.push(`done ${label(entry)}`);
+            }),
+          { budgetMs: 60_000, concurrency: 5, rowsPerRun: 25 }
+        ).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("1 minute");
+        const attempted = yield* Fiber.join(fiber);
+        assert.deepStrictEqual(events, [
+          "start inc1@c1",
+          "start inc2@c2",
+          "done inc2@c2",
+          "done inc1@c1",
+          "start inc2@c1",
+          "done inc2@c1",
+        ]);
+        assert.deepStrictEqual(attempted, [older, elsewhere, newer]);
+      })
+  );
 
   it.effect(
     "bounds concurrency and stops starting attempts after the budget",

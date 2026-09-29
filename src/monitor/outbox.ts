@@ -278,7 +278,7 @@ export const deferred = (
 export interface DeliveryLimits {
   /** Stop starting attempts after this long; in-flight ones finish. */
   readonly budgetMs: number;
-  /** Attempts in flight at once. */
+  /** Attempts in flight at once (at most one per channel). */
   readonly concurrency: number;
   readonly rowsPerRun: number;
 }
@@ -290,18 +290,21 @@ export const deliveryLimits: DeliveryLimits = {
 };
 
 /**
- * Due rows grouped per (incident, channel), each group and the groups in
- * `due` order. A group's rows run one after another (an `up` row reads
- * the outcome of its `down` row); different groups can run concurrently.
+ * Due rows grouped per channel, each group and the groups in `due` order
+ * (oldest first, across incidents). A group's rows run one after another,
+ * so a channel hears about incidents in the order they happened (an older
+ * incident's "was down, recovered" never lands after a newer "is down"),
+ * and an `up` row reads the outcome of its `down` row. Different channels
+ * run concurrently.
  */
 export const deliveryGroups = (
   due: readonly OutboxEntry[]
 ): readonly (readonly OutboxEntry[])[] => {
   const groups = new Map<string, OutboxEntry[]>();
   for (const entry of due) {
-    const group = groups.get(key(entry));
+    const group = groups.get(entry.channelId);
     if (group === undefined) {
-      groups.set(key(entry), [entry]);
+      groups.set(entry.channelId, [entry]);
     } else {
       group.push(entry);
     }
@@ -310,8 +313,9 @@ export const deliveryGroups = (
 };
 
 /**
- * Attempt up to `rowsPerRun` of the due rows with bounded concurrency,
- * starting no attempt once `budgetMs` has passed. `attempt` must not fail
+ * Attempt up to `rowsPerRun` of the due rows, one channel's rows in
+ * order and channels with bounded concurrency, starting no attempt once
+ * `budgetMs` has passed. `attempt` must not fail
  * (it records its own outcome). Returns the rows attempted.
  */
 export const deliverDue = <R>(

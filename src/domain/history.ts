@@ -53,6 +53,26 @@ export const UptimeDay = Schema.Struct({
 });
 export type UptimeDay = typeof UptimeDay.Type;
 
+/** Up share in percent (three decimals); null without samples. */
+export const uptimePercent = (up: number, counted: number): number | null =>
+  counted === 0 ? null : Math.round((up / counted) * 100_000) / 1000;
+
+/**
+ * Uptime over the last `count` of `days` (oldest first), weighted by
+ * samples like a report's overall uptime: what bars showing those days
+ * add up to.
+ */
+export const uptimeOfLastDays = (
+  days: readonly Pick<DailyRollup, "counted" | "up">[],
+  count: number
+): number | null => {
+  const shown = days.slice(-count);
+  return uptimePercent(
+    shown.reduce((sum, day) => sum + day.up, 0),
+    shown.reduce((sum, day) => sum + day.counted, 0)
+  );
+};
+
 export const UptimeReport = Schema.Struct({
   counted: Schema.Number,
   /** Oldest first, today last. */

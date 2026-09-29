@@ -320,13 +320,22 @@ const publicGroup = HttpApiGroup.make("public")
 export const SessionState = Schema.Struct({ signedIn: Schema.Boolean });
 export type SessionState = typeof SessionState.Type;
 
-/** `POST /api/session`: sign in with the API token. */
-export const SignIn = Schema.Struct({ token: Schema.String });
+/** The longest token `POST /api/session` accepts. */
+export const maxSignInTokenLength = 1024;
+
+/**
+ * `POST /api/session`: sign in with the API token. The body is capped
+ * (`src/http/body-limit.ts`) before it is decoded.
+ */
+export const SignIn = Schema.Struct({
+  token: Schema.String.check(Schema.isMaxLength(maxSignInTokenLength)),
+});
 export type SignIn = typeof SignIn.Type;
 
 /**
  * The dashboard session cookie, for the SPA. No `ApiAuth`: signing in and
- * out are Origin-checked (403 otherwise); a wrong token is a 401.
+ * out are Origin-checked (403 otherwise); a wrong token is a 401, a sign-in
+ * body over 4 KB a 413.
  */
 const sessionGroup = HttpApiGroup.make("session")
   .add(
