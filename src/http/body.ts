@@ -1,3 +1,5 @@
+import * as Data from "effect/Data";
+
 /** Dashboard forms are a handful of short fields; anything bigger is refused. */
 export const maxFormBytes = 64 * 1024;
 
@@ -45,9 +47,14 @@ export const discardBody = async (
   }
 };
 
-export type FormBody =
-  | { readonly _tag: "Form"; readonly fields: [string, string][] }
-  | { readonly _tag: "TooLarge" };
+/** A parsed form body, or the note that it was over the limit. */
+export type FormBody = Data.TaggedEnum<{
+  Form: { readonly fields: [string, string][] };
+  TooLarge: Record<never, never>;
+}>;
+
+/** Constructors (`FormBody.Form`, `FormBody.TooLarge`), `$is` and `$match`. */
+export const FormBody = Data.taggedEnum<FormBody>();
 
 /**
  * Parse an `application/x-www-form-urlencoded` body of at most `limit`
@@ -60,12 +67,12 @@ export const readFormBody = async (
 ): Promise<FormBody> => {
   const { body } = request;
   if (body === null) {
-    return { _tag: "Form", fields: [] };
+    return FormBody.Form({ fields: [] });
   }
   const declared = declaredLength(request.headers);
   if (declared !== null && declared > limit) {
     await discardBody(body);
-    return { _tag: "TooLarge" };
+    return FormBody.TooLarge();
   }
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -83,10 +90,10 @@ export const readFormBody = async (
     if (size > limit) {
       reader.releaseLock();
       await discardBody(body);
-      return { _tag: "TooLarge" };
+      return FormBody.TooLarge();
     }
   } catch {
-    return { _tag: "Form", fields: [] };
+    return FormBody.Form({ fields: [] });
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -95,5 +102,5 @@ export const readFormBody = async (
     offset += chunk.byteLength;
   }
   const text = new TextDecoder().decode(bytes);
-  return { _tag: "Form", fields: [...new URLSearchParams(text)] };
+  return FormBody.Form({ fields: [...new URLSearchParams(text)] });
 };

@@ -42,6 +42,8 @@ const loadConfig = (file: string) =>
       new SyncError({
         message: `cannot load ${file}: ${cause instanceof Error ? cause.message : String(cause)}`,
       }),
+    // SAFETY: a dynamic import resolves to the module namespace object;
+    // `default` stays `unknown` and is decoded with KanshiConfig below.
     try: () =>
       import(pathToFileURL(path.resolve(file)).href) as Promise<{
         readonly default?: unknown;

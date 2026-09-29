@@ -1,5 +1,7 @@
 import type { RuntimeContext } from "alchemy";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type * as HttpBody from "effect/unstable/http/HttpBody";
 import type * as HttpServerError from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -7,9 +9,8 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import { isLoopback } from "../domain/url.ts";
 import { matchPattern } from "../http/route.ts";
-import type { Monitor } from "../monitor/monitor.ts";
-import type { Registry } from "../registry/registry.ts";
-import { registryName } from "../registry/registry.ts";
+import { Monitor } from "../monitor/monitor.ts";
+import { Registry, registryName } from "../registry/registry.ts";
 import { runWatchdog } from "../watchdog/run.ts";
 
 export interface DevDeps {
@@ -291,3 +292,19 @@ export const makeDevRoutes = (deps: DevDeps) => {
     return HttpServerResponse.empty({ status: 404 });
   });
 };
+
+/** The `/_dev/*` routes, built from the Worker's context. */
+export class DevRoutes extends Context.Service<
+  DevRoutes,
+  ReturnType<typeof makeDevRoutes>
+>()("kanshi/dev/DevRoutes") {
+  static readonly layer = Layer.effect(
+    DevRoutes,
+    Effect.gen(function* DevRoutesLayer() {
+      return makeDevRoutes({
+        monitors: yield* Monitor,
+        registries: yield* Registry,
+      });
+    })
+  );
+}

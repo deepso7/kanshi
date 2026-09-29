@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
-import type { MonitorService } from "../service/monitors.ts";
+import { MonitorService } from "../service/monitors.ts";
 import {
   KanshiApi,
   defaultChecksLimit,
@@ -18,9 +18,13 @@ export const devConfigureDelayHeader = "x-kanshi-dev-configure-delay";
  */
 export const devSkipActivateHeader = "x-kanshi-dev-skip-activate";
 
-export const makeMonitorsHandlers = (service: MonitorService) =>
-  HttpApiBuilder.group(KanshiApi, "monitors", (handlers) =>
-    handlers
+/** The `monitors` group, over the contextual {@link MonitorService}. */
+export const MonitorsHandlers = HttpApiBuilder.group(
+  KanshiApi,
+  "monitors",
+  Effect.fnUntraced(function* monitorsHandlers(handlers) {
+    const service = yield* MonitorService;
+    return handlers
       .handle("list", () =>
         service
           .list()
@@ -50,5 +54,6 @@ export const makeMonitorsHandlers = (service: MonitorService) =>
       )
       .handle("incidents", ({ params, query }) =>
         service.incidents(params.id, query.limit ?? defaultIncidentsLimit)
-      )
-  );
+      );
+  })
+);

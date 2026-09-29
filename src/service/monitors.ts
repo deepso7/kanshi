@@ -1,4 +1,6 @@
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 
 import { BadRequest, Conflict, NotFound, Unavailable } from "../api/spec.ts";
@@ -12,9 +14,11 @@ import type { ChannelSelection, MonitorSnapshot } from "../domain/monitor.ts";
 import { summaryOf } from "../domain/monitor.ts";
 import { initialState } from "../monitor/cycle.ts";
 import { recentBuckets, recentWindowMs } from "../monitor/history.ts";
-import type { ChecksQuery, Monitor } from "../monitor/monitor.ts";
-import type { Registry, RegistryEntry } from "../registry/registry.ts";
-import { registryName } from "../registry/registry.ts";
+import { Monitor } from "../monitor/monitor.ts";
+import type { ChecksQuery } from "../monitor/monitor.ts";
+import type { RegistryEntry } from "../registry/registry.ts";
+import { Registry, registryName } from "../registry/registry.ts";
+import { KanshiSettings } from "../settings.ts";
 
 export interface MonitorServiceDeps {
   readonly devMode: boolean;
@@ -367,4 +371,21 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
   };
 };
 
-export type MonitorService = ReturnType<typeof makeMonitorService>;
+/** The monitor operations as a service, built from the Worker's context. */
+export class MonitorService extends Context.Service<
+  MonitorService,
+  ReturnType<typeof makeMonitorService>
+>()("kanshi/service/MonitorService") {
+  static readonly layer = Layer.effect(
+    MonitorService,
+    Effect.gen(function* MonitorServiceLayer() {
+      const { devMode, quota } = yield* KanshiSettings;
+      return makeMonitorService({
+        devMode,
+        monitors: yield* Monitor,
+        quota,
+        registries: yield* Registry,
+      });
+    })
+  );
+}

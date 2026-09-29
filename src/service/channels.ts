@@ -1,4 +1,6 @@
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 
 import { deliver } from "../alerts/delivery.ts";
@@ -10,8 +12,9 @@ import type {
   ChannelPatchInput,
 } from "../domain/channel.ts";
 import { checkChannelUrl, hashUrl } from "../domain/channel.ts";
-import type { ChannelRecordPatch, Registry } from "../registry/registry.ts";
-import { registryName } from "../registry/registry.ts";
+import type { ChannelRecordPatch } from "../registry/registry.ts";
+import { Registry, registryName } from "../registry/registry.ts";
+import { KanshiSettings } from "../settings.ts";
 
 export interface ChannelServiceDeps {
   readonly devMode: boolean;
@@ -118,4 +121,16 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
   };
 };
 
-export type ChannelService = ReturnType<typeof makeChannelService>;
+/** The alert channel operations as a service, built from the Worker's context. */
+export class ChannelService extends Context.Service<
+  ChannelService,
+  ReturnType<typeof makeChannelService>
+>()("kanshi/service/ChannelService") {
+  static readonly layer = Layer.effect(
+    ChannelService,
+    Effect.gen(function* ChannelServiceLayer() {
+      const { devMode } = yield* KanshiSettings;
+      return makeChannelService({ devMode, registries: yield* Registry });
+    })
+  );
+}

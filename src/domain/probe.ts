@@ -1,5 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
 
 import { matchesExpectedStatus } from "./expected-status.ts";
 import type { CheckErrorKind, MonitorMethod, ProbeOutcome } from "./monitor.ts";
@@ -19,25 +21,25 @@ export interface ProbeRequest {
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
-const errorText = (error: unknown, depth = 0): string => {
+const errorText = (cause: unknown, depth = 0): string => {
   if (depth >= 5) {
     return "";
   }
-  if (error instanceof Error) {
-    return `${error.name} ${error.message} ${errorText(error.cause, depth + 1)}`;
+  if (cause instanceof Error) {
+    return `${cause.name} ${cause.message} ${errorText(cause.cause, depth + 1)}`;
   }
-  return typeof error === "string" ? error : "";
+  return Predicate.isString(cause) ? cause : "";
 };
 
 /** Map a `fetch` rejection to a check error kind. */
 export const classifyFetchError = (
-  error: unknown,
+  cause: unknown,
   timedOut: boolean
 ): CheckErrorKind => {
   if (timedOut) {
     return "timeout";
   }
-  const text = errorText(error).toLowerCase();
+  const text = errorText(cause).toLowerCase();
   if (/timeout|timed out/u.test(text)) {
     return "timeout";
   }
@@ -53,8 +55,8 @@ export const classifyFetchError = (
   return "network";
 };
 
-const firstLine = (error: unknown): string =>
-  (error instanceof Error ? error.message : String(error))
+const firstLine = (cause: unknown): string =>
+  (cause instanceof Error ? cause.message : String(cause))
     .split("\n", 1)[0]
     ?.slice(0, 200) ?? "";
 
@@ -117,8 +119,8 @@ export const probe = Effect.fn("Probe.run")(function* probeEffect(
   const readBody = request.method === "GET" || request.bodyContains !== null;
 
   const attempt = Effect.tryPromise({
-    catch: (error) =>
-      failure(classifyFetchError(error, signal.aborted), firstLine(error)),
+    catch: (cause) =>
+      failure(classifyFetchError(cause, signal.aborted), firstLine(cause)),
     try: async () => {
       const startedAt = Date.now();
       const response = await fetchImpl(request.url, {
@@ -160,7 +162,7 @@ export const probe = Effect.fn("Probe.run")(function* probeEffect(
     Effect.result
   );
 
-  if (result._tag === "Failure") {
+  if (Result.isFailure(result)) {
     return result.failure;
   }
   const { body, status } = result.success;

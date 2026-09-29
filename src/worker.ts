@@ -3,7 +3,6 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as Redacted from "effect/Redacted";
 import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
@@ -12,17 +11,18 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { ApiAuthLive, credentialValidatorLayer } from "./api/auth.ts";
-import { makeChannelsHandlers } from "./api/channels.ts";
-import { makeMonitorsHandlers } from "./api/handlers.ts";
-import { makePublicHandlers } from "./api/public.ts";
+import { ChannelsHandlers } from "./api/channels.ts";
+import { MonitorsHandlers } from "./api/handlers.ts";
+import { PublicHandlers } from "./api/public.ts";
 import { KanshiApi } from "./api/spec.ts";
-import { isLoopbackHost, makeDevRoutes } from "./dev/routes.ts";
+import { DevRoutes, isLoopbackHost } from "./dev/routes.ts";
 import { Monitor, MonitorLive } from "./monitor/monitor.ts";
 import { Registry, RegistryLive } from "./registry/registry.ts";
-import { makeChannelService } from "./service/channels.ts";
-import { makeMonitorService } from "./service/monitors.ts";
-import { makeStatusService, workersHistoryCache } from "./service/status.ts";
-import { makeUiRoutes } from "./ui/routes.ts";
+import { ChannelService } from "./service/channels.ts";
+import { MonitorService } from "./service/monitors.ts";
+import { StatusService } from "./service/status.ts";
+import { KanshiSettings } from "./settings.ts";
+import { UiRoutes } from "./ui/routes.ts";
 import { runWatchdog } from "./watchdog/run.ts";
 
 /** The watchdog's Cron Trigger. */
@@ -40,15 +40,22 @@ const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
   platform: "web",
 });
 
+/** The services behind `/api` and the pages, built once per isolate. */
+const ServicesLive = Layer.mergeAll(UiRoutes.layer, DevRoutes.layer).pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      MonitorService.layer,
+      ChannelService.layer,
+      StatusService.layer
+    )
+  ),
+  Layer.provideMerge(KanshiSettings.layer)
+);
+
 /**
  * The single Kanshi Worker: the `/api` HttpApi, the watchdog cron and, in
  * the dev stage, the `/_dev/*` fixtures. It hosts the Monitor and Registry
- * Durable Objects.
- *
- * Config (read at deploy time and bound to the Worker):
- * - `KANSHI_API_TOKEN` bearer token for `/api` (required)
- * - `KANSHI_DEV_MODE` set by the stack for the dev stage run locally
- * - `KANSHI_MONITOR_QUOTA` maximum number of monitors (default 100)
+ * Durable Objects. Its config is read by {@link KanshiSettings}.
  */
 export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
   "Kanshi",
@@ -59,16 +66,7 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
     main: import.meta.url,
   },
   Effect.gen(function* KanshiInit() {
-    const apiToken = yield* Config.Redacted("KANSHI_API_TOKEN");
-    if (Redacted.value(apiToken).trim().length === 0) {
-      return yield* Effect.die(new Error("KANSHI_API_TOKEN must not be empty"));
-    }
-    const devMode = yield* Config.Boolean("KANSHI_DEV_MODE").pipe(
-      Config.withDefault(false)
-    );
-    const quota = yield* Config.Int("KANSHI_MONITOR_QUOTA").pipe(
-      Config.withDefault(100)
-    );
+    const { apiToken, devMode } = yield* KanshiSettings;
     const monitors = yield* Monitor;
     const registries = yield* Registry;
 
@@ -83,68 +81,54 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
       )
     );
 
-    const monitorService = makeMonitorService({
-      devMode,
-      monitors,
-      quota,
-      registries,
-    });
-    const channelService = makeChannelService({ devMode, registries });
-    const statusService = makeStatusService({
-      cache: workersHistoryCache(),
-      monitors,
-      registries,
-    });
-
+    const services = yield* Effect.context<
+      ChannelService | MonitorService | StatusService
+    >();
     const api = HttpApiBuilder.layer(KanshiApi).pipe(
-      Layer.provide([
-        makeMonitorsHandlers(monitorService),
-        makeChannelsHandlers(channelService),
-        makePublicHandlers(statusService),
-      ]),
+      Layer.provide([MonitorsHandlers, ChannelsHandlers, PublicHandlers]),
       Layer.provide(ApiAuthLive),
       Layer.provide(credentialValidatorLayer(apiToken)),
-      Layer.provide([Etag.layer, HttpPlatformStub, Path.layer]),
+      Layer.provide([
+        Etag.layer,
+        HttpPlatformStub,
+        Path.layer,
+        Layer.succeedContext(services),
+      ]),
       HttpRouter.toHttpEffect
     );
-    const dev = makeDevRoutes({ monitors, registries });
-    const ui = makeUiRoutes({
-      apiToken,
-      channels: channelService,
-      devMode,
-      monitors: monitorService,
-      registries,
-      status: statusService,
-    });
+    const dev = yield* DevRoutes;
+    const ui = yield* UiRoutes;
 
     return {
-      fetch: Effect.map(api, (apiHttp) => {
-        const apiOr404 = apiHttp.pipe(
-          Effect.catchIf(
-            (error) => error.reason._tag === "RouteNotFound",
-            () => Effect.succeed(HttpServerResponse.empty({ status: 404 }))
-          )
-        );
-        return Effect.gen(function* route() {
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          const { pathname } = new URL(request.url, "http://internal");
-          if (pathname === "/api" || pathname.startsWith("/api/")) {
-            return yield* apiOr404;
-          }
-          // Dev fixtures are unauthenticated: local dev only, and only for
-          // requests addressed to a loopback host.
-          if (
-            devMode &&
-            pathname.startsWith("/_dev/") &&
-            isLoopbackHost(request.headers.host)
-          ) {
-            return yield* dev;
-          }
-          return yield* ui;
-        });
-      }),
+      fetch: api.pipe(
+        Effect.map((apiHttp) => {
+          const apiOr404 = apiHttp.pipe(
+            Effect.catchReason("HttpServerError", "RouteNotFound", () =>
+              Effect.succeed(HttpServerResponse.empty({ status: 404 }))
+            )
+          );
+          return Effect.gen(function* route() {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const { pathname } = new URL(request.url, "http://internal");
+            if (pathname === "/api" || pathname.startsWith("/api/")) {
+              return yield* apiOr404;
+            }
+            // Dev fixtures are unauthenticated: local dev only, and only for
+            // requests addressed to a loopback host.
+            if (
+              devMode &&
+              pathname.startsWith("/_dev/") &&
+              isLoopbackHost(request.headers.host)
+            ) {
+              return yield* dev;
+            }
+            return yield* ui;
+          });
+        })
+      ),
     };
   }).pipe(
+    Effect.provide(ServicesLive),
     Effect.provide(Cloudflare.Workers.CronEventSourceLive),
     Effect.provide(MonitorLive.pipe(Layer.provideMerge(RegistryLive)))
   )

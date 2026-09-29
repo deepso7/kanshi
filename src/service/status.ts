@@ -1,4 +1,6 @@
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import type {
@@ -7,9 +9,9 @@ import type {
   PublicStatus,
 } from "../domain/public-status.ts";
 import { PublicDay, overallStatus } from "../domain/public-status.ts";
-import type { Monitor } from "../monitor/monitor.ts";
-import type { Registry, RegistryEntry } from "../registry/registry.ts";
-import { registryName } from "../registry/registry.ts";
+import { Monitor } from "../monitor/monitor.ts";
+import type { RegistryEntry } from "../registry/registry.ts";
+import { Registry, registryName } from "../registry/registry.ts";
 
 /** Days of history on the status page. */
 export const statusHistoryDays = 90;
@@ -171,4 +173,22 @@ export const makeStatusService = (deps: StatusDeps) => {
   return { publicStatus };
 };
 
-export type StatusService = ReturnType<typeof makeStatusService>;
+/**
+ * The public status as a service, built from the Worker's context, with
+ * the history cached in the Workers Cache API.
+ */
+export class StatusService extends Context.Service<
+  StatusService,
+  ReturnType<typeof makeStatusService>
+>()("kanshi/service/StatusService") {
+  static readonly layer = Layer.effect(
+    StatusService,
+    Effect.gen(function* StatusServiceLayer() {
+      return makeStatusService({
+        cache: workersHistoryCache(),
+        monitors: yield* Monitor,
+        registries: yield* Registry,
+      });
+    })
+  );
+}

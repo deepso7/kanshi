@@ -1,3 +1,6 @@
+import * as Data from "effect/Data";
+import * as Match from "effect/Match";
+
 import type { ChannelKind } from "../domain/channel.ts";
 
 export interface AlertMonitor {
@@ -24,6 +27,31 @@ export interface AlertEpisode {
   readonly startedAt: number;
 }
 
+/** The fields of an alert about a monitor's incident. */
+export interface IncidentAlert {
+  readonly idempotencyKey: string;
+  readonly incident: AlertIncident;
+  readonly monitor: AlertMonitor;
+  readonly sentAt: number;
+}
+
+/** The fields of an alert about a watchdog episode. */
+export interface EpisodeAlert {
+  readonly episode: AlertEpisode;
+  readonly idempotencyKey: string;
+  readonly monitor: AlertMonitor;
+  readonly sentAt: number;
+}
+
+/** The fields of a channel's test alert. */
+export interface TestAlert {
+  readonly channelName: string;
+  readonly idempotencyKey: string;
+  readonly sentAt: number;
+}
+
+export type IncidentMessageTag = "Down" | "DownRecovered" | "Recovered";
+
 export type WatchdogMessageTag =
   | "CheckedAgain"
   | "NotChecked"
@@ -36,27 +64,30 @@ export type WatchdogMessageTag =
  * `NotCheckedResolved` and `CheckedAgain` mirror `Down`, `DownRecovered`
  * and `Recovered` for a monitor that is not being checked at all.
  */
-export type AlertMessage =
-  | {
-      readonly _tag: "Down" | "DownRecovered" | "Recovered";
-      readonly idempotencyKey: string;
-      readonly incident: AlertIncident;
-      readonly monitor: AlertMonitor;
-      readonly sentAt: number;
-    }
-  | {
-      readonly _tag: WatchdogMessageTag;
-      readonly episode: AlertEpisode;
-      readonly idempotencyKey: string;
-      readonly monitor: AlertMonitor;
-      readonly sentAt: number;
-    }
-  | {
-      readonly _tag: "Test";
-      readonly channelName: string;
-      readonly idempotencyKey: string;
-      readonly sentAt: number;
-    };
+export type AlertMessage = Data.TaggedEnum<{
+  CheckedAgain: EpisodeAlert;
+  Down: IncidentAlert;
+  DownRecovered: IncidentAlert;
+  NotChecked: EpisodeAlert;
+  NotCheckedResolved: EpisodeAlert;
+  Recovered: IncidentAlert;
+  Test: TestAlert;
+}>;
+
+/** Constructors per variant (`AlertMessage.Down`, ...), `$is` and `$match`. */
+export const AlertMessage = Data.taggedEnum<AlertMessage>();
+
+/** An incident alert whose variant is only known at runtime. */
+export const incidentMessage = (
+  tag: IncidentMessageTag,
+  alert: IncidentAlert
+): AlertMessage => AlertMessage[tag](alert);
+
+/** A watchdog alert whose variant is only known at runtime. */
+export const watchdogMessage = (
+  tag: WatchdogMessageTag,
+  alert: EpisodeAlert
+): AlertMessage => AlertMessage[tag](alert);
 
 /** The outbox id of an alert, also its `Idempotency-Key`. */
 export const idempotencyKey = (
@@ -102,158 +133,142 @@ export interface AlertText {
 }
 
 /** The human-readable alert, shared by every channel kind. */
-export const alertText = (message: AlertMessage): AlertText => {
-  switch (message._tag) {
-    case "Down": {
+export const alertText = (message: AlertMessage): AlertText =>
+  AlertMessage.$match(message, {
+    CheckedAgain: (alert) => {
+      const duration = formatDuration(uncheckedMs(alert.episode, alert.sentAt));
       return {
-        body: `${message.incident.cause}\n${message.monitor.url}`,
-        title: `${message.monitor.name} is down`,
+        body: alert.monitor.url,
+        title: `monitor ${alert.monitor.name} is being checked again after ${duration}`,
       };
-    }
-    case "DownRecovered": {
-      const duration = formatDuration(
-        outageMs(message.incident, message.sentAt)
-      );
+    },
+    Down: (alert) => ({
+      body: `${alert.incident.cause}\n${alert.monitor.url}`,
+      title: `${alert.monitor.name} is down`,
+    }),
+    DownRecovered: (alert) => {
+      const duration = formatDuration(outageMs(alert.incident, alert.sentAt));
       return {
-        body: `Cause: ${message.incident.cause}\n${message.monitor.url}`,
-        title: `${message.monitor.name} was down for ${duration}, recovered`,
+        body: `Cause: ${alert.incident.cause}\n${alert.monitor.url}`,
+        title: `${alert.monitor.name} was down for ${duration}, recovered`,
       };
-    }
-    case "Recovered": {
-      const duration = formatDuration(
-        outageMs(message.incident, message.sentAt)
-      );
-      return {
-        body: message.monitor.url,
-        title: `${message.monitor.name} is up again after ${duration}`,
-      };
-    }
-    case "NotChecked": {
+    },
+    NotChecked: (alert) => {
       const last =
-        message.episode.lastCheckedAt === null
+        alert.episode.lastCheckedAt === null
           ? "never"
-          : `${formatDuration(message.sentAt - message.episode.lastCheckedAt)} ago`;
-      const every = formatDuration(message.episode.intervalSeconds * 1000);
+          : `${formatDuration(alert.sentAt - alert.episode.lastCheckedAt)} ago`;
+      const every = formatDuration(alert.episode.intervalSeconds * 1000);
       return {
-        body: `Last check: ${last} (expected every ${every})\n${message.monitor.url}`,
-        title: `monitor ${message.monitor.name} is not being checked`,
+        body: `Last check: ${last} (expected every ${every})\n${alert.monitor.url}`,
+        title: `monitor ${alert.monitor.name} is not being checked`,
       };
-    }
-    case "NotCheckedResolved": {
-      const duration = formatDuration(
-        uncheckedMs(message.episode, message.sentAt)
-      );
+    },
+    NotCheckedResolved: (alert) => {
+      const duration = formatDuration(uncheckedMs(alert.episode, alert.sentAt));
       return {
-        body: message.monitor.url,
-        title: `monitor ${message.monitor.name} was not checked for ${duration}, checks resumed`,
+        body: alert.monitor.url,
+        title: `monitor ${alert.monitor.name} was not checked for ${duration}, checks resumed`,
       };
-    }
-    case "CheckedAgain": {
-      const duration = formatDuration(
-        uncheckedMs(message.episode, message.sentAt)
-      );
+    },
+    Recovered: (alert) => {
+      const duration = formatDuration(outageMs(alert.incident, alert.sentAt));
       return {
-        body: message.monitor.url,
-        title: `monitor ${message.monitor.name} is being checked again after ${duration}`,
+        body: alert.monitor.url,
+        title: `${alert.monitor.name} is up again after ${duration}`,
       };
-    }
-    case "Test": {
-      return {
-        body: "If you can read this, alerts reach this channel.",
-        title: `Test alert for channel "${message.channelName}"`,
-      };
-    }
-    default: {
-      return message satisfies never;
-    }
-  }
-};
+    },
+    Test: (alert) => ({
+      body: "If you can read this, alerts reach this channel.",
+      title: `Test alert for channel "${alert.channelName}"`,
+    }),
+  });
 
 const plainText = (message: AlertMessage): string => {
   const text = alertText(message);
   return `Kanshi: ${text.title}\n${text.body}`;
 };
 
+const episodePayload = (
+  alert: EpisodeAlert,
+  text: AlertText,
+  checked: boolean
+) => ({
+  episode: {
+    ...alert.episode,
+    durationMs: uncheckedMs(alert.episode, alert.sentAt),
+  },
+  event: checked ? "checked" : "not_checked",
+  id: alert.idempotencyKey,
+  incident: null,
+  monitor: alert.monitor,
+  recovered: checked,
+  sentAt: alert.sentAt,
+  text: `${text.title}\n${text.body}`,
+  title: text.title,
+});
+
+const incidentPayload = (
+  alert: IncidentAlert,
+  text: AlertText,
+  event: "down" | "up",
+  recovered: boolean
+) => ({
+  event,
+  id: alert.idempotencyKey,
+  incident: {
+    ...alert.incident,
+    durationMs: outageMs(alert.incident, alert.sentAt),
+  },
+  monitor: alert.monitor,
+  recovered,
+  sentAt: alert.sentAt,
+  text: `${text.title}\n${text.body}`,
+  title: text.title,
+});
+
 /** The generic webhook JSON body. */
 export const webhookPayload = (message: AlertMessage) => {
   const text = alertText(message);
-  if (message._tag === "Test") {
-    return {
+  return AlertMessage.$match(message, {
+    CheckedAgain: (alert) => episodePayload(alert, text, true),
+    Down: (alert) => incidentPayload(alert, text, "down", false),
+    DownRecovered: (alert) => incidentPayload(alert, text, "down", true),
+    NotChecked: (alert) => episodePayload(alert, text, false),
+    NotCheckedResolved: (alert) => episodePayload(alert, text, true),
+    Recovered: (alert) => incidentPayload(alert, text, "up", true),
+    Test: (alert) => ({
       event: "test",
-      id: message.idempotencyKey,
+      id: alert.idempotencyKey,
       incident: null,
       monitor: null,
       recovered: false,
-      sentAt: message.sentAt,
+      sentAt: alert.sentAt,
       text: `${text.title}\n${text.body}`,
       title: text.title,
-    };
-  }
-  if ("episode" in message) {
-    return {
-      episode: {
-        ...message.episode,
-        durationMs: uncheckedMs(message.episode, message.sentAt),
-      },
-      event: message._tag === "NotChecked" ? "not_checked" : "checked",
-      id: message.idempotencyKey,
-      incident: null,
-      monitor: message.monitor,
-      recovered: message._tag !== "NotChecked",
-      sentAt: message.sentAt,
-      text: `${text.title}\n${text.body}`,
-      title: text.title,
-    };
-  }
-  return {
-    event: message._tag === "Recovered" ? "up" : "down",
-    id: message.idempotencyKey,
-    incident: {
-      ...message.incident,
-      durationMs: outageMs(message.incident, message.sentAt),
-    },
-    monitor: message.monitor,
-    recovered: message._tag !== "Down",
-    sentAt: message.sentAt,
-    text: `${text.title}\n${text.body}`,
-    title: text.title,
-  };
+    }),
+  });
 };
+
+export type WebhookPayload = ReturnType<typeof webhookPayload>;
 
 /** Discord rejects message content over 2000 characters. */
 const discordMaxLength = 2000;
 
-const ntfyPriority = (message: AlertMessage): string => {
-  switch (message._tag) {
-    case "Down":
-    case "NotChecked": {
-      return "high";
-    }
-    case "Test": {
-      return "low";
-    }
-    default: {
-      return "default";
-    }
-  }
-};
+const ntfyPriority = (message: AlertMessage): string =>
+  Match.value(message).pipe(
+    Match.tag("Down", "NotChecked", () => "high"),
+    Match.tag("Test", () => "low"),
+    Match.orElse(() => "default")
+  );
 
-const ntfyTags = (message: AlertMessage): string => {
-  switch (message._tag) {
-    case "Down": {
-      return "rotating_light";
-    }
-    case "NotChecked": {
-      return "warning";
-    }
-    case "Test": {
-      return "test_tube";
-    }
-    default: {
-      return "white_check_mark";
-    }
-  }
-};
+const ntfyTags = (message: AlertMessage): string =>
+  Match.value(message).pipe(
+    Match.tag("Down", () => "rotating_light"),
+    Match.tag("NotChecked", () => "warning"),
+    Match.tag("Test", () => "test_tube"),
+    Match.orElse(() => "white_check_mark")
+  );
 
 export interface AlertRequest {
   readonly body: string;
@@ -261,9 +276,18 @@ export interface AlertRequest {
   readonly url: string;
 }
 
+/** The JSON bodies sent to Slack, Discord and generic webhooks. */
+type JsonBody =
+  | { readonly text: string }
+  | {
+      readonly allowed_mentions: { readonly parse: readonly string[] };
+      readonly content: string;
+    }
+  | WebhookPayload;
+
 const json = (
   url: string,
-  body: unknown,
+  body: JsonBody,
   headers: Readonly<Record<string, string>> = {}
 ): AlertRequest => ({
   body: JSON.stringify(body),

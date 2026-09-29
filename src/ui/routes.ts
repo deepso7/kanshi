@@ -1,5 +1,7 @@
 import type { RuntimeContext } from "alchemy";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -16,11 +18,11 @@ import type {
 import type { FormBody } from "../http/body.ts";
 import { discardBody, maxFormBytes, readFormBody } from "../http/body.ts";
 import { matchPattern } from "../http/route.ts";
-import type { Registry } from "../registry/registry.ts";
-import { registryName } from "../registry/registry.ts";
-import type { ChannelService } from "../service/channels.ts";
-import type { MonitorService } from "../service/monitors.ts";
-import type { StatusService } from "../service/status.ts";
+import { Registry, registryName } from "../registry/registry.ts";
+import { ChannelService } from "../service/channels.ts";
+import { MonitorService } from "../service/monitors.ts";
+import { StatusService } from "../service/status.ts";
+import { KanshiSettings } from "../settings.ts";
 import type { FormFields } from "./forms.ts";
 import {
   channelCreateFromForm,
@@ -56,11 +58,11 @@ import { statusPage } from "./status-page.ts";
 
 export interface UiDeps {
   readonly apiToken: Redacted.Redacted<string>;
-  readonly channels: ChannelService;
+  readonly channels: ChannelService["Service"];
   readonly devMode: boolean;
-  readonly monitors: MonitorService;
+  readonly monitors: MonitorService["Service"];
   readonly registries: Effect.Success<typeof Registry>;
-  readonly status: StatusService;
+  readonly status: StatusService["Service"];
 }
 
 type ServiceError = BadRequest | Conflict | NotFound | Unavailable;
@@ -423,7 +425,7 @@ export const makeUiRoutes = (deps: UiDeps) => {
     (
       patch: (input: RouteInput) => {
         readonly done: string;
-        readonly patch: Parameters<MonitorService["update"]>[1];
+        readonly patch: Parameters<MonitorService["Service"]["update"]>[1];
       }
     ): Handler =>
     (input) => {
@@ -617,3 +619,24 @@ export const makeUiRoutes = (deps: UiDeps) => {
     )
   );
 };
+
+/** The dashboard and status page routes, built from the Worker's context. */
+export class UiRoutes extends Context.Service<
+  UiRoutes,
+  ReturnType<typeof makeUiRoutes>
+>()("kanshi/ui/UiRoutes") {
+  static readonly layer = Layer.effect(
+    UiRoutes,
+    Effect.gen(function* UiRoutesLayer() {
+      const { apiToken, devMode } = yield* KanshiSettings;
+      return makeUiRoutes({
+        apiToken,
+        channels: yield* ChannelService,
+        devMode,
+        monitors: yield* MonitorService,
+        registries: yield* Registry,
+        status: yield* StatusService,
+      });
+    })
+  );
+}

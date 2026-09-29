@@ -3,16 +3,19 @@ import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
-import type { StatusService } from "../service/status.ts";
+import { StatusService } from "../service/status.ts";
 import { KanshiApi } from "./spec.ts";
 
 /**
  * `GET /api/public/status`: never cached (it must drop a monitor made
  * private at once) and readable from any origin.
  */
-export const makePublicHandlers = (service: StatusService) =>
-  HttpApiBuilder.group(KanshiApi, "public", (handlers) =>
-    handlers.handle("status", () =>
+export const PublicHandlers = HttpApiBuilder.group(
+  KanshiApi,
+  "public",
+  Effect.fnUntraced(function* publicHandlers(handlers) {
+    const service = yield* StatusService;
+    return handlers.handle("status", () =>
       HttpEffect.appendPreResponseHandler((_request, response) =>
         Effect.succeed(
           HttpServerResponse.setHeaders(response, {
@@ -21,5 +24,6 @@ export const makePublicHandlers = (service: StatusService) =>
           })
         )
       ).pipe(Effect.andThen(service.publicStatus()))
-    )
-  );
+    );
+  })
+);

@@ -1,4 +1,6 @@
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 
 import type { FetchLike } from "../domain/probe.ts";
 import { readBounded } from "../domain/probe.ts";
@@ -41,18 +43,25 @@ export const classifyStatus = (status: number): StatusClass => {
   return "retry";
 };
 
-export type DeliveryResult =
-  | { readonly _tag: "Delivered"; readonly status: number }
-  | {
-      readonly _tag: "Failed";
-      readonly error: string;
-      /** Retrying cannot help (4xx other than 408/425/429). */
-      readonly permanent: boolean;
-      readonly status: number | null;
-    };
+/** The outcome of one delivery attempt. */
+export type DeliveryResult = Data.TaggedEnum<{
+  Delivered: { readonly status: number };
+  Failed: {
+    readonly error: string;
+    /** Retrying cannot help (4xx other than 408/425/429). */
+    readonly permanent: boolean;
+    readonly status: number | null;
+  };
+}>;
 
-const errorMessage = (error: unknown): string =>
-  (error instanceof Error ? error.message : String(error)).slice(0, 200);
+/**
+ * Constructors (`DeliveryResult.Delivered`, `DeliveryResult.Failed`),
+ * `$is` and `$match`.
+ */
+export const DeliveryResult = Data.taggedEnum<DeliveryResult>();
+
+const errorMessage = (cause: unknown): string =>
+  (cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
 
 /**
  * POST an alert once. Never fails: network errors and timeouts are
@@ -89,23 +98,21 @@ export const deliver = Effect.fn("Alerts.deliver")(function* deliverEffect(
     },
   }).pipe(Effect.result);
 
-  if (result._tag === "Failure") {
-    return {
-      _tag: "Failed",
+  if (Result.isFailure(result)) {
+    return DeliveryResult.Failed({
       error: result.failure,
       permanent: false,
       status: null,
-    } satisfies DeliveryResult as DeliveryResult;
+    });
   }
   const { status, text } = result.success;
   const kind = classifyStatus(status);
   if (kind === "delivered") {
-    return { _tag: "Delivered", status } satisfies DeliveryResult;
+    return DeliveryResult.Delivered({ status });
   }
-  return {
-    _tag: "Failed",
+  return DeliveryResult.Failed({
     error: `HTTP ${status}${text.length > 0 ? `: ${text}` : ""}`,
     permanent: kind === "permanent",
     status,
-  } satisfies DeliveryResult;
+  });
 });
