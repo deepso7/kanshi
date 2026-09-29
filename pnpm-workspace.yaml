@@ -37,6 +37,7 @@ minimumReleaseAgeExclude:
   - "@oxfmt/binding-win32-arm64-msvc@0.71.0"
   - "@oxfmt/binding-win32-ia32-msvc@0.71.0"
   - "@oxfmt/binding-win32-x64-msvc@0.71.0"
+  - "@oxlint/plugins@1.86.0"
   - "@oxlint/binding-android-arm-eabi@1.86.0"
   - "@oxlint/binding-android-arm64@1.86.0"
   - "@oxlint/binding-darwin-arm64@1.86.0"

@@ -10,6 +10,7 @@
     "@effect/language-service": "0.87.3",
     "@effect/platform-bun": "4.0.0-rc.117",
     "@effect/vitest": "4.0.0-rc.117",
+    "@oxlint/plugins": "1.86.0",
     "@total-typescript/ts-reset": "0.6.1",
     "@types/bun": "1.4.2",
     "@types/node": "26.6.3",
