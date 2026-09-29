@@ -7,6 +7,7 @@ import {
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  lazyRouteComponent,
 } from "@tanstack/react-router";
 
 import { HomePage } from "./pages/home.tsx";
@@ -38,7 +39,24 @@ const statusRoute = createRoute({
   path: "/status",
 });
 
-const routeTree = rootRoute.addChildren([homeRoute, statusRoute]);
+/**
+ * Dev only: the design-system showcase. The dynamic import sits behind
+ * `import.meta.env.DEV`, so production builds drop the page entirely.
+ */
+const devRoutes = import.meta.env.DEV
+  ? [
+      createRoute({
+        component: lazyRouteComponent(
+          () => import("./pages/ui-showcase.tsx"),
+          "UiShowcase"
+        ),
+        getParentRoute: () => rootRoute,
+        path: "/_ui",
+      }),
+    ]
+  : [];
+
+const routeTree = rootRoute.addChildren([homeRoute, statusRoute, ...devRoutes]);
 
 export const router = createRouter({
   context: { queryClient },
