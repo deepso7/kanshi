@@ -44,30 +44,30 @@ const expectedStatusField = (form: FormFields): number | string | undefined => {
 };
 
 /** Form labels for the API field names that appear in schema errors. */
-const fieldLabels: Readonly<Record<string, string>> = {
-  failureThreshold: "Down after N failures",
-  intervalSeconds: "Interval",
-  kind: "Kind",
-  name: "Name",
-  successThreshold: "Up after N successes",
-  timeoutMs: "Timeout (ms)",
-  url: "URL",
-};
+const fieldLabels = new Map([
+  ["failureThreshold", "Down after N failures"],
+  ["intervalSeconds", "Interval"],
+  ["kind", "Kind"],
+  ["name", "Name"],
+  ["successThreshold", "Up after N successes"],
+  ["timeoutMs", "Timeout (ms)"],
+  ["url", "URL"],
+]);
 
 /** `Expected number\n  at ["intervalSeconds"]` -> `Interval: expected number`. */
 export const schemaMessage = (error: Schema.SchemaError): string =>
   error.message.replaceAll(
     /(?<problem>[^\n]+)\n\s*at \["(?<field>[^"]+)"\]/gu,
-    (...args: readonly unknown[]) => {
-      const groups = args.at(-1) as { field: string; problem: string };
-      const label = fieldLabels[groups.field] ?? groups.field;
-      return `${label}: ${groups.problem.trim()}`;
-    }
+    (_match: string, problem: string, field: string) =>
+      `${fieldLabels.get(field) ?? field}: ${problem.trim()}`
   );
+
+/** A value a form field turns into, before decoding. */
+type FormValue = string | number | boolean | null | readonly string[];
 
 const decode = <S extends Schema.Top & { readonly DecodingServices: never }>(
   schema: S,
-  input: Record<string, unknown>
+  input: Readonly<Record<string, FormValue>>
 ): Result.Result<S["Type"], string> =>
   Schema.decodeUnknownResult(schema)(input).pipe(
     Result.mapError(schemaMessage)
@@ -95,9 +95,13 @@ const monitorFields = (form: FormFields) => {
   };
 };
 
-const withoutUndefined = (input: Record<string, unknown>) =>
+const withoutUndefined = (
+  input: Readonly<Record<string, FormValue | undefined>>
+) =>
   Object.fromEntries(
-    Object.entries(input).filter(([, value]) => value !== undefined)
+    Object.entries(input).filter(
+      (entry): entry is [string, FormValue] => entry[1] !== undefined
+    )
   );
 
 /** The form takes seconds; say so rather than the API's millisecond bounds. */

@@ -5,7 +5,7 @@ import { escapeHtml, html, raw, safeHref } from "../../src/ui/html.ts";
 import {
   clearedSessionCookie,
   isSameOrigin,
-  makeSession,
+  createSession,
   sessionCookie,
   sessionMaxAgeSeconds,
   verifySession,
@@ -13,7 +13,7 @@ import {
 
 const squash = (markup: string) => markup.replaceAll(/>\s+</gu, "><").trim();
 
-describe("html", () => {
+describe(html, () => {
   it("escapes interpolated values", () => {
     const name = `<script>alert("x")</script> & 'y'`;
     assert.strictEqual(
@@ -61,7 +61,7 @@ describe("sessions", () => {
 
   it.effect("verifies a session derived from the token", () =>
     Effect.gen(function* sessionTest() {
-      const value = yield* makeSession(token, now);
+      const value = yield* createSession(token, now);
       assert.match(value, /^\d+\.[\da-f]{64}$/u);
       assert.isTrue(yield* verifySession(token, value, now + 1000));
       // Surrounding whitespace in the token is ignored, like the bearer.
@@ -71,7 +71,7 @@ describe("sessions", () => {
 
   it.effect("rejects another token, expiry and tampering", () =>
     Effect.gen(function* rejectTest() {
-      const value = yield* makeSession(token, now);
+      const value = yield* createSession(token, now);
       // Rotating the token logs everyone out.
       assert.isFalse(yield* verifySession("rotated-token", value, now));
       const expiry = now + sessionMaxAgeSeconds * 1000;

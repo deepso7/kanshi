@@ -2,6 +2,8 @@
 // and what the API reports, and the plan's text. Only `managed` resources
 // are touched; a key that belongs to a resource created in the dashboard
 // is an error unless `adopt` is set.
+import * as Data from "effect/Data";
+
 import type { ChannelKind, ChannelView } from "../domain/channel.ts";
 import type { MonitorMethod } from "../domain/monitor.ts";
 
@@ -90,35 +92,33 @@ export type MonitorPatch = Partial<MonitorSettings> & {
 };
 
 /** One API call. Monitor `channels` are keys until applied. */
-export type Step =
-  | { readonly _tag: "CreateChannel"; readonly channel: DesiredChannel }
-  | {
-      readonly _tag: "UpdateChannel";
-      readonly changes: readonly string[];
-      readonly id: string;
-      readonly key: string;
-      readonly patch: ChannelPatch;
-    }
-  | { readonly _tag: "CreateMonitor"; readonly monitor: DesiredMonitor }
-  | {
-      readonly _tag: "UpdateMonitor";
-      readonly changes: readonly string[];
-      readonly id: string;
-      readonly key: string;
-      readonly patch: MonitorPatch;
-    }
-  | {
-      readonly _tag: "DeleteMonitor";
-      readonly id: string;
-      readonly key: string;
-      readonly name: string;
-    }
-  | {
-      readonly _tag: "DeleteChannel";
-      readonly id: string;
-      readonly key: string;
-      readonly name: string;
-    };
+export type Step = Data.TaggedEnum<{
+  CreateChannel: { readonly channel: DesiredChannel };
+  UpdateChannel: {
+    readonly changes: readonly string[];
+    readonly id: string;
+    readonly key: string;
+    readonly patch: ChannelPatch;
+  };
+  CreateMonitor: { readonly monitor: DesiredMonitor };
+  UpdateMonitor: {
+    readonly changes: readonly string[];
+    readonly id: string;
+    readonly key: string;
+    readonly patch: MonitorPatch;
+  };
+  DeleteMonitor: {
+    readonly id: string;
+    readonly key: string;
+    readonly name: string;
+  };
+  DeleteChannel: {
+    readonly id: string;
+    readonly key: string;
+    readonly name: string;
+  };
+}>;
+export const Step = Data.taggedEnum<Step>();
 
 /**
  * `steps` in the order they must run: channels are created and updated
@@ -174,7 +174,7 @@ const diffChannels = (
   for (const channel of desired.channels) {
     const found = existing.get(channel.key);
     if (found === undefined) {
-      upserts.push({ _tag: "CreateChannel", channel });
+      upserts.push(Step.CreateChannel({ channel }));
       continue;
     }
     if (!found.managed && !options.adopt) {
@@ -204,23 +204,20 @@ const diffChannels = (
       patch.url = channel.url;
     }
     if (changes.length > 0) {
-      upserts.push({
-        _tag: "UpdateChannel",
-        changes,
-        id: found.id,
-        key: channel.key,
-        patch,
-      });
+      upserts.push(
+        Step.UpdateChannel({ changes, id: found.id, key: channel.key, patch })
+      );
     }
   }
   const deletes: Step[] = current.channels
     .filter((channel) => channel.managed && !wanted.has(channel.key))
-    .map((channel) => ({
-      _tag: "DeleteChannel",
-      id: channel.id,
-      key: channel.key,
-      name: channel.name,
-    }));
+    .map((channel) =>
+      Step.DeleteChannel({
+        id: channel.id,
+        key: channel.key,
+        name: channel.name,
+      })
+    );
   return { deletes, upserts };
 };
 
@@ -263,7 +260,7 @@ const diffMonitors = (
     }
     const found = existing.get(monitor.key);
     if (found === undefined) {
-      upserts.push({ _tag: "CreateMonitor", monitor });
+      upserts.push(Step.CreateMonitor({ monitor }));
       continue;
     }
     if (!found.managed && !options.adopt) {
@@ -273,15 +270,20 @@ const diffMonitors = (
       continue;
     }
     const changes: string[] = [];
-    const patch: Record<string, unknown> = {};
+    const patch: {
+      -readonly [K in keyof MonitorPatch]: MonitorPatch[K];
+    } = {};
     if (!found.managed) {
       changes.push("managed");
       patch.managed = true;
     }
+    const copyField = <K extends keyof MonitorSettings>(field: K) => {
+      patch[field] = monitor[field];
+    };
     for (const field of monitorSettingKeys) {
       if (found.settings?.[field] !== monitor[field]) {
         changes.push(field);
-        patch[field] = monitor[field];
+        copyField(field);
       }
     }
     if (!sameRefs(asKeys(found.channels ?? []), monitor.channels)) {
@@ -289,23 +291,20 @@ const diffMonitors = (
       patch.channels = monitor.channels;
     }
     if (changes.length > 0) {
-      upserts.push({
-        _tag: "UpdateMonitor",
-        changes,
-        id: found.id,
-        key: monitor.key,
-        patch: patch as MonitorPatch,
-      });
+      upserts.push(
+        Step.UpdateMonitor({ changes, id: found.id, key: monitor.key, patch })
+      );
     }
   }
   const deletes: Step[] = current.monitors
     .filter((monitor) => monitor.managed && !wanted.has(monitor.key))
-    .map((monitor) => ({
-      _tag: "DeleteMonitor",
-      id: monitor.id,
-      key: monitor.key,
-      name: monitor.name,
-    }));
+    .map((monitor) =>
+      Step.DeleteMonitor({
+        id: monitor.id,
+        key: monitor.key,
+        name: monitor.name,
+      })
+    );
   return { deletes, upserts };
 };
 
@@ -327,7 +326,7 @@ const checkChannelDeletes = (
     (monitor) => !monitor.managed && !wanted.has(monitor.key)
   );
   for (const step of channelDeletes) {
-    if (step._tag !== "DeleteChannel") {
+    if (!Step.$is("DeleteChannel")(step)) {
       continue;
     }
     const users = survivors.filter(
@@ -375,31 +374,18 @@ export const diff = (
   };
 };
 
-export const describeStep = (step: Step): string => {
-  switch (step._tag) {
-    case "CreateChannel": {
-      return `+ channel ${step.channel.key} (${step.channel.kind})`;
-    }
-    case "UpdateChannel": {
-      return `~ channel ${step.key}: ${step.changes.join(", ")}`;
-    }
-    case "CreateMonitor": {
-      return `+ monitor ${step.monitor.key} (${step.monitor.url})`;
-    }
-    case "UpdateMonitor": {
-      return `~ monitor ${step.key}: ${step.changes.join(", ")}`;
-    }
-    case "DeleteMonitor": {
-      return `- monitor ${step.key} (${step.name})`;
-    }
-    case "DeleteChannel": {
-      return `- channel ${step.key} (${step.name})`;
-    }
-    default: {
-      return step satisfies never;
-    }
-  }
-};
+export const describeStep = (step: Step): string =>
+  Step.$match(step, {
+    CreateChannel: ({ channel }) =>
+      `+ channel ${channel.key} (${channel.kind})`,
+    CreateMonitor: ({ monitor }) => `+ monitor ${monitor.key} (${monitor.url})`,
+    DeleteChannel: ({ key, name }) => `- channel ${key} (${name})`,
+    DeleteMonitor: ({ key, name }) => `- monitor ${key} (${name})`,
+    UpdateChannel: ({ changes, key }) =>
+      `~ channel ${key}: ${changes.join(", ")}`,
+    UpdateMonitor: ({ changes, key }) =>
+      `~ monitor ${key}: ${changes.join(", ")}`,
+  });
 
 /** The plan as printed by `kanshi sync`. */
 export const formatPlan = (plan: Plan): string => {

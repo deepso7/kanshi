@@ -51,6 +51,9 @@ const decodeHistory = Schema.decodeUnknownEffect(
  * Cache API (tests), nothing is cached. Cache failures are ignored.
  */
 export const workersHistoryCache = (): HistoryCache => {
+  // SAFETY: the Workers runtime defines `caches.default` as a Cache, whose
+  // `match`/`put` are a superset of `CacheLike`; both are optional here and
+  // their absence (Node, Bun) is checked below.
   const { caches } = globalThis as { caches?: { default?: CacheLike } };
   const cache = caches?.default;
   if (cache === undefined) {

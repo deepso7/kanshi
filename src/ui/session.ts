@@ -41,8 +41,8 @@ const fromHex = (hex: string): Uint8Array<ArrayBuffer> | null => {
 };
 
 /** A new session value, valid for `sessionMaxAgeSeconds` from `now`. */
-export const makeSession = (token: string, now: number) =>
-  Effect.gen(function* makeSessionEffect() {
+export const createSession = (token: string, now: number) =>
+  Effect.gen(function* createSessionEffect() {
     const expiresAt = now + sessionMaxAgeSeconds * 1000;
     const key = yield* hmacKey(token);
     const signature = yield* Effect.promise(() =>

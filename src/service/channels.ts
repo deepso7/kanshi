@@ -3,8 +3,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 
-import { deliver } from "../alerts/delivery.ts";
-import { alertRequest } from "../alerts/message.ts";
+import { DeliveryResult, deliver } from "../alerts/delivery.ts";
+import { AlertMessage, alertRequest } from "../alerts/message.ts";
 import { BadRequest, Conflict, NotFound } from "../api/spec.ts";
 import type { ChannelTestResult } from "../api/spec.ts";
 import type {
@@ -69,14 +69,24 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
     Effect.gen(function* updateChannel() {
       const secret =
         payload.url === undefined
-          ? {}
+          ? null
           : yield* secretUrl(payload.url, deps.devMode);
-      const patch: ChannelRecordPatch = {
-        ...(payload.kind === undefined ? {} : { kind: payload.kind }),
-        ...(payload.managed === undefined ? {} : { managed: payload.managed }),
-        ...(payload.name === undefined ? {} : { name: payload.name }),
-        ...secret,
-      };
+      const patch: {
+        -readonly [K in keyof ChannelRecordPatch]: ChannelRecordPatch[K];
+      } = {};
+      if (payload.kind !== undefined) {
+        patch.kind = payload.kind;
+      }
+      if (payload.managed !== undefined) {
+        patch.managed = payload.managed;
+      }
+      if (payload.name !== undefined) {
+        patch.name = payload.name;
+      }
+      if (secret !== null) {
+        patch.url = secret.url;
+        patch.urlHash = secret.urlHash;
+      }
       const updated = yield* registry().updateChannel(id, patch);
       return updated ?? (yield* notFound(id));
     });
@@ -89,18 +99,26 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
         return yield* notFound(id);
       }
       const result = yield* deliver(
-        alertRequest(target.kind, target.url, {
-          _tag: "Test",
-          channelName: target.name,
-          idempotencyKey: `test:${target.id}:${crypto.randomUUID()}`,
-          sentAt: Date.now(),
-        })
+        alertRequest(
+          target.kind,
+          target.url,
+          AlertMessage.Test({
+            channelName: target.name,
+            idempotencyKey: `test:${target.id}:${crypto.randomUUID()}`,
+            sentAt: Date.now(),
+          })
+        )
       );
-      return (
-        result._tag === "Delivered"
-          ? { delivered: true, error: null, status: result.status }
-          : { delivered: false, error: result.error, status: result.status }
-      ) satisfies ChannelTestResult;
+      return DeliveryResult.$match(result, {
+        Delivered: ({ status }) =>
+          ({
+            delivered: true,
+            error: null,
+            status,
+          }) satisfies ChannelTestResult,
+        Failed: ({ error, status }) =>
+          ({ delivered: false, error, status }) satisfies ChannelTestResult,
+      });
     });
 
   const remove = (id: string) =>

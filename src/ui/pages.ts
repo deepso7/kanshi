@@ -1,3 +1,7 @@
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+
 import type { ChannelTestResult, MonitorResponse } from "../api/spec.ts";
 import type { ChannelKind, ChannelView } from "../domain/channel.ts";
 import type {
@@ -107,25 +111,39 @@ export interface DashboardData {
   readonly rows: readonly DashboardRow[];
 }
 
+/** The fields of a dev sink event the dashboard shows. */
+const DevEventDetail = Schema.Struct({
+  body: Schema.optionalKey(Schema.Json),
+  query: Schema.optionalKey(Schema.Json),
+  respondedWith: Schema.optionalKey(Schema.Json),
+});
+const decodeDevEventDetail = Schema.decodeUnknownOption(DevEventDetail);
+
+const devEventDetail = (event: DevEvent) =>
+  Option.getOrUndefined(decodeDevEventDetail(event.detail));
+
+/** A JSON alert body's candidate message fields (Slack, Discord, webhook). */
+const AlertBody = Schema.fromJsonString(
+  Schema.Struct({
+    content: Schema.optionalKey(Schema.Json),
+    text: Schema.optionalKey(Schema.Json),
+    title: Schema.optionalKey(Schema.Json),
+  })
+);
+const decodeAlertBody = Schema.decodeUnknownOption(AlertBody);
+
 const devEventText = (event: DevEvent): string => {
-  const detail = event.detail as {
-    readonly body?: unknown;
-    readonly query?: unknown;
-    readonly respondedWith?: unknown;
-  };
-  const body = typeof detail.body === "string" ? detail.body : "";
-  let text = body;
-  try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    const found = [parsed.text, parsed.content, parsed.title].find(
-      (value) => typeof value === "string"
-    );
-    if (typeof found === "string") {
-      text = found;
-    }
-  } catch {
-    // Not JSON (ntfy): the body is the message.
-  }
+  const body = devEventDetail(event)?.body;
+  const raw = Predicate.isString(body) ? body : "";
+  // Not JSON (ntfy): the body is the message.
+  const text = decodeAlertBody(raw).pipe(
+    Option.flatMap((parsed) =>
+      Option.fromUndefinedOr(
+        [parsed.text, parsed.content, parsed.title].find(Predicate.isString)
+      )
+    ),
+    Option.getOrElse(() => raw)
+  );
   return text.replaceAll("\n", " · ").slice(0, 240);
 };
 
@@ -148,14 +166,13 @@ const devEventsPanel = (events: readonly DevEvent[], now: number): Html =>
               </thead>
               <tbody>
                 ${events.map((event) => {
-                  const detail = event.detail as {
-                    readonly query?: unknown;
-                    readonly respondedWith?: unknown;
-                  };
+                  const detail = devEventDetail(event);
                   return html`<tr>
                     <td class="small">${agoTag(event.at, now)}</td>
-                    <td class="small">${String(detail.respondedWith ?? "")}</td>
-                    <td class="mono">${String(detail.query ?? "")}</td>
+                    <td class="small">
+                      ${String(detail?.respondedWith ?? "")}
+                    </td>
+                    <td class="mono">${String(detail?.query ?? "")}</td>
                     <td class="small">${devEventText(event)}</td>
                   </tr>`;
                 })}

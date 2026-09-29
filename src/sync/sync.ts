@@ -13,14 +13,17 @@ import { ChannelView } from "../domain/channel.ts";
 import type { Environment } from "./desired.ts";
 import { resolveDesired } from "./desired.ts";
 import type {
+  ChannelPatch,
   ChannelRefs,
   Current,
   CurrentMonitor,
   Desired,
+  DesiredChannel,
+  DesiredMonitor,
+  MonitorPatch,
   Plan,
-  Step,
 } from "./plan.ts";
-import { describeStep, diff, formatPlan, monitorSettingKeys } from "./plan.ts";
+import { Step, describeStep, diff, formatPlan } from "./plan.ts";
 
 export class SyncError extends Schema.TaggedError<SyncError>()("SyncError", {
   message: Schema.String,
@@ -73,6 +76,28 @@ const failure = (
     })
   );
 
+/** A channel as `POST /api/channels` takes it. */
+interface ChannelCreateBody extends Omit<DesiredChannel, "urlHash"> {
+  readonly managed: true;
+}
+
+/** A monitor as `POST /api/monitors` takes it (channels by id). */
+interface MonitorCreateBody extends DesiredMonitor {
+  readonly managed: true;
+}
+
+/** Every JSON body sync sends. */
+type RequestBody =
+  | ChannelCreateBody
+  | ChannelPatch
+  | MonitorCreateBody
+  | MonitorPatch;
+
+const withBody = (
+  request: HttpClientRequest.HttpClientRequest,
+  body: RequestBody
+) => HttpClientRequest.bodyJsonUnsafe(request, body);
+
 const makeApi = (options: SyncOptions) =>
   Effect.gen(function* makeApiEffect() {
     const client = (yield* HttpClient.HttpClient).pipe(
@@ -85,11 +110,11 @@ const makeApi = (options: SyncOptions) =>
       )
     );
 
-    const call = <A>(
+    /** Run the request; any status of 300 or more is a `SyncError`. */
+    const execute = (
       label: string,
-      request: HttpClientRequest.HttpClientRequest,
-      schema: Schema.Codec<A, unknown> | null
-    ): Effect.Effect<A | null, SyncError> =>
+      request: HttpClientRequest.HttpClientRequest
+    ): Effect.Effect<HttpClientResponse.HttpClientResponse, SyncError> =>
       client.execute(request).pipe(
         Effect.mapError(
           (cause) =>
@@ -109,10 +134,26 @@ const makeApi = (options: SyncOptions) =>
           if (response.status >= 300) {
             return failure(label, response);
           }
-          if (schema === null) {
-            return Effect.succeed(null);
-          }
-          return response.json.pipe(
+          return Effect.succeed(response);
+        })
+      );
+
+    /** A request whose response body is ignored. */
+    const call = (
+      label: string,
+      request: HttpClientRequest.HttpClientRequest
+    ): Effect.Effect<void, SyncError> =>
+      execute(label, request).pipe(Effect.asVoid);
+
+    /** A request whose response body is decoded with `schema`. */
+    const read = <A>(
+      label: string,
+      request: HttpClientRequest.HttpClientRequest,
+      schema: Schema.Codec<A, unknown>
+    ): Effect.Effect<A, SyncError> =>
+      execute(label, request).pipe(
+        Effect.flatMap((response) =>
+          response.json.pipe(
             Effect.flatMap(Schema.decodeUnknownEffect(schema)),
             Effect.mapError(
               (cause) =>
@@ -120,40 +161,35 @@ const makeApi = (options: SyncOptions) =>
                   message: `${label}: unexpected response: ${cause.message}`,
                 })
             )
-          );
-        })
+          )
+        )
       );
 
-    const read = <A>(label: string, path: string, schema: Schema.Codec<A>) =>
-      call(label, HttpClientRequest.get(path), schema).pipe(
-        Effect.map((value) => value as A)
-      );
-
-    const send = <A>(
-      label: string,
-      request: HttpClientRequest.HttpClientRequest,
-      body: unknown,
-      schema: Schema.Codec<A> | null
-    ) => call(label, HttpClientRequest.bodyJsonUnsafe(request, body), schema);
-
-    return { call, read, send };
+    return { call, read };
   });
 
 type Api = Effect.Success<ReturnType<typeof makeApi>>;
 
-const toCurrentMonitor = (monitor: MonitorResponse): CurrentMonitor => {
-  const settings = Object.fromEntries(
-    monitorSettingKeys.map((field) => [field, monitor[field]] as const)
-  ) as unknown as NonNullable<CurrentMonitor["settings"]>;
-  return {
-    channels: monitor.channels,
-    id: monitor.id,
-    key: monitor.key,
-    managed: monitor.managed,
+const toCurrentMonitor = (monitor: MonitorResponse): CurrentMonitor => ({
+  channels: monitor.channels,
+  id: monitor.id,
+  key: monitor.key,
+  managed: monitor.managed,
+  name: monitor.name,
+  settings: {
+    bodyContains: monitor.bodyContains,
+    enabled: monitor.enabled,
+    expectedStatus: monitor.expectedStatus,
+    failureThreshold: monitor.failureThreshold,
+    intervalSeconds: monitor.intervalSeconds,
+    method: monitor.method,
     name: monitor.name,
-    settings,
-  };
-};
+    public: monitor.public,
+    successThreshold: monitor.successThreshold,
+    timeoutMs: monitor.timeoutMs,
+    url: monitor.url,
+  },
+});
 
 /**
  * Channels and monitors as the API reports them. The full configuration
@@ -165,7 +201,11 @@ const toCurrentMonitor = (monitor: MonitorResponse): CurrentMonitor => {
 const loadCurrent = (api: Api, desired: Desired, waitSeconds: number) =>
   Effect.gen(function* loadCurrentEffect() {
     const listed = yield* api
-      .read("GET /api/monitors", "/api/monitors", Schema.Array(MonitorListItem))
+      .read(
+        "GET /api/monitors",
+        HttpClientRequest.get("/api/monitors"),
+        Schema.Array(MonitorListItem)
+      )
       .pipe(
         Effect.retry({
           schedule: Schedule.spaced("1 second"),
@@ -175,7 +215,7 @@ const loadCurrent = (api: Api, desired: Desired, waitSeconds: number) =>
       );
     const channels = yield* api.read(
       "GET /api/channels",
-      "/api/channels",
+      HttpClientRequest.get("/api/channels"),
       Schema.Array(ChannelView)
     );
     const wantedKeys = new Set(desired.monitors.map((monitor) => monitor.key));
@@ -192,7 +232,9 @@ const loadCurrent = (api: Api, desired: Desired, waitSeconds: number) =>
           ? api
               .read(
                 `GET /api/monitors/${item.id}`,
-                `/api/monitors/${encodeURIComponent(item.id)}`,
+                HttpClientRequest.get(
+                  `/api/monitors/${encodeURIComponent(item.id)}`
+                ),
                 MonitorResponse
               )
               .pipe(Effect.map(toCurrentMonitor))
@@ -220,84 +262,68 @@ const applyPlan = (
     const resolve = (refs: ChannelRefs): ChannelRefs =>
       refs === "all" ? refs : refs.map((key) => channelIds.get(key) ?? key);
 
-    const run = (step: Step): Effect.Effect<unknown, SyncError> => {
+    const run = (step: Step): Effect.Effect<void, SyncError> => {
       const label = describeStep(step);
-      switch (step._tag) {
-        case "CreateChannel": {
-          const { urlHash: _hash, ...channel } = step.channel;
-          return api
-            .send(
+      return Step.$match(step, {
+        CreateChannel: ({ channel: { urlHash: _hash, ...channel } }) =>
+          api
+            .read(
               label,
-              HttpClientRequest.post("/api/channels"),
-              { ...channel, managed: true },
+              withBody(HttpClientRequest.post("/api/channels"), {
+                ...channel,
+                managed: true,
+              }),
               ChannelView
             )
             .pipe(
-              Effect.tap((created) =>
+              Effect.flatMap((created) =>
                 Effect.sync(() => {
-                  if (created !== null) {
-                    channelIds.set(created.key, created.id);
-                  }
+                  channelIds.set(created.key, created.id);
                 })
               )
-            );
-        }
-        case "UpdateChannel": {
-          return api.send(
-            label,
-            HttpClientRequest.patch(
-              `/api/channels/${encodeURIComponent(step.id)}`
             ),
-            step.patch,
-            null
-          );
-        }
-        case "CreateMonitor": {
-          return api.send(
+        CreateMonitor: ({ monitor }) =>
+          api.call(
             label,
-            HttpClientRequest.post("/api/monitors"),
-            {
-              ...step.monitor,
-              channels: resolve(step.monitor.channels),
+            withBody(HttpClientRequest.post("/api/monitors"), {
+              ...monitor,
+              channels: resolve(monitor.channels),
               managed: true,
-            },
-            null
-          );
-        }
-        case "UpdateMonitor": {
-          return api.send(
+            })
+          ),
+        DeleteChannel: ({ id }) =>
+          api.call(
             label,
-            HttpClientRequest.patch(
-              `/api/monitors/${encodeURIComponent(step.id)}`
-            ),
-            step.patch.channels === undefined
-              ? step.patch
-              : { ...step.patch, channels: resolve(step.patch.channels) },
-            null
-          );
-        }
-        case "DeleteMonitor": {
-          return api.call(
+            HttpClientRequest.delete(`/api/channels/${encodeURIComponent(id)}`)
+          ),
+        DeleteMonitor: ({ id }) =>
+          api.call(
             label,
-            HttpClientRequest.delete(
-              `/api/monitors/${encodeURIComponent(step.id)}`
-            ),
-            null
-          );
-        }
-        case "DeleteChannel": {
-          return api.call(
+            HttpClientRequest.delete(`/api/monitors/${encodeURIComponent(id)}`)
+          ),
+        UpdateChannel: ({ id, patch }) =>
+          api.call(
             label,
-            HttpClientRequest.delete(
-              `/api/channels/${encodeURIComponent(step.id)}`
-            ),
-            null
-          );
-        }
-        default: {
-          return step satisfies never;
-        }
-      }
+            withBody(
+              HttpClientRequest.patch(
+                `/api/channels/${encodeURIComponent(id)}`
+              ),
+              patch
+            )
+          ),
+        UpdateMonitor: ({ id, patch }) =>
+          api.call(
+            label,
+            withBody(
+              HttpClientRequest.patch(
+                `/api/monitors/${encodeURIComponent(id)}`
+              ),
+              patch.channels === undefined
+                ? patch
+                : { ...patch, channels: resolve(patch.channels) }
+            )
+          ),
+      });
     };
 
     for (const [applied, step] of plan.steps.entries()) {

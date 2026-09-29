@@ -2,6 +2,9 @@ import type { RuntimeContext } from "alchemy";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 import type * as HttpBody from "effect/unstable/http/HttpBody";
 import type * as HttpServerError from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -62,11 +65,15 @@ const methodMatches = (method: Method, actual: string): boolean =>
   actual === method ||
   (method === "GET" && actual === "HEAD");
 
+/** The API's `NotFound` body. */
+const NotFoundBody = Schema.TaggedStruct("NotFound", {
+  message: Schema.String,
+});
+
 const monitorNotFound = () =>
-  HttpServerResponse.json(
-    { _tag: "NotFound", message: "monitor not found" },
-    { status: 404 }
-  );
+  HttpServerResponse.json(NotFoundBody.make({ message: "monitor not found" }), {
+    status: 404,
+  });
 
 /**
  * Dev stage fixtures under `/_dev/*` (never routed outside the dev stage):
@@ -105,19 +112,27 @@ const target = (url: URL) =>
     return HttpServerResponse.text(body, { status });
   });
 
+/** A JSON alert body's candidate message fields (Slack, Discord). */
+const AlertBody = Schema.fromJsonString(
+  Schema.Struct({
+    content: Schema.optionalKey(Schema.Json),
+    text: Schema.optionalKey(Schema.Json),
+  })
+);
+const decodeAlertBody = Schema.decodeUnknownOption(AlertBody);
+
 /** One console line for a received alert, whatever the channel format. */
 const alertSummary = (url: URL, body: string): string => {
   const title = url.searchParams.get("title");
-  let text = body;
-  try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    const found = [parsed.text, parsed.content].find(
-      (value) => typeof value === "string"
-    );
-    text = typeof found === "string" ? found : body;
-  } catch {
-    // Not JSON (ntfy): the body is the message.
-  }
+  // Not JSON (ntfy): the body is the message.
+  const text = decodeAlertBody(body).pipe(
+    Option.flatMap((parsed) =>
+      Option.fromUndefinedOr(
+        [parsed.text, parsed.content].find(Predicate.isString)
+      )
+    ),
+    Option.getOrElse(() => body)
+  );
   const line = [title, text]
     .filter(Boolean)
     .join(" | ")

@@ -26,17 +26,20 @@ export type Interpolation =
   | undefined
   | readonly Interpolation[];
 
-const escapes: Readonly<Record<string, string>> = {
-  '"': "&quot;",
-  "&": "&amp;",
-  "'": "&#39;",
-  "<": "&lt;",
-  ">": "&gt;",
-};
+const escapes = new Map([
+  ['"', "&quot;"],
+  ["&", "&amp;"],
+  ["'", "&#39;"],
+  ["<", "&lt;"],
+  [">", "&gt;"],
+]);
 
 /** Escape text for use in element content and quoted attribute values. */
 export const escapeHtml = (text: string): string =>
-  text.replaceAll(/["&'<>]/gu, (char) => escapes[char] ?? char);
+  text.replaceAll(/["&'<>]/gu, (char) => escapes.get(char) ?? char);
+
+const isList = (value: Interpolation): value is readonly Interpolation[] =>
+  Array.isArray(value);
 
 const render = (value: Interpolation): string => {
   if (value instanceof Html) {
@@ -45,7 +48,7 @@ const render = (value: Interpolation): string => {
   if (value === false || value === null || value === undefined) {
     return "";
   }
-  if (typeof value === "object") {
+  if (isList(value)) {
     return value.map(render).join("");
   }
   return escapeHtml(String(value));

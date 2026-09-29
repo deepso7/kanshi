@@ -15,8 +15,12 @@ import type {
   NotFound,
   Unavailable,
 } from "../api/spec.ts";
-import type { FormBody } from "../http/body.ts";
-import { discardBody, maxFormBytes, readFormBody } from "../http/body.ts";
+import {
+  FormBody,
+  discardBody,
+  maxFormBytes,
+  readFormBody,
+} from "../http/body.ts";
 import { matchPattern } from "../http/route.ts";
 import { Registry, registryName } from "../registry/registry.ts";
 import { ChannelService } from "../service/channels.ts";
@@ -49,7 +53,7 @@ import {
 } from "./pages.ts";
 import {
   clearedSessionCookie,
-  makeSession,
+  createSession,
   sessionCookie,
   sessionCookieName,
   verifySession,
@@ -98,22 +102,22 @@ const seeOther = (
   });
 
 /** Success messages after a redirect, by `?done=` code (never echoed). */
-const doneMessages: Readonly<Record<string, string>> = {
-  "channel-created": "Channel added.",
-  "channel-deleted": "Channel deleted.",
-  "channel-saved": "Channel saved.",
-  checked: "Check requested; the result shows up in a few seconds.",
-  created: "Monitor created.",
-  deleted: "Monitor deleted.",
-  paused: "Monitor paused.",
-  private: "Removed from the public status page.",
-  public: "Now shown on the public status page.",
-  resumed: "Monitor resumed.",
-  saved: "Changes saved.",
-};
+const doneMessages = new Map([
+  ["channel-created", "Channel added."],
+  ["channel-deleted", "Channel deleted."],
+  ["channel-saved", "Channel saved."],
+  ["checked", "Check requested; the result shows up in a few seconds."],
+  ["created", "Monitor created."],
+  ["deleted", "Monitor deleted."],
+  ["paused", "Monitor paused."],
+  ["private", "Removed from the public status page."],
+  ["public", "Now shown on the public status page."],
+  ["resumed", "Monitor resumed."],
+  ["saved", "Changes saved."],
+]);
 
 const flashFrom = (url: URL): Flash | null => {
-  const text = doneMessages[url.searchParams.get("done") ?? ""];
+  const text = doneMessages.get(url.searchParams.get("done") ?? "");
   return text === undefined ? null : { kind: "ok", text };
 };
 
@@ -201,7 +205,7 @@ const discardRequestBody = (request: HttpServerRequest.HttpServerRequest) =>
 const readForm = (request: HttpServerRequest.HttpServerRequest) =>
   HttpServerRequest.toWeb(request).pipe(
     Effect.flatMap((web) => Effect.promise(() => readFormBody(web))),
-    Effect.orElseSucceed((): FormBody => ({ _tag: "Form", fields: [] }))
+    Effect.orElseSucceed(() => FormBody.Form({ fields: [] }))
   );
 
 const run = (
@@ -217,7 +221,7 @@ const run = (
     let form: FormFields = [];
     if (isPost) {
       const body = yield* readForm(input.request);
-      if (body._tag === "TooLarge") {
+      if (FormBody.$is("TooLarge")(body)) {
         return errorPage(
           413,
           "Form too large",
@@ -276,7 +280,7 @@ export const makeUiRoutes = (deps: UiDeps) => {
         yield* Effect.logWarning("dashboard sign-in with a wrong token");
         return htmlResponse(loginPage("That token is not valid."), 401);
       }
-      const session = yield* makeSession(token, Date.now());
+      const session = yield* createSession(token, Date.now());
       return seeOther("/", { "set-cookie": sessionCookie(session) });
     });
 

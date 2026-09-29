@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
 
 import type {
@@ -28,7 +29,7 @@ const channelUrl = (
   channel: ChannelDefinition,
   environment: Environment
 ): Result.Result<string, string> => {
-  if (typeof channel.url === "string") {
+  if (Predicate.isString(channel.url)) {
     return normalizeChannelUrl(channel.url);
   }
   const value = environment[channel.url.env];
