@@ -216,7 +216,11 @@ const channelsRoute = createRoute({
   component: ChannelsPage,
   getParentRoute: () => appRoute,
   loader: async ({ context: { queryClient: client } }) => {
-    await client.ensureQueryData(channelsQuery);
+    // Meta: dev mode decides which URLs the forms accept.
+    await Promise.all([
+      client.ensureQueryData(channelsQuery),
+      client.ensureQueryData(metaQuery),
+    ]);
   },
   path: "/channels",
 });
