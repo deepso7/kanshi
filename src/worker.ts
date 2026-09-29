@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Etag from "effect/unstable/http/Etag";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -178,6 +179,9 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
   }).pipe(
     Effect.provide(ServicesLive),
     Effect.provide(Cloudflare.Workers.CronEventSourceLive),
-    Effect.provide(MonitorLive.pipe(Layer.provideMerge(RegistryLive)))
+    Effect.provide(MonitorLive.pipe(Layer.provideMerge(RegistryLive))),
+    // Probes, alert deliveries and channel tests: the Durable Objects
+    // capture it when their layers are built.
+    Effect.provide(FetchHttpClient.layer)
   )
 ) {}

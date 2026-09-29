@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { deliver, DeliveryResult } from "../alerts/delivery.ts";
@@ -325,8 +326,11 @@ export const MonitorLive = Monitor.make(
   Effect.gen(function* MonitorInit() {
     const state = yield* Cloudflare.DurableObjectState;
     const registries = yield* Registry;
+    const http = yield* HttpClient.HttpClient;
 
     const registry = () => registries.getByName(registryName);
+    /** Probes and alert deliveries use the Worker's `HttpClient`. */
+    const withHttp = Effect.provideService(HttpClient.HttpClient, http);
 
     return Effect.gen(function* MonitorInstance() {
       const sql = yield* openDurableSql(state, migrations);
@@ -652,13 +656,15 @@ export const MonitorLive = Monitor.make(
         }
         // The in-flight record is committed; arm its deadline before probing.
         yield* rearm;
-        const outcome = yield* probe({
-          bodyContains: started.config.bodyContains,
-          expectedStatus: started.config.expectedStatus,
-          method: started.config.method,
-          timeoutMs: started.config.timeoutMs,
-          url: started.config.url,
-        });
+        const outcome = yield* withHttp(
+          probe({
+            bodyContains: started.config.bodyContains,
+            expectedStatus: started.config.expectedStatus,
+            method: started.config.method,
+            timeoutMs: started.config.timeoutMs,
+            url: started.config.url,
+          })
+        );
         const committed = yield* commitCheck(started.inflight, outcome);
         if (committed !== null) {
           yield* pushSummary(committed);
@@ -790,26 +796,32 @@ export const MonitorLive = Monitor.make(
             );
             return;
           }
-          const result = yield* deliver(
-            alertRequest(
-              target.value.kind,
-              target.value.url,
-              incidentMessage(decision.message, {
-                idempotencyKey: idempotencyKey(
-                  entry.incidentId,
-                  entry.event,
-                  entry.channelId
-                ),
-                incident: {
-                  cause: incident.cause,
-                  id: incident.id,
-                  lastHttpStatus: incident.lastHttpStatus,
-                  resolvedAt: incident.resolvedAt,
-                  startedAt: incident.startedAt,
-                },
-                monitor: { id: config.id, name: config.name, url: config.url },
-                sentAt: Date.now(),
-              })
+          const result = yield* withHttp(
+            deliver(
+              alertRequest(
+                target.value.kind,
+                target.value.url,
+                incidentMessage(decision.message, {
+                  idempotencyKey: idempotencyKey(
+                    entry.incidentId,
+                    entry.event,
+                    entry.channelId
+                  ),
+                  incident: {
+                    cause: incident.cause,
+                    id: incident.id,
+                    lastHttpStatus: incident.lastHttpStatus,
+                    resolvedAt: incident.resolvedAt,
+                    startedAt: incident.startedAt,
+                  },
+                  monitor: {
+                    id: config.id,
+                    name: config.name,
+                    url: config.url,
+                  },
+                  sentAt: Date.now(),
+                })
+              )
             )
           );
           if (DeliveryResult.$is("Failed")(result)) {

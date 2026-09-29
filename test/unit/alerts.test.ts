@@ -1,11 +1,14 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   backoffMs,
   classifyStatus,
   deliver,
+  deliveryTimeoutMs,
   DeliveryResult,
   errorBodyBytes,
   maxAttempts,
@@ -17,7 +20,13 @@ import {
   formatDuration,
   idempotencyKey,
 } from "../../src/alerts/message.ts";
-import type { FetchLike } from "../../src/domain/probe.ts";
+import {
+  answering,
+  endlessBody,
+  hanging,
+  rejecting,
+  testHttpClient,
+} from "./http-client.ts";
 
 const minute = 60_000;
 const t0 = 1_700_000_000_000;
@@ -195,45 +204,59 @@ describe("message formatting", () => {
   });
 });
 
-const answering =
-  (status: number, text = ""): FetchLike =>
-  () =>
-    Promise.resolve(new Response(text, { status }));
-
 describe("deliver()", () => {
   const request = alertRequest("webhook", "https://example.com/hook", down);
   it.effect("returns Delivered for 2xx", () =>
     Effect.gen(function* deliveredTest() {
-      let seen: RequestInit = {};
-      const result = yield* deliver(request, (_url, init) => {
-        seen = init;
-        return Promise.resolve(new Response(null, { status: 204 }));
-      });
+      const client = answering(204, null);
+      const result = yield* deliver(request).pipe(Effect.provide(client.layer));
       assert.deepStrictEqual(result, DeliveryResult.Delivered({ status: 204 }));
-      assert.strictEqual(seen.method, "POST");
+      const [sent] = client.sent;
+      assert.strictEqual(sent?.request.method, "POST");
+      assert.strictEqual(sent?.request.url, "https://example.com/hook");
       assert.strictEqual(
-        new Headers(seen.headers).get("idempotency-key"),
+        sent?.request.headers["idempotency-key"],
         "inc1:down:c1"
       );
+      assert.strictEqual(
+        sent?.request.headers["user-agent"],
+        "Kanshi uptime monitor"
+      );
+      assert.strictEqual(
+        sent?.request.headers["content-type"],
+        "application/json"
+      );
+      assert.strictEqual(sent?.redirect, "follow");
     })
   );
 
   it.effect("classifies failures", () =>
     Effect.gen(function* failuresTest() {
       assert.deepStrictEqual(
-        yield* deliver(request, answering(404, "nope")),
+        yield* deliver(request).pipe(
+          Effect.provide(answering(404, "nope").layer)
+        ),
         DeliveryResult.Failed({
           error: "HTTP 404: nope",
           permanent: true,
           status: 404,
         })
       );
-      const busy = yield* deliver(request, answering(429));
-      assert.isTrue(DeliveryResult.$is("Failed")(busy) && !busy.permanent);
-      const broken = yield* deliver(request, answering(500));
-      assert.isTrue(DeliveryResult.$is("Failed")(broken) && !broken.permanent);
-      const offline = yield* deliver(request, () =>
-        Promise.reject(new Error("connection refused"))
+      for (const status of [408, 425, 429, 500, 503]) {
+        const transient = yield* deliver(request).pipe(
+          Effect.provide(answering(status).layer)
+        );
+        assert.deepStrictEqual(
+          transient,
+          DeliveryResult.Failed({
+            error: `HTTP ${status}`,
+            permanent: false,
+            status,
+          })
+        );
+      }
+      const offline = yield* deliver(request).pipe(
+        Effect.provide(rejecting(new Error("connection refused")).layer)
       );
       assert.deepStrictEqual(
         offline,
@@ -246,25 +269,58 @@ describe("deliver()", () => {
     })
   );
 
+  it.effect("times out, and aborts the request", () =>
+    Effect.gen(function* timeoutTest() {
+      const client = hanging();
+      const fiber = yield* deliver(request).pipe(
+        Effect.provide(client.layer),
+        Effect.forkChild
+      );
+      yield* TestClock.adjust(deliveryTimeoutMs - 1);
+      assert.isUndefined(fiber.pollUnsafe());
+      yield* TestClock.adjust(1);
+      assert.deepStrictEqual(
+        yield* Fiber.join(fiber),
+        DeliveryResult.Failed({
+          error: `no response within ${deliveryTimeoutMs}ms`,
+          permanent: false,
+          status: null,
+        })
+      );
+      assert.isTrue(client.sent[0]?.signal.aborted);
+    })
+  );
+
+  it.effect("waits for a slow endpoint within the timeout", () =>
+    Effect.gen(function* slowTest() {
+      const client = testHttpClient(() =>
+        Effect.sleep(deliveryTimeoutMs - 1).pipe(
+          Effect.as(new Response(null, { status: 200 }))
+        )
+      );
+      const fiber = yield* deliver(request).pipe(
+        Effect.provide(client.layer),
+        Effect.forkChild
+      );
+      yield* TestClock.adjust(deliveryTimeoutMs - 1);
+      assert.deepStrictEqual(
+        yield* Fiber.join(fiber),
+        DeliveryResult.Delivered({ status: 200 })
+      );
+    })
+  );
+
   it.effect(
     "reads a bounded prefix of a failed response's body, then cancels it",
     () =>
       Effect.gen(function* boundedBodyTest() {
-        const chunk = new TextEncoder().encode("x".repeat(512));
-        let pulled = 0;
-        let cancelled = false;
-        // An endless body: `response.text()` would never return.
-        const endless = new ReadableStream<Uint8Array>({
-          cancel: () => {
-            cancelled = true;
-          },
-          pull: (controller) => {
-            pulled += 1;
-            controller.enqueue(chunk);
-          },
-        });
-        const result = yield* deliver(request, () =>
-          Promise.resolve(new Response(endless, { status: 500 }))
+        // An endless body: reading it whole would never return.
+        const endless = endlessBody(512);
+        const client = testHttpClient(() =>
+          Effect.succeed(new Response(endless.body, { status: 500 }))
+        );
+        const result = yield* deliver(request).pipe(
+          Effect.provide(client.layer)
         );
         assert.deepStrictEqual(
           result,
@@ -274,28 +330,24 @@ describe("deliver()", () => {
             status: 500,
           })
         );
-        assert.isTrue(cancelled);
+        assert.isTrue(endless.seen.cancelled);
         // The stream may pull ahead a chunk or two, never much more.
-        assert.isAtMost(pulled * chunk.byteLength, errorBodyBytes + 3 * 512);
+        assert.isAtMost(endless.seen.pulled * 512, errorBodyBytes + 3 * 512);
       })
   );
 
   it.effect("does not read the body of a delivered response", () =>
     Effect.gen(function* deliveredBodyTest() {
-      let cancelled = false;
-      const body = new ReadableStream<Uint8Array>({
-        cancel: () => {
-          cancelled = true;
-        },
-        pull: (controller) => {
-          controller.enqueue(new Uint8Array(512));
-        },
-      });
-      const result = yield* deliver(request, () =>
-        Promise.resolve(new Response(body, { status: 200 }))
+      const endless = endlessBody(512);
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(endless.body, { status: 200 }))
       );
+      const result = yield* deliver(request).pipe(Effect.provide(client.layer));
       assert.deepStrictEqual(result, DeliveryResult.Delivered({ status: 200 }));
-      assert.isTrue(cancelled);
+      // Unread (at most the stream's own prefetch), and the request is
+      // aborted, which releases the connection.
+      assert.isAtMost(endless.seen.pulled, 1);
+      assert.isTrue(client.sent[0]?.signal.aborted);
     })
   );
 });

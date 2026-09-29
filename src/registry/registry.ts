@@ -4,6 +4,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { DeliveryResult, deliver } from "../alerts/delivery.ts";
@@ -391,6 +392,9 @@ const decodeEntries = (rows: readonly unknown[]) =>
 export const RegistryLive = Registry.make(
   Effect.gen(function* RegistryInit() {
     const state = yield* Cloudflare.DurableObjectState;
+    const http = yield* HttpClient.HttpClient;
+    /** Watchdog alert deliveries use the Worker's `HttpClient`. */
+    const withHttp = Effect.provideService(HttpClient.HttpClient, http);
 
     return Effect.gen(function* RegistryInstance() {
       const sql = yield* openDurableSql(state, registryMigrations);
@@ -645,30 +649,32 @@ export const RegistryLive = Registry.make(
             );
             return;
           }
-          const result = yield* deliver(
-            alertRequest(
-              target.kind,
-              target.url,
-              watchdogMessage(watchdogTag[decision.message], {
-                episode: {
-                  id: episode.id,
-                  intervalSeconds: episode.intervalSeconds,
-                  lastCheckedAt: episode.lastCheckedAt,
-                  resolvedAt: episode.resolvedAt,
-                  startedAt: episode.startedAt,
-                },
-                idempotencyKey: idempotencyKey(
-                  entry.incidentId,
-                  entry.event,
-                  entry.channelId
-                ),
-                monitor: {
-                  id: episode.monitorId,
-                  name: episode.monitorName,
-                  url: episode.monitorUrl,
-                },
-                sentAt: Date.now(),
-              })
+          const result = yield* withHttp(
+            deliver(
+              alertRequest(
+                target.kind,
+                target.url,
+                watchdogMessage(watchdogTag[decision.message], {
+                  episode: {
+                    id: episode.id,
+                    intervalSeconds: episode.intervalSeconds,
+                    lastCheckedAt: episode.lastCheckedAt,
+                    resolvedAt: episode.resolvedAt,
+                    startedAt: episode.startedAt,
+                  },
+                  idempotencyKey: idempotencyKey(
+                    entry.incidentId,
+                    entry.event,
+                    entry.channelId
+                  ),
+                  monitor: {
+                    id: episode.monitorId,
+                    name: episode.monitorName,
+                    url: episode.monitorUrl,
+                  },
+                  sentAt: Date.now(),
+                })
+              )
             )
           );
           if (DeliveryResult.$is("Failed")(result)) {

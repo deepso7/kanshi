@@ -2,6 +2,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 
 import { DeliveryResult, deliver } from "../alerts/delivery.ts";
 import { AlertMessage, alertRequest } from "../alerts/message.ts";
@@ -18,6 +19,8 @@ import { KanshiSettings } from "../settings.ts";
 
 export interface ChannelServiceDeps {
   readonly devMode: boolean;
+  /** Sends the test alerts. */
+  readonly http: HttpClient.HttpClient;
   readonly registries: Effect.Success<typeof Registry>;
 }
 
@@ -108,7 +111,7 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
             sentAt: Date.now(),
           })
         )
-      );
+      ).pipe(Effect.provideService(HttpClient.HttpClient, deps.http));
       return DeliveryResult.$match(result, {
         Delivered: ({ status }) =>
           ({
@@ -148,7 +151,11 @@ export class ChannelService extends Context.Service<
     ChannelService,
     Effect.gen(function* ChannelServiceLayer() {
       const { devMode } = yield* KanshiSettings;
-      return makeChannelService({ devMode, registries: yield* Registry });
+      return makeChannelService({
+        devMode,
+        http: yield* HttpClient.HttpClient,
+        registries: yield* Registry,
+      });
     })
   );
 }

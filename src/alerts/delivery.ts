@@ -1,9 +1,11 @@
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
-import type { FetchLike } from "../domain/probe.ts";
-import { readBounded } from "../domain/probe.ts";
+import { errorCause, exchange, readPrefix, userAgent } from "../http/client.ts";
 import type { AlertRequest } from "./message.ts";
 
 /** Attempts per outbox row before it is marked `failed`. */
@@ -60,43 +62,47 @@ export type DeliveryResult = Data.TaggedEnum<{
  */
 export const DeliveryResult = Data.taggedEnum<DeliveryResult>();
 
-const errorMessage = (cause: unknown): string =>
-  (cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+const errorMessage = (cause: Error | string): string =>
+  (cause instanceof Error ? cause.message : cause).slice(0, 200);
 
 /**
- * POST an alert once. Never fails: network errors and timeouts are
- * retryable `Failed` results.
+ * The status and, for a failed delivery, the start of the body. A
+ * delivered response is discarded unread (leaving `exchange` aborts it);
+ * the endpoint is not trusted, so a failed one's body is never buffered
+ * whole.
+ */
+const readResponse = (response: HttpClientResponse.HttpClientResponse) =>
+  classifyStatus(response.status) === "delivered"
+    ? Effect.succeed({ status: response.status, text: "" })
+    : readPrefix(response, errorBodyBytes).pipe(
+        Effect.orElseSucceed(() => new Uint8Array(0)),
+        Effect.map((bytes) => ({
+          status: response.status,
+          text: new TextDecoder().decode(bytes).slice(0, errorBodyChars),
+        }))
+      );
+
+/**
+ * POST an alert once with the ambient `HttpClient`. Never fails: network
+ * errors and timeouts (`timeoutMs` for the request and the error body; the
+ * fetch is aborted) are retryable `Failed` results.
  */
 export const deliver = Effect.fn("Alerts.deliver")(function* deliverEffect(
   request: AlertRequest,
-  fetchImpl: FetchLike = fetch,
   timeoutMs: number = deliveryTimeoutMs
 ) {
-  const result = yield* Effect.tryPromise({
-    catch: errorMessage,
-    try: async () => {
-      const response = await fetchImpl(request.url, {
-        body: request.body,
-        headers: {
-          "user-agent": "Kanshi uptime monitor",
-          ...request.headers,
-        },
-        method: "POST",
-        redirect: "follow",
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (classifyStatus(response.status) === "delivered") {
-        await response.body?.cancel().catch(() => null);
-        return { status: response.status, text: "" };
-      }
-      // The endpoint is not trusted: never buffer its whole body.
-      const bytes = await readBounded(response.body, errorBodyBytes).catch(
-        () => new Uint8Array(0)
-      );
-      const text = new TextDecoder().decode(bytes);
-      return { status: response.status, text: text.slice(0, errorBodyChars) };
-    },
-  }).pipe(Effect.result);
+  const httpRequest = HttpClientRequest.post(request.url).pipe(
+    HttpClientRequest.bodyText(request.body),
+    HttpClientRequest.setHeaders({
+      "user-agent": userAgent,
+      ...request.headers,
+    })
+  );
+  const result = yield* exchange(httpRequest, readResponse).pipe(
+    Effect.mapError((error) => errorMessage(errorCause(error))),
+    Effect.timeoutOption(timeoutMs),
+    Effect.result
+  );
 
   if (Result.isFailure(result)) {
     return DeliveryResult.Failed({
@@ -105,7 +111,14 @@ export const deliver = Effect.fn("Alerts.deliver")(function* deliverEffect(
       status: null,
     });
   }
-  const { status, text } = result.success;
+  if (Option.isNone(result.success)) {
+    return DeliveryResult.Failed({
+      error: `no response within ${timeoutMs}ms`,
+      permanent: false,
+      status: null,
+    });
+  }
+  const { status, text } = result.success.value;
   const kind = classifyStatus(status);
   if (kind === "delivered") {
     return DeliveryResult.Delivered({ status });

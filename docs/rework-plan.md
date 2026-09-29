@@ -141,11 +141,12 @@ Reset rules (carried over from today's `updateMonitor`/`removeMonitor`):
 
 ### Probe
 
-`fetch` with `AbortSignal` timeout, `redirect: "follow"`, bounded body read
-(1 MB) when `bodyContains` is set or for GET latency. Error kinds: `timeout`,
-`dns`, `tls`, `connection`, `status`, `keyword`, `network`. URL rules on save:
-http(s) only, https by default, no credentials, no `localhost`/`.local`-style
-hosts or private IP literals. The DNS-over-HTTPS resolution in
+Effect `HttpClient` (`FetchHttpClient`, provided by the Worker) with
+`Effect.timeout` (interruption aborts the fetch), `redirect: "follow"`,
+bounded body `Stream` read (1 MB) when `bodyContains` is set or for GET
+latency. Error kinds: `timeout`, `dns`, `tls`, `connection`, `status`,
+`keyword`, `network`. URL rules on save: http(s) only, https by default, no
+credentials, no `localhost`/`.local`-style hosts or private IP literals. The DNS-over-HTTPS resolution in
 `src/domain/url.ts` is removed: there is one trusted operator, and Workers
 `fetch` cannot reach private networks.
 
