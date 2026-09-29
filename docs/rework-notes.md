@@ -1891,7 +1891,11 @@ The `prod` stage deploys the Worker as `kanshi`
 state in the account's Cloudflare state store. Every other stage keeps the
 generated name (`<stack>-kanshi-<stage>-<random>`) and `.alchemy/` state.
 The policy is the pure `src/stages.ts` (`workerNameFor`, `stateStoreFor`,
-`devStages`), unit tested in `test/unit/stages.test.ts`.
+`devStages`), unit tested in `test/unit/stages.test.ts`. The stack's
+`state` layer is `src/state-store.ts` (importable without the stack);
+`test/unit/state-store.test.ts` builds it for `dev` / `integ-*` against a
+temp dir, and checks with sentinel layers that `prod` picks only the
+Cloudflare store (the real one would bootstrap a store in the account).
 
 - **State by stage.** A Stack's `state` is a
   `Layer<State, never, StackServices>` and `StackServices` includes

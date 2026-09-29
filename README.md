@@ -63,7 +63,10 @@ You need Node, pnpm, [Bun](https://bun.sh) and a Cloudflare account.
    stored encrypted in that store, not in plain text on disk. `.alchemy/`
    only holds state for local runs (`pnpm dev`, `pnpm test:integ`), which
    stay on disk and never contact Cloudflare; a deploy writes only build
-   output and logs there.
+   output and logs there. The one exception is the first bootstrap above:
+   Alchemy stages the state store's own deployment in
+   `.alchemy/state/CloudflareStateStore/` and deletes it once the store is
+   up. That staging is temporary and separate from the local runs' state.
 
    **Upgrading a deployment made with local state** (an older version, with
    a generated Worker name): this version plans a fresh `kanshi` Worker in
