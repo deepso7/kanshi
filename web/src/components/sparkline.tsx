@@ -59,6 +59,12 @@ const linePath = (points: readonly Point[]) =>
     )
     .join(" ");
 
+/**
+ * A lone point as a zero-length line: its round cap draws a dot that stays
+ * round under `preserveAspectRatio="none"` (a circle would be stretched).
+ */
+const dotPath = (point: Point) => `M${round(point.x)} ${round(point.y)}h0`;
+
 const areaPath = (points: readonly Point[], height: number) => {
   const [first] = points;
   const last = points.at(-1);
@@ -72,6 +78,11 @@ const styles = stylex.create({
   area: {
     opacity: 0.14,
     stroke: "none",
+  },
+  dot: {
+    fill: "none",
+    strokeLinecap: "round",
+    strokeWidth: 3,
   },
   empty: {
     stroke: colors.border,
@@ -103,6 +114,44 @@ const tones = stylex.create({
   success: { fill: colors.success, stroke: colors.success },
   warning: { fill: colors.warning, stroke: colors.warning },
 });
+
+/** A run of points: a line (and its area), or a dot for a lone point. */
+const SparklineSegment = ({
+  area,
+  height,
+  points,
+}: {
+  readonly area: boolean;
+  readonly height: number;
+  readonly points: readonly Point[];
+}) => {
+  const [first] = points;
+  if (first === undefined) {
+    return null;
+  }
+  if (points.length === 1) {
+    return (
+      <path
+        d={dotPath(first)}
+        data-sparkline-dot=""
+        vectorEffect="non-scaling-stroke"
+        {...stylex.props(styles.dot)}
+      />
+    );
+  }
+  return (
+    <g>
+      {area ? (
+        <path d={areaPath(points, height)} {...stylex.props(styles.area)} />
+      ) : null}
+      <path
+        d={linePath(points)}
+        vectorEffect="non-scaling-stroke"
+        {...stylex.props(styles.line)}
+      />
+    </g>
+  );
+};
 
 export interface SparklineProps {
   /** Oldest first; `null` for a gap (no sample). */
@@ -150,19 +199,12 @@ export const Sparkline = ({
           />
         ) : null}
         {segments.map((points) => (
-          <g key={`${points[0]?.x ?? 0}`}>
-            {area ? (
-              <path
-                d={areaPath(points, height)}
-                {...stylex.props(styles.area)}
-              />
-            ) : null}
-            <path
-              d={linePath(points)}
-              vectorEffect="non-scaling-stroke"
-              {...stylex.props(styles.line)}
-            />
-          </g>
+          <SparklineSegment
+            area={area}
+            height={height}
+            key={points[0]?.x ?? 0}
+            points={points}
+          />
         ))}
       </svg>
     </span>
