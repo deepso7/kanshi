@@ -15,7 +15,8 @@ phase in `docs/rework-notes.md`.
 - `src/api/`: the `HttpApi` spec, auth and handlers.
 - `web/`: the SPA (Vite, React 19, StyleX, TanStack Router and Query).
 - `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*` (dev stage only).
-- `alchemy.run.ts`: the stack (stage `dev` = dev mode, `prod` for deploys).
+- `alchemy.run.ts`: the stack (stage `dev` = dev mode, `prod` for deploys);
+  per-stage policy (Worker name `kanshi`, Cloudflare vs `.alchemy/` state) in `src/stages.ts`.
 - `test/unit/` (vitest), `test/integ/` (bun + alchemy, own stack); component tests sit next to components.
 
 ## Gotchas

@@ -4,8 +4,9 @@
 // - `pnpm dev`: stage `dev`, run locally by `alchemy dev` (dev mode on),
 //   plus the SPA's Vite dev server (HMR) proxying the API to the Worker.
 // - `pnpm run deploy` / `pnpm run destroy`: stage `prod` on Cloudflare (`deploy`
-//   builds the SPA first). State is kept in `.alchemy/` on the machine that
-//   deploys.
+//   builds the SPA first), as the Worker `kanshi`. Its state is kept in the
+//   account's Cloudflare state store; other stages keep theirs in `.alchemy/`
+//   (see `src/stages.ts` and `src/state-store.ts`).
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Command from "alchemy/Command";
@@ -13,21 +14,15 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
+import { devStages } from "./src/stages.ts";
+import { state } from "./src/state-store.ts";
 import Kanshi, { webAssetsDirectory } from "./src/worker.ts";
-
-/**
- * Stages that get dev mode: `/_dev/*` fixtures, 5s intervals, localhost.
- * Only when the Worker runs locally (`alchemy dev`): `alchemy deploy
- * --stage dev` to Cloudflare deploys without dev mode. The Worker also
- * serves `/_dev/*` only to requests for a loopback host.
- */
-export const devStages = new Set(["dev"]);
 
 export default Alchemy.Stack(
   "Kanshi",
   {
     providers: Cloudflare.providers(),
-    state: Alchemy.localState(),
+    state,
   },
   Effect.gen(function* KanshiStack() {
     const stage = yield* Alchemy.Stage;

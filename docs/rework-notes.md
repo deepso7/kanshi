@@ -1884,6 +1884,55 @@ as code is gone, with no backward compatibility.
   `config`. Registry migration `7_drop_keys` rebuilds `monitors` and
   `channels`: `key` is `UNIQUE`, which SQLite cannot drop in place.
 
+## Worker name and Cloudflare state
+
+The `prod` stage deploys the Worker as `kanshi`
+(`https://kanshi.<account-subdomain>.workers.dev`) and keeps its Alchemy
+state in the account's Cloudflare state store. Every other stage keeps the
+generated name (`<stack>-kanshi-<stage>-<random>`) and `.alchemy/` state.
+The policy is the pure `src/stages.ts` (`workerNameFor`, `stateStoreFor`,
+`devStages`), unit tested in `test/unit/stages.test.ts`. The stack's
+`state` layer is `src/state-store.ts` (importable without the stack);
+`test/unit/state-store.test.ts` builds it for `dev` / `integ-*` against a
+temp dir, and checks with sentinel layers that `prod` picks only the
+Cloudflare store (the real one would bootstrap a store in the account).
+
+- **State by stage.** A Stack's `state` is a
+  `Layer<State, never, StackServices>` and `StackServices` includes
+  `Stage`, already resolved from `--stage` / `ALCHEMY_STAGE` when the
+  layer is built (`make` in `Stack.ts`). So `alchemy.run.ts` passes
+  `Layer.unwrap(Alchemy.Stage.pipe(Effect.map(...)))`: only the chosen
+  layer is built, so `pnpm dev` and `pnpm test:integ` (placeholder
+  credentials) never touch Cloudflare. No argv parsing or extra env var.
+  The integration stack (`KanshiIntegration`) keeps `Alchemy.localState()`
+  outright.
+- **Name.** `Worker.ts`'s `name` prop is used as is (no lowercasing or
+  checks; only generated names are capped at 54 characters), so the name
+  must be a valid DNS label itself. It is set in the Worker's props effect
+  from `Effect.serviceOption(Alchemy.Stage)`: that effect also runs inside
+  the Worker at runtime, where there is no `Stage`. A plain `yield*
+Alchemy.Stage` fails every request with "Service not found: Stage" (as
+  `ProviderMode.defaultProviderMode` does, read it optionally).
+- **Bootstrap.** The first run against `Cloudflare.state()` prompts to
+  deploy the `alchemy-state-store` Worker and a Secrets Store (bearer
+  token, AES key encrypting each state entry); it stages this in
+  `.alchemy/state/CloudflareStateStore/` and deletes it once hoisted. The
+  URL and token are cached in `~/.alchemy/credentials/<profile>/cloudflare-state-store.json`;
+  with `CI=true` they are read from the Secrets Store each run, and a
+  missing store fails unless `--yes`. In beta.79 `Cloudflare.state()` takes
+  no options (the docs' `workerName` is not there yet).
+- **Upgrades.** No migration: a deployment made with local state and the
+  generated name gets a fresh `kanshi` Worker in an empty store, leaving the
+  old Worker and its DO data behind. The README says to `pnpm run destroy`
+  it from the old version first, or not to upgrade it to keep its data.
+- **Secrets.** Local state writes `Redacted` values in plain JSON
+  (`StateEncoding.ts`); the Cloudflare store encrypts every entry, so the
+  deployed `KANSHI_API_TOKEN` is no longer on disk.
+- Verified offline: the real `Kanshi` Worker compiled under a throwaway
+  in-memory stack (`alchemy/Test/Core`'s runtime, no plan or apply)
+  resolves `name: "kanshi"` for `prod` and no name for `dev` / `integ`.
+  Nothing was deployed or planned against Cloudflare.
+
 ## Lint conventions
 
 `pnpm check` runs oxlint (ultracite core, vitest, react and anti-slop
