@@ -16,6 +16,13 @@ import type {
   Unavailable,
 } from "../api/spec.ts";
 import {
+  clearedSessionCookie,
+  createSession,
+  sessionCookie,
+  sessionCookieName,
+  verifySession,
+} from "../auth/session.ts";
+import {
   FormBody,
   discardBody,
   maxFormBytes,
@@ -51,13 +58,6 @@ import {
   notFoundPage,
   submittedMonitorValues,
 } from "./pages.ts";
-import {
-  clearedSessionCookie,
-  createSession,
-  sessionCookie,
-  sessionCookieName,
-  verifySession,
-} from "./session.ts";
 import { statusPage } from "./status-page.ts";
 
 export interface UiDeps {

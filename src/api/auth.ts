@@ -1,47 +1,11 @@
-/* oxlint-disable eslint/max-classes-per-file -- middleware and its validator are one auth boundary */
-import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
-import * as HttpApiMiddleware from "effect/unstable/httpapi/HttpApiMiddleware";
-import * as HttpApiSecurity from "effect/unstable/httpapi/HttpApiSecurity";
 
-import {
-  isSameOrigin,
-  sessionCookieName,
-  verifySession,
-} from "../ui/session.ts";
-
-/** Checks the API token (bearer) and dashboard session cookies. */
-export class CredentialValidator extends Context.Service<
-  CredentialValidator,
-  {
-    readonly validateToken: (
-      token: string
-    ) => Effect.Effect<void, HttpApiError.Unauthorized>;
-    readonly validateSession: (
-      value: string
-    ) => Effect.Effect<void, HttpApiError.Unauthorized>;
-  }
->()("kanshi/api/CredentialValidator") {}
-
-/**
- * `/api` auth: the bearer token, or the dashboard's session cookie. A
- * cookie-authenticated request that is not a read must also come from the
- * dashboard's own origin (CSRF), otherwise it is refused with 403.
- */
-export class ApiAuth extends HttpApiMiddleware.Service<
-  ApiAuth,
-  { requires: CredentialValidator }
->()("kanshi/api/ApiAuth", {
-  error: [HttpApiError.UnauthorizedNoContent, HttpApiError.ForbiddenNoContent],
-  security: {
-    bearer: HttpApiSecurity.bearer,
-    session: HttpApiSecurity.apiKey({ in: "cookie", key: sessionCookieName }),
-  },
-}) {}
+import { isSameOrigin, verifySession } from "../auth/session.ts";
+import { ApiAuth, CredentialValidator } from "./middleware.ts";
 
 const safeMethods = new Set(["GET", "HEAD", "OPTIONS"]);
 

@@ -21,7 +21,7 @@ import {
   MonitorSummary,
 } from "../domain/monitor.ts";
 import { PublicStatus } from "../domain/public-status.ts";
-import { ApiAuth } from "./auth.ts";
+import { ApiAuth } from "./middleware.ts";
 
 export class NotFound extends Schema.TaggedError<NotFound>()(
   "NotFound",

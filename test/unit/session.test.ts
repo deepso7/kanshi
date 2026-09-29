@@ -1,7 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import { escapeHtml, html, raw, safeHref } from "../../src/ui/html.ts";
 import {
   clearedSessionCookie,
   isSameOrigin,
@@ -9,7 +8,8 @@ import {
   sessionCookie,
   sessionMaxAgeSeconds,
   verifySession,
-} from "../../src/ui/session.ts";
+} from "../../src/auth/session.ts";
+import { escapeHtml, html, raw, safeHref } from "../../src/ui/html.ts";
 
 const squash = (markup: string) => markup.replaceAll(/>\s+</gu, "><").trim();
 
