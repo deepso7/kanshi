@@ -1570,3 +1570,47 @@ Commands (end of UI phase 4): `pnpm build` ok (JS 828 KB, 269 KB gzip);
 
 Left for later: route-level code splitting (Vite warns about the 828 KB
 chunk; Effect's Schema and `HttpApiClient` are most of it).
+
+Conventions the pages follow: reuse `web/src/components/ui/` and `shared`
+(`focusRing`, `srOnly`, `label`); every interactive element gets
+`shared.focusRing`, icon-only buttons an `aria-label`, and status is never
+colour alone; one `h1` per page (`PageHeader`), sections `h2`. A field a
+page needs per row goes into the API response instead of a fetch per row.
+`/_ui` (dev only) shows the design system.
+
+## Lint conventions
+
+`pnpm check` runs oxlint (ultracite core, vitest, react and anti-slop
+presets plus the Effect rules vendored in `lint/anti-slop/`). How to satisfy
+the rules that need more than the obvious fix:
+
+- `no-manual-tagged-construction`: `Data.TaggedEnum` + `Data.taggedEnum`
+  (`T.X({...})`); errors are `Schema.TaggedError`; schema-backed values use
+  `Schema.TaggedStruct(...).make` or `Schema.TaggedClass`. Shared:
+  `DeliveryResult`, `AlertMessage` (`incidentMessage`/`watchdogMessage`).
+- `no-manual-tag-comparison` / `prefer-effect-match`: `T.$match`, else
+  `Match.valueTags`; partial `Match.value(x).pipe(Match.tag(...),
+Match.orElse(...))`; one tag `T.$is("X")` or `Predicate.isTagged`; Effect
+  types have guards (`Result.isFailure`, `Exit.isSuccess`, `Option.isSome`).
+- `no-manual-effect-error-tag`: `Effect.catchTag(s)`, or
+  `Effect.catchReason("Err", "Reason", f)` for a tagged `reason`.
+- `no-service-constructor-imports`: a plain helper that is not a service is
+  named `createX`, not `makeX`.
+- `require-safety-comment-for-type-assertion` / `no-chained-type-assertions`:
+  first try Schema, `satisfies`, a type guard or a precise signature; never
+  `as unknown as T` (build a typed test double instead).
+- `no-runtime-typeof`: `Predicate.isString` etc. for small checks; `typeof`
+  only inside an `(x): x is T` guard.
+- `no-unknown-parameters`: take a domain type or `Schema.Json`; a caught
+  value is named `cause: unknown` (the one exemption).
+- `no-unsafe-dictionary-type`: no `Record<string, unknown>`; decode into a
+  Schema `Struct`/`Record`.
+- `no-known-value-widening`: no inline `Record<string, X>` annotations on
+  literals or returns; use inference, `satisfies`, a closed key union, a
+  `Map` or a named `interface`.
+- `no-conditional-empty-object-spread`: build the object, then set the
+  optional key in an `if`, or use an explicit `undefined`/`null`.
+- `unicorn/no-array-method-this-argument`: fires on two-argument data-first
+  Effect calls; use the pipe form.
+- `vitest/prefer-describe-function-title`: `describe(probe, ...)` when the
+  title is an imported function's name.

@@ -1,177 +1,62 @@
 # AGENTS.md
 
 Kanshi is a self-hosted uptime monitor: one Cloudflare Worker (Effect v4 +
-Alchemy v2) hosting two Durable Object classes. See `README.md` for usage,
-`docs/rework-plan.md` for the design and `docs/rework-notes.md` for
-decisions, deviations and gotchas per phase.
+Alchemy v2) hosting two Durable Objects, plus a React SPA. Usage in
+`README.md`, design in `docs/rework-plan.md`, decisions and gotchas per
+phase in `docs/rework-notes.md`.
 
 ## Layout
 
-- `src/worker.ts`: the Worker. Serves the SPA (`web/dist`) as static
-  assets; runs first for `/api/*` (Effect `HttpApi`) and `/_dev/*` (dev
-  stage only; `src/http/worker-paths.ts` lists them, shared with the Vite
-  proxy), 404 for anything else that reaches it; registers the watchdog
-  cron; provides both DOs.
-- `src/monitor/`: the **Monitor DO** (`monitor.ts`, one object per monitor,
-  named by monitor id) and its pure rules (`machine.ts`, `cycle.ts`,
-  `reset.ts`, `outbox.ts`, `history.ts`) and storage/migrations
-  (`storage.ts`).
-- `src/registry/`: the **Registry DO** (`registry.ts`, singleton named
-  `registry`): monitor lifecycle, `public`/`managed` flags, cached
-  summaries, channels, watchdog episodes and outbox (`watchdog-store.ts`).
-- `src/domain/`: shared schemas and pure rules (inputs, URLs, expected
-  status, probe, channels). `src/alerts/`: messages and delivery.
-- `src/service/`: operations shared by the API and the dashboard, each a
-  `Context.Service` with a static `layer`. `src/api/`: `HttpApi` spec,
-  auth and thin handler layers. `src/api/spec.ts` and everything it imports
-  (`middleware.ts`, `src/domain/`, `src/auth/session.ts`) is also bundled
-  into the SPA: keep it browser-safe (no Worker, DO, Node or Bun imports;
-  `tsc -p web` checks it against the DOM). `src/auth/session.ts`: the
-  session cookie (HMAC) and the Origin check. `src/settings.ts`: `KanshiSettings`, the
-  Worker's config (API token, dev mode, quota).
-- `web/`: the SPA (Vite, React 19, StyleX, TanStack Router and Query), its
-  own `tsconfig.json`. `web/src/api/`: the typed client (`HttpApiClient`
-  from the spec), query and mutation options (`queries.ts`) and error
-  views (`errors.ts`); `web/src/pages/` (components only, for Fast
-  Refresh); `web/src/router.tsx` (the route tree, session guard, loaders,
-  the 401 sign-out); `web/src/lib/` (formatting, `useToastMutation`,
-  `useNow`); `web/src/components/` (design system in `ui/`, app pieces);
-  `web/src/theme/tokens.stylex.ts` (design tokens). `web/public/_headers`:
-  CSP and caching for the static assets.
-- `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*`.
-- `src/config.ts`: `defineConfig` for `kanshi.config.ts` /
-  `kanshi.dev.config.ts`. `src/sync/`: `kanshi sync` (`plan.ts` is the pure
-  diff). `scripts/kanshi.ts`: the CLI.
-- `alchemy.run.ts`: the stack (stage `dev` enables dev mode, `prod` for
-  deploys). `test/unit/` (vitest), `test/integ/` (bun + alchemy test
-  harness, its own stack in `test/integ/alchemy.run.ts`).
+- `src/worker.ts`: the Worker; serves `web/dist`, runs first for `/api/*` and `/_dev/*`, the watchdog cron.
+- `src/monitor/`: the Monitor DO (one per monitor), its pure rules and storage.
+- `src/registry/`: the Registry DO (singleton): monitors, channels, watchdog episodes.
+- `src/domain/`, `src/alerts/`: shared schemas and pure rules; alert messages and delivery.
+- `src/service/`: operations shared by the API, each a `Context.Service` with a `layer`.
+- `src/api/`: the `HttpApi` spec, auth and handlers.
+- `web/`: the SPA (Vite, React 19, StyleX, TanStack Router and Query).
+- `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*` (dev stage only).
+- `src/sync/`: `kanshi sync` (CLI in `scripts/kanshi.ts`, config via `src/config.ts`).
+- `alchemy.run.ts`: the stack (stage `dev` = dev mode, `prod` for deploys).
+- `test/unit/` (vitest), `test/integ/` (bun + alchemy, own stack); component tests sit next to components.
 
-Durable Object schema changes are new `SqliteMigrator` entries (`"<n>_name"`)
-in `src/monitor/storage.ts` or `src/registry/`; never edit an applied one.
-Keep `fetch` and cross-DO RPC out of SQL transactions.
+## Gotchas
 
-## Web conventions
-
-- Pages (`web/src/pages/`) export components only; routes, guards and
-  loaders live in `web/src/router.tsx`. Reads go through the
-  `queryOptions` in `web/src/api/queries.ts` (`callApi`, typed errors);
-  writes through their `mutationOptions` with `useToastMutation`, whose
-  `onSuccess` invalidates the affected keys. Add a field the page needs to
-  the API response instead of fetching per row.
+- DO schema changes are new `SqliteMigrator` entries; never edit an applied one.
+- No `fetch` or cross-DO RPC inside a SQL transaction.
+- `src/api/spec.ts` and everything it imports is bundled into the SPA: keep it
+  browser-safe (no Worker, DO, Node or Bun imports; `tsc -p web` checks it).
+- `web/src/pages/` export components only (Fast Refresh); routes, guards and
+  loaders live in `web/src/router.tsx`; reads and writes go through
+  `web/src/api/queries.ts`.
 - Styles: `stylex.create` with the tokens in `web/src/theme/tokens.stylex.ts`
-  (semantic colours, so both themes work); no CSS beyond `index.css`.
-  Reuse `components/ui/` (Base UI wrappers) and `shared` (`focusRing`,
-  `srOnly`, `label`). Check new pages at 390px and desktop, light and
-  dark: grid and flex children holding long text need `minWidth: 0` /
-  `minmax(0, 1fr)` and `overflowWrap: "anywhere"`.
-- A11y: one `h1` per page (`PageHeader`), sections `h2` (`CardTitle` and
-  `EmptyState` take a `heading`); every interactive element gets
-  `shared.focusRing`; icon-only buttons an `aria-label`; status is never
-  colour alone (text or an icon too).
-- Component tests sit next to the component (`*.test.tsx`, happy-dom,
-  Testing Library; the `web` vitest project). `/_ui` (dev only) shows the
-  design system.
+  only. Check new pages at 390px and desktop, light and dark, and keyboard/a11y.
 
 ## Checks
 
-Run all of these before committing:
+Run before committing (`pnpm fix` formats and applies safe lint fixes):
 
 ```sh
 pnpm typecheck && pnpm check && pnpm test
-pnpm test:integ   # builds web/, local stack on port 1337, ~4 min; stop `pnpm dev` first
+pnpm test:integ   # local stack on port 1337, ~4 min; stop `pnpm dev` first
 ```
 
-`pnpm fix` applies formatting and safe lint fixes.
+## Lint
 
-## Lint conventions
+Fix the code, don't disable rules; the overrides and their reasons are in
+`oxlint.config.ts`. The non-obvious Effect conventions (details in
+`docs/rework-notes.md`, "Lint conventions"):
 
-`pnpm check` runs oxlint (`oxlint.config.ts`: ultracite core, vitest,
-react and anti-slop presets plus the vendored Effect rules in
-`lint/anti-slop/`). Fix the code; do not add `oxlint-disable` comments for
-the rules below.
-
-- `no-manual-tagged-construction`: never write `{ _tag: "X", ... }`. Model
-  plain tagged unions as `type T = Data.TaggedEnum<{ X: {...}; Y:
-Record<never, never> }>` plus `const T = Data.taggedEnum<T>()`, and build
-  with `T.X({...})` / `T.Y()`. Errors are `Schema.TaggedError` classes
-  (`new E({...})`); schema-backed values use `Schema.TaggedStruct(...).make`
-  or `Schema.TaggedClass`. Shared ones: `DeliveryResult`
-  (`src/alerts/delivery.ts`), `AlertMessage` (plus
-  `incidentMessage`/`watchdogMessage` for a runtime tag,
-  `src/alerts/message.ts`).
-- `no-manual-tag-comparison` / `prefer-effect-match`: no `x._tag === "X"`
-  or `switch (x._tag)`. Exhaustive branching: `T.$match(x, {...})` for a
-  `taggedEnum`, else `Match.valueTags(x, {...})`; partial:
-  `Match.value(x).pipe(Match.tag("A", "B", f), Match.orElse(g))`. One tag:
-  `T.$is("X")(x)` or `Predicate.isTagged(x, "X")`. Effect's own data types
-  have guards: `Result.isFailure`, `Exit.isSuccess`, `Option.isSome`.
-  Chained literal ternaries on one value become `Match.value(v).pipe(
-Match.when(...), ...)`.
-- `no-manual-effect-error-tag`: in `Effect.catch`/`catchIf` use
-  `Effect.catchTag(s)`, or `Effect.catchReason("Err", "Reason", f)` for a
-  tagged `reason`.
-- `no-service-constructor-imports` (no project-local `make[A-Z]*` import
-  outside tests): a dependency-bearing constructor stays private to its
-  module, which exports a `Context.Service` class with a static `layer`
-  that yields its dependencies (`KanshiSettings`, `Monitor`, `Registry`,
-  other services); consumers `yield*` the service and the Worker provides
-  the layers. `make*` stays exported only for tests. A plain helper that is
-  not a service is renamed (e.g. `createX`).
-- `no-redeclare`: off (see overrides); keep Effect's
-  `const X = Schema...; type X = typeof X.Type` pairing.
-- `require-safety-comment-for-type-assertion`: first try to drop the `as`
-  (decode with Schema, `satisfies`, a type guard, a precise signature).
-  Otherwise put `// SAFETY: <the checked invariant that makes it true>` on
-  the line(s) right before the assertion or its statement/property.
-- `no-chained-type-assertions`: no `as unknown as T`; build a value that
-  really has type `T` (a typed test double, `satisfies`), or decode it.
-- `no-runtime-typeof`: decode external input with Schema at the boundary
-  (`Schema.decodeUnknown*`, `Schema.fromJsonString(S)` instead of
-  `JSON.parse`); for small local checks use `Predicate.isString` etc.
-  `typeof` is allowed only inside a `(x): x is T` type guard.
-- `no-unknown-parameters`: take a named domain type (or `Schema.Json`). A
-  thrown value from `try`/`catch`/`Effect.try*` is named `cause: unknown`
-  (the rule's one exemption).
-- `no-unsafe-dictionary-type`: no `Record<string, unknown>`; decode into a
-  Schema `Struct`/`Record` of concrete values, or use `Schema.Json`.
-- `no-known-value-widening`: no inline object/`Record<string, X>`
-  annotations on literals or returns. Let inference work, use `satisfies`,
-  a closed key union (`Record<Key, string>`), a `Map`, or a named
-  `interface` for a function's return type.
-- `no-conditional-empty-object-spread`: no `...(c ? {} : { k })`. Build the
-  object, then `if (c) { obj.k = v }` on a mutable local, or give the
-  field an explicit `undefined`/`null` where the type allows it.
-- `unicorn/no-array-method-this-argument`: fires on data-first Effect
-  calls with two arguments (`Effect.map(fx, f)`, `Effect.forEach(xs, f)`);
-  use the pipe form `fx.pipe(Effect.map(f))` / `pipe(xs, Effect.forEach(f))`.
-- `vitest/prefer-describe-function-title`: when a `describe` title is the
-  name of an imported function, pass the function: `describe(probe, ...)`.
-- `vitest/prefer-importing-vitest-globals`: unit tests import from
-  `@effect/vitest`/`vitest`; off for `test/integ` (see overrides).
-
-Overrides in `oxlint.config.ts`, each a false positive on idiomatic code:
-
-- `no-redeclare` off: oxlint has no `ignoreDeclarationMerge`, so it flags
-  Effect's value/type pair `const X`/`type X`; tsc reports real
-  redeclarations.
-- `unicorn/no-array-for-each` off: it matches every `Effect.forEach` by
-  method name, in any call form.
-- `unicorn/throw-new-error` off: it matches the class factory call in
-  `extends Schema.TaggedError<X>()("X", ...)`.
-- `vitest/prefer-importing-vitest-globals` off in `test/integ/**`: that
-  suite runs on `bun test` and imports `expect` from `bun:test`.
+- Tagged unions via `Data.taggedEnum` (`T.X()`, `T.$is`, `T.$match`); no `_tag` literals or comparisons.
+- Services are a `Context.Service` with a static `layer`; `make*` constructors stay private (exported for tests only).
+- Decode with Schema instead of `as`, `JSON.parse` or `typeof`; an unavoidable `as` needs a `// SAFETY:` comment.
+- Data-first Effect calls use the pipe form: `xs.pipe(Effect.forEach(f))`.
 
 ## Local dev and credentials
 
-- `pnpm dev` runs `alchemy dev --stage dev` offline with **placeholder**
-  `CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN` set in the script. Never put
-  those placeholders in `.env`: `alchemy deploy` would use them too. The
-  stack also starts the SPA's Vite dev server (`Command.Dev`, HMR) on
-  http://localhost:5173; it proxies the Worker's paths to port 1337.
+- `pnpm dev` sets placeholder Cloudflare credentials in the script itself;
+  never put them in `.env`, or `alchemy deploy` uses them too. `.env` holds
+  `KANSHI_API_TOKEN`; `pnpm seed` syncs `kanshi.dev.config.ts`.
 - Deploy with `pnpm run deploy` (`pnpm deploy` is pnpm's own command).
-- `.env` holds `KANSHI_API_TOKEN` (the API token and dashboard password).
-  `pnpm seed` syncs `kanshi.dev.config.ts` to the dev stack.
-- Integration tests use their own token (`test/integ/alchemy.run.ts`).
 
 ## Vendored Repositories
 

@@ -4,8 +4,8 @@ import core from "ultracite/oxlint/core";
 import react from "ultracite/oxlint/react";
 import vitest from "ultracite/oxlint/vitest";
 
-// Every rule override below is listed, with its reason, under "Lint
-// conventions" in AGENTS.md.
+// Every rule override below carries its reason: each is a false positive
+// on idiomatic Effect or bun code. Fix the code rather than add more.
 export default defineConfig({
   extends: [core, vitest, react, antiSlop],
   ignorePatterns: [...(core.ignorePatterns ?? []), "lint/anti-slop/**"],
