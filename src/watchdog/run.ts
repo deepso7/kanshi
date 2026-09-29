@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 
 import type { Monitor } from "../monitor/monitor.ts";
 import type {
+  ConfirmReport,
   ReconcileReport,
   Registry,
   RegistryEntry,
@@ -12,6 +13,7 @@ import type { ObserveResult } from "../registry/watchdog-store.ts";
 import type { ReconcileItem } from "./rules.ts";
 import {
   WatchdogAction,
+  confirmSuspect,
   decide,
   needsReconcile,
   watchdogConcurrency,
@@ -31,6 +33,11 @@ export interface RowReport {
   readonly lifecycle: RegistryEntry["lifecycle"];
   readonly outcome: string;
   readonly summaryUpdated?: boolean;
+  /**
+   * The batch found the monitor stale (`suspect`); its episode opened only
+   * if the fresh read confirmed it (`watch` is then the confirming write's).
+   */
+  readonly suspect?: boolean;
   readonly watch?: ObserveResult;
 }
 
@@ -67,10 +74,19 @@ const describeCause = (cause: Cause.Cause<unknown>): string =>
  *    `reconcile()`, which re-arms its alarm and returns its status.
  * 3. One `registry.reconcile(items, now)` for every active monitor:
  *    summary refreshes (revision-checked, so lost pushes converge) and
- *    "not being checked" episodes, then pruning and the Registry's alarm.
+ *    "not being checked" episodes (resolve, close), then pruning and the
+ *    Registry's alarm. A monitor it would open an episode for comes back
+ *    as a suspect instead.
+ * 4. Only with suspects: each is read again (`status()`, after the batch,
+ *    so it sees any check or disable the monitor committed since its first
+ *    read, pushed or not), and one `registry.confirmStale(items, now)`
+ *    opens episodes for those still stale at the same revision
+ *    (`confirmSuspect`); none left, no call.
  *
- * So a run makes `2 + active monitors` requests when nothing is stuck.
- * `now` is the run's clock (overridable in dev).
+ * So a run makes `2 + active monitors` requests when nothing is stuck and
+ * nothing opens (the steady state), and `3 + active monitors + suspects`
+ * when some monitor is found stale (`2 + active monitors + suspects` when
+ * no re-read confirms it). `now` is the run's clock (overridable in dev).
  */
 export const runWatchdog = Effect.fn("Watchdog.run")(
   function* runWatchdogEffect(deps: WatchdogDeps, now: number) {
@@ -192,6 +208,81 @@ export const runWatchdog = Effect.fn("Watchdog.run")(
       (batch.report?.results ?? []).map((result) => [result.id, result])
     );
 
+    // Confirm the would-be opens with a fresh read of each monitor, made
+    // after the batch: an observation from before it could miss a check or
+    // disable the monitor committed but had not pushed yet.
+    const suspects = items.filter(
+      (item) => byId.get(item.id)?.watch?.change === "suspect"
+    );
+    const reread = yield* Effect.forEach(
+      suspects,
+      (suspect) =>
+        monitor(suspect.id)
+          .status()
+          .pipe(
+            Effect.map((status) => ({
+              confirmed: confirmSuspect(suspect, status, now),
+              error: null,
+              id: suspect.id,
+            })),
+            Effect.catchCause((cause) =>
+              Effect.logError(
+                `watchdog could not confirm ${suspect.id}`,
+                cause
+              ).pipe(
+                Effect.as({
+                  confirmed: null,
+                  error: describeCause(cause),
+                  id: suspect.id,
+                })
+              )
+            )
+          ),
+      { concurrency: watchdogConcurrency }
+    );
+    const confirmed = reread.flatMap((entry) =>
+      entry.confirmed === null ? [] : [entry.confirmed]
+    );
+    const confirm =
+      confirmed.length === 0
+        ? null
+        : yield* registry()
+            .confirmStale(confirmed, now)
+            .pipe(
+              Effect.map((report: ConfirmReport) => ({ error: null, report })),
+              Effect.catchCause((cause) =>
+                Effect.logError("watchdog confirmStale failed", cause).pipe(
+                  Effect.as({ error: describeCause(cause), report: null })
+                )
+              )
+            );
+    const confirmById = new Map(
+      (confirm?.report?.results ?? []).map((result) => [result.id, result])
+    );
+    const rereadById = new Map(reread.map((entry) => [entry.id, entry]));
+    const dismissed: ObserveResult = {
+      applied: false,
+      change: "none",
+      episodeId: null,
+    };
+
+    /**
+     * A suspect's outcome: the confirming write's, or dismissed (the fresh
+     * read did not confirm it, or failed).
+     */
+    const confirmation = (id: string) => {
+      const entry = rereadById.get(id);
+      if (entry === undefined || entry.confirmed === null) {
+        return { error: entry?.error ?? null, watch: dismissed };
+      }
+      const result = confirmById.get(id);
+      return {
+        error:
+          result?.error ?? confirm?.error ?? (result ? null : "not confirmed"),
+        watch: result?.watch ?? dismissed,
+      };
+    };
+
     const results = steps.map((step): RowReport => {
       if ("done" in step) {
         return step.done;
@@ -199,12 +290,25 @@ export const runWatchdog = Effect.fn("Watchdog.run")(
       const result = byId.get(step.item.id);
       const error =
         result?.error ?? batch.error ?? (result ? null : "not reconciled");
+      const errors = error === null ? [] : [`reconcile: ${error}`];
       const report: RowReport = {
         ...step.report,
-        errors: error === null ? [] : [`reconcile: ${error}`],
+        errors,
         outcome: error === null ? "refreshed" : "partly failed",
         summaryUpdated: result?.summaryUpdated ?? false,
       };
+      if (result?.watch?.change === "suspect") {
+        const outcome = confirmation(step.item.id);
+        return outcome.error === null
+          ? { ...report, suspect: true, watch: outcome.watch }
+          : {
+              ...report,
+              errors: [...errors, `confirm: ${outcome.error}`],
+              outcome: "partly failed",
+              suspect: true,
+              watch: outcome.watch,
+            };
+      }
       return result?.watch ? { ...report, watch: result.watch } : report;
     });
 
@@ -221,7 +325,9 @@ export const runWatchdog = Effect.fn("Watchdog.run")(
       failed,
       now,
       pruned: batch.report?.pruned ?? null,
-      registryAlarmAt: batch.report?.alarmAt ?? null,
+      // The confirming write re-armed the alarm last, when it was made.
+      registryAlarmAt:
+        confirm?.report?.alarmAt ?? batch.report?.alarmAt ?? null,
       results,
     } satisfies WatchdogReport;
   }

@@ -1681,10 +1681,12 @@ Estimate, 10 monitors at 60s:
   reported, the others still apply), prunes episodes resolved over 30 days
   ago and re-arms the Registry alarm (armed only while watchdog alerts are
   due). The batch is made even with no active monitors, for pruning and
-  the alarm. Requests per run: `2 + active monitors` (plus repairs).
+  the alarm. Requests per run: `2 + active monitors` (plus repairs) in the
+  steady state; with suspects (below) `+ suspects` re-reads `+ 1`
+  confirming write.
 - Removed RPCs: `Monitor.ensureAlarm`, `Registry.observe`,
   `Registry.ensureAlarm`, `Registry.pruneWatchdog`. `Monitor.status()`
-  stays for the dev inspector.
+  stays for the dev inspector (and the confirming re-read, below).
 - **Stale** is now `max(2 × interval + 2 min, 10 min)` (`staleFloorMs`)
   since the last sign of life, and **one** stale observation opens the
   episode (the consecutive-runs counter is gone; migration
@@ -1733,10 +1735,43 @@ after, now)`: stale before, not after; passed to `reviseSummary` by
   check completes, and an in-flight check's alarm is its deadline, so
   every stale monitor whose alarm is in place is already due or in flight,
   a wedged one included: it would never alert.
-- Left open: the check's push is sent after its commit, so a batch applied
-  in the milliseconds between them still opens the episode (the same
-  window as a disable's push; the next run resolves it). `alarmRestored`
-  stays: a restored alarm's check usually finishes after the batch.
+- ~~Left open~~ (closed by the PR review decision below): the check's push
+  is sent after its commit, so a batch applied in the milliseconds between
+  them still opened the episode (the same window as a disable's push).
+  `alarmRestored` stays: a restored alarm's check usually finishes after
+  the batch.
+- **Decision (PR review round 1): confirm before opening.** The batch
+  (`Registry.reconcile`) no longer opens an episode: an observation that
+  would (`watchOutcome(row, item, confirmed = false)` gives `open`) comes
+  back as `suspect`, with nothing recorded. The runner then re-reads each
+  suspect with `Monitor.status()` (after the batch returned, no re-arm)
+  and `confirmSuspect(item, status, now)` keeps only those still stale
+  (so enabled), not deleted, and at the **same summary revision** as the
+  batch's read. One `Registry.confirmStale(items, now)` (new RPC, only when
+  some are left) opens them: each item in its own transaction, re-checked
+  with `confirmed = true` (row still active, no newer revision stored, no
+  episode open), then the alarm is re-armed. Why it closes the gap: the
+  re-read reads the Monitor's own storage, so any check, disable or edit
+  it committed before the re-read is seen whether or not its push has
+  arrived (a reviving check moves the revision and ends staleness, a
+  disable is never stale). A change committing after the re-read happens
+  after the monitor was seen stale twice, the second time after the batch,
+  so the episode is not opened on an out-of-date observation; such a
+  change is at most milliseconds after the confirming read, and the
+  confirming write still loses to its push if the push lands first
+  (newer revision). The next run sends the recovery as before.
+  Resolves and closes stay in the batch (a stale read cannot make them
+  wrong, only an hour late). Opening is rare, so the steady state stays
+  `2 + active monitors`; a run with suspects makes `3 + active monitors +
+suspects` (`2 + ... + suspects` when no re-read confirms any). A failed
+  re-read opens nothing that run (reported as `confirm: ...`; the next run
+  decides again). The run report marks such rows `suspect: true` with the
+  confirming write's `watch` (or `applied: false` when dismissed).
+- Rejected alternatives: letting the Monitor open its own episode under a
+  lock shared with check commits and edits (strictly ordered, but it holds
+  checks while a Registry call is in flight and moves watchdog logic into
+  every monitor); treating a check in flight at the re-read as healthy
+  (the rejected in-flight rule above: a wedged monitor alerts late).
 
 ### Dev and tests
 
@@ -1766,6 +1801,32 @@ Commands: `pnpm typecheck`, `pnpm check` pass; `pnpm test` 311 pass;
 `pnpm test:integ` 34 pass (about 4.4 minutes). Round 2 (`revives`): unit
 tests in `watchdog.test.ts` "checks between the watchdog's read and its
 batch"; `pnpm test` 328 pass; `pnpm test:integ` 34 pass (about 4.4 minutes).
+
+PR review round 1:
+
+- Confirm before opening (above). Unit: `watchOutcome` reports a batch
+  open as `suspect` (resolves and closes apply); "confirming a suspect
+  with a read after the batch" (a check committed but not pushed, a
+  disable, a deleted or unreadable monitor open nothing; still stale at
+  the same revision opens, unless a newer revision is stored by then);
+  `runWatchdog` over fakes (`list`, one `reconcile()` per monitor, the
+  batch, one `status()` per suspect, one `confirmStale`; a monitor checked
+  or disabled before the re-read makes no `confirmStale`; no suspect, no
+  extra call). Integration (`watchdog.test.ts`): the first stale run of
+  the lost-alarm test and the not-being-checked test are suspects,
+  confirmed, with one `list`, one `reconcile` and one `confirmStale`; runs
+  without suspects make no `confirmStale`.
+- Registry migrations have an upgrade test
+  (`test/unit/registry-migrations.test.ts`): the list moved to
+  `src/registry/migrations.ts` (no Alchemy import) and runs with the real
+  `@effect/sql-sqlite-do` client and migrator over `node:sqlite` (a small
+  storage double: `sql.exec` and `transaction`). It migrates to version 4,
+  inserts monitors (one with an open episode), a channel, episodes and an
+  outbox row, runs the full list (only 5 and 6 apply), and checks the
+  `monitors` columns, every row kept (minus the dropped columns), the
+  unique key, and that a second run applies nothing.
+- The plan's revision rule documents the revival bump (and
+  `reviseSummary`'s comment).
 
 ## Lint conventions
 

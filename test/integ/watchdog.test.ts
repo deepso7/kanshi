@@ -50,6 +50,7 @@ const RowReport = Schema.Struct({
   lifecycle: Schema.String,
   outcome: Schema.String,
   summaryUpdated: Schema.optionalKey(Schema.Boolean),
+  suspect: Schema.optionalKey(Schema.Boolean),
   watch: Schema.optionalKey(
     Schema.Struct({
       applied: Schema.Boolean,
@@ -94,6 +95,13 @@ const resultFor = (
   expect(result).toBeDefined();
   return result;
 };
+
+/**
+ * The confirming writes a run makes: one when any row was a suspect (for
+ * all of them), none otherwise.
+ */
+const confirmingWrites = (report: WatchdogReport): number =>
+  report.results.some((result) => result.suspect === true) ? 1 : 0;
 
 const rowOf = (id: string) =>
   registryRows.pipe(
@@ -150,10 +158,14 @@ test(
     expect(result?.errors).toEqual([]);
     expect(result?.alarmAt).toBeNumber();
     expect(result?.watch).toMatchObject({ applied: true, change: "none" });
+    expect(result?.suspect).toBeUndefined();
     // One list and one batched write, whatever the number of monitors; no
-    // per-monitor Registry call.
+    // per-monitor Registry call, and no confirming write without a suspect.
     expect(callsSince(before, after, "list")).toBe(1);
     expect(callsSince(before, after, "reconcile")).toBe(1);
+    expect(callsSince(before, after, "confirmStale")).toBe(
+      confirmingWrites(report)
+    );
     expect(callsSince(before, after, "upsertSummary")).toBe(0);
     expect((yield* detail(monitor.id)).status.alarmAt).toBeNumber();
     yield* waitFor(
@@ -162,9 +174,16 @@ test(
       (at) => at !== null && stoppedAt !== null && at > stoppedAt,
       15_000
     );
-    // Still stale as of that time with its alarm in place: alerted now.
+    // Still stale as of that time with its alarm in place: a suspect of
+    // the batch, confirmed by a fresh read, so alerted now.
+    const beforeNext = yield* registryCalls;
     const next = resultFor(yield* watchdog(later), monitor.id);
+    const afterNext = yield* registryCalls;
+    expect(next?.suspect).toBe(true);
     expect(next?.watch).toMatchObject({ applied: true, change: "open" });
+    expect(callsSince(beforeNext, afterNext, "list")).toBe(1);
+    expect(callsSince(beforeNext, afterNext, "reconcile")).toBe(1);
+    expect(callsSince(beforeNext, afterNext, "confirmStale")).toBe(1);
     const resumed = resultFor(yield* watchdog(), monitor.id);
     expect(resumed?.watch).toMatchObject({ change: "resolve" });
     yield* remove(monitor.id);
@@ -417,9 +436,16 @@ test(
 
     // An hour on, the last check is far older than the 10 minute floor:
     // one stale observation opens the episode.
+    // The batch only reports it; the confirming write, after a fresh read
+    // of the monitor, opens it.
     const later = Date.now() + 60 * minute;
+    const before = yield* registryCalls;
     const first = resultFor(yield* watchdog(later), monitor.id);
-    expect(first?.watch).toMatchObject({ change: "open" });
+    const after = yield* registryCalls;
+    expect(first?.suspect).toBe(true);
+    expect(first?.watch).toMatchObject({ applied: true, change: "open" });
+    expect(callsSince(before, after, "reconcile")).toBe(1);
+    expect(callsSince(before, after, "confirmStale")).toBe(1);
     const episodeId = first?.watch?.episodeId ?? "";
     expect(episodeId).toStartWith("watchdog-");
     expect((yield* rowOf(monitor.id))?.watch).toEqual({ episodeId });
@@ -431,9 +457,17 @@ test(
       resolvedAt: null,
     });
     expect(yield* notCheckedFlags(monitor.id)).toEqual([true, true, true]);
-    // Still stale: deduplicated, no second alert.
-    const again = resultFor(yield* watchdog(later), monitor.id);
+    // Still stale: deduplicated, no second alert, and no suspect (the
+    // episode is open), so no confirming write.
+    const beforeAgain = yield* registryCalls;
+    const againReport = yield* watchdog(later);
+    const afterAgain = yield* registryCalls;
+    const again = resultFor(againReport, monitor.id);
     expect(again?.watch).toMatchObject({ change: "none", episodeId });
+    expect(again?.suspect).toBeUndefined();
+    expect(callsSince(beforeAgain, afterAgain, "confirmStale")).toBe(
+      confirmingWrites(againReport)
+    );
 
     const down = yield* waitFor(
       "not-being-checked alert",

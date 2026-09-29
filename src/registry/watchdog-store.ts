@@ -115,16 +115,19 @@ export interface ObserveResult {
 /**
  * Record one watchdog observation of an active monitor, in one transaction
  * (the caller's), if it is still current (`watchOutcome`): open, resolve
- * or close its episode. Opening queues a `down` row for every channel;
- * resolving queues an `up` row for every channel that got a `down` row.
- * `at` is the watchdog run's clock; queued rows are due at `queuedAt`.
+ * or close its episode. Only a `confirmed` observation opens one; the
+ * batch's would-be opens are returned as `suspect` with nothing recorded.
+ * Opening queues a `down` row for every channel; resolving queues an `up`
+ * row for every channel that got a `down` row. `at` is the watchdog run's
+ * clock; queued rows are due at `queuedAt`.
  */
 export const observeMonitor = Effect.fn("WatchdogStore.observeMonitor")(
   function* observeMonitorEffect(
     monitorId: string,
     item: Pick<ReconcileItem, "observation" | "revision">,
     at: number,
-    queuedAt: number
+    queuedAt: number,
+    confirmed: boolean
   ) {
     const sql = yield* SqlClient.SqlClient;
     const { observation } = item;
@@ -142,7 +145,7 @@ export const observeMonitor = Effect.fn("WatchdogStore.observeMonitor")(
             lifecycle: stored.lifecycle,
             summaryRevision: stored.summaryRevision,
           };
-    const { applied, change } = watchOutcome(row, item);
+    const { applied, change } = watchOutcome(row, item, confirmed);
     if (!applied || row === null) {
       return {
         applied: false,
@@ -198,14 +201,15 @@ export const observeMonitor = Effect.fn("WatchdogStore.observeMonitor")(
         episodeId = null;
         break;
       }
-      case "none": {
+      case "none":
+      case "suspect": {
         break;
       }
       default: {
         return change satisfies never;
       }
     }
-    if (change !== "none") {
+    if (change !== "none" && change !== "suspect") {
       yield* sql`UPDATE monitors SET stale_episode_id = ${episodeId}
         WHERE id = ${monitorId}`;
     }

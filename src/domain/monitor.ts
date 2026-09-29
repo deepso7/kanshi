@@ -176,11 +176,16 @@ export const summaryChanged = (
 /**
  * `after` with its `summaryRevision` bumped by one when the summary changed
  * from `before` (a status transition, enable/disable, or an edit of the
- * name, URL or interval), or when the change `revived` a monitor the
- * watchdog would call stale (a check or schedule restart after a long gap;
- * see `revives`), and kept otherwise. The revision is what the Registry
- * orders pushes and watchdog observations by, so it only moves when there
- * is something new to push.
+ * name, URL or interval), and kept otherwise. The revision is what the
+ * Registry orders pushes and watchdog observations by, so it only moves
+ * when there is something new to push.
+ *
+ * The one exception: a change that `revived` a monitor the watchdog would
+ * call stale (the first check or schedule restart after a long gap; see
+ * `revives`) bumps it once even though no summary field moved. It is then
+ * pushed, and the watchdog rejects an observation read before it (older
+ * revision) instead of alerting a monitor that is checked again. The next
+ * check finds the monitor fresh, so it does not bump again.
  */
 export const reviseSummary = (
   before: { readonly config: MonitorConfig; readonly state: MonitorState },

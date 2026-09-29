@@ -37,6 +37,7 @@ import type {
 } from "../../src/watchdog/rules.ts";
 import {
   alarmRestored,
+  confirmSuspect,
   creatingGraceMs,
   decide,
   isStale,
@@ -423,9 +424,39 @@ describe(watchOutcome, () => {
     url: "https://example.com/",
   };
 
-  it("opens an episode for a current stale observation", () => {
+  it("only reports a batch observation that would open as a suspect", () => {
     assert.deepStrictEqual(
-      watchOutcome(watched(), { observation: stale, revision: 5 }),
+      watchOutcome(watched(), { observation: stale, revision: 5 }, false),
+      { applied: true, change: "suspect" }
+    );
+    // Resolves and closes apply from the batch.
+    const open = watched({ episodeId: "ep" });
+    assert.deepStrictEqual(
+      watchOutcome(
+        open,
+        { observation: { ...stale, stale: false }, revision: 5 },
+        false
+      ),
+      { applied: true, change: "resolve" }
+    );
+    assert.deepStrictEqual(
+      watchOutcome(
+        open,
+        { observation: { ...stale, enabled: false }, revision: 5 },
+        false
+      ),
+      { applied: true, change: "close" }
+    );
+    // Already open: deduplicated, not a suspect.
+    assert.deepStrictEqual(
+      watchOutcome(open, { observation: stale, revision: 5 }, false),
+      { applied: true, change: "none" }
+    );
+  });
+
+  it("opens an episode for a confirmed stale observation", () => {
+    assert.deepStrictEqual(
+      watchOutcome(watched(), { observation: stale, revision: 5 }, true),
       { applied: true, change: "open" }
     );
   });
@@ -433,10 +464,11 @@ describe(watchOutcome, () => {
   it("ignores a stale observation superseded by a newer revision", () => {
     // Read at revision 5; a status change was pushed as 6 before the batch.
     assert.deepStrictEqual(
-      watchOutcome(watched({ summaryRevision: 6 }), {
-        observation: stale,
-        revision: 5,
-      }),
+      watchOutcome(
+        watched({ summaryRevision: 6 }),
+        { observation: stale, revision: 5 },
+        true
+      ),
       { applied: false, change: "none" }
     );
   });
@@ -446,14 +478,15 @@ describe(watchOutcome, () => {
     // (revision 6, pushed) before the batch was applied.
     const disabledSince = watched({ summaryRevision: 6 });
     assert.deepStrictEqual(
-      watchOutcome(disabledSince, { observation: stale, revision: 5 }),
+      watchOutcome(disabledSince, { observation: stale, revision: 5 }, true),
       { applied: false, change: "none" }
     );
     // An open episode is left for the next run too (which closes it).
     assert.deepStrictEqual(
       watchOutcome(
         { ...disabledSince, episodeId: "ep" },
-        { observation: { ...stale, stale: false }, revision: 5 }
+        { observation: { ...stale, stale: false }, revision: 5 },
+        false
       ),
       { applied: false, change: "none" }
     );
@@ -461,19 +494,20 @@ describe(watchOutcome, () => {
 
   it("ignores a row that is gone or no longer active", () => {
     const item = { observation: stale, revision: 5 };
-    assert.isFalse(watchOutcome(null, item).applied);
+    assert.isFalse(watchOutcome(null, item, true).applied);
     assert.isFalse(
-      watchOutcome(watched({ lifecycle: "deleting" }), item).applied
+      watchOutcome(watched({ lifecycle: "deleting" }), item, true).applied
     );
   });
 
   it("applies an observation newer than a lost push", () => {
     // The Registry missed revision 5 (stored 3); the item carries it.
     assert.deepStrictEqual(
-      watchOutcome(watched({ summaryRevision: 3 }), {
-        observation: stale,
-        revision: 5,
-      }),
+      watchOutcome(
+        watched({ summaryRevision: 3 }),
+        { observation: stale, revision: 5 },
+        true
+      ),
       { applied: true, change: "open" }
     );
   });
@@ -545,7 +579,7 @@ describe("checks between the watchdog's read and its batch", () => {
     assert.isTrue(shouldPushSummary(stuck, after));
     // The batch finds the pushed revision newer than its read: ignored.
     assert.deepStrictEqual(
-      watchOutcome(watched({ summaryRevision: 6 }), item),
+      watchOutcome(watched({ summaryRevision: 6 }), item, false),
       { applied: false, change: "none" }
     );
     // The next run (checks kept going) reads it fresh at that revision.
@@ -556,7 +590,8 @@ describe("checks between the watchdog's read and its batch", () => {
     assert.deepStrictEqual(
       watchOutcome(
         watched({ summaryRevision: 6 }),
-        read(later, readAt + 60 * minute)
+        read(later, readAt + 60 * minute),
+        false
       ),
       { applied: true, change: "none" }
     );
@@ -568,10 +603,99 @@ describe("checks between the watchdog's read and its batch", () => {
     // next check only moves when one completes), so "armed and due soon"
     // cannot tell it apart from one about to be checked.
     assert.isAtMost(nextAlarmAt(stuck.config, stuck.state) ?? 0, readAt);
-    // No check completes: the Registry still has the read revision.
-    assert.deepStrictEqual(watchOutcome(watched(), item), {
+    // No check completes: the Registry still has the read revision, so
+    // the batch reports a suspect, and the re-read after it confirms.
+    assert.deepStrictEqual(watchOutcome(watched(), item, false), {
+      applied: true,
+      change: "suspect",
+    });
+    const confirmed = confirmSuspect(
+      { ...item, id: "m1", summary: summaryOf(stuck.config, stuck.state) },
+      live(stuck),
+      readAt + 2000
+    );
+    assert.isNotNull(confirmed);
+    assert.isTrue(confirmed?.observation.stale);
+    assert.strictEqual(confirmed?.revision, 5);
+    assert.deepStrictEqual(watchOutcome(watched(), confirmed ?? item, true), {
       applied: true,
       change: "open",
+    });
+  });
+
+  describe("confirming a suspect with a read after the batch", () => {
+    const suspect = {
+      ...read(stuck),
+      id: "m1",
+      summary: summaryOf(stuck.config, stuck.state),
+    };
+    // The batch is applied at readAt + 1s: stale, no newer revision known.
+    const batchAt = readAt + 1000;
+    const confirmAt = readAt + 2000;
+
+    it("opens nothing for a check committed but not yet pushed", () => {
+      // The overdue alarm's check commits right after the first read; its
+      // push has not reached the Registry when the batch is applied.
+      const after = check(stuck, readAt + 500);
+      assert.strictEqual(after.state.summaryRevision, 6);
+      assert.deepStrictEqual(watchOutcome(watched(), suspect, false), {
+        applied: true,
+        change: "suspect",
+      });
+      // The re-read sees the Monitor's own state: not stale, newer revision.
+      assert.isNull(confirmSuspect(suspect, live(after), confirmAt));
+      // Even with a clock at which the check would be stale again, the
+      // moved revision dismisses it.
+      assert.isNull(
+        confirmSuspect(suspect, live(after), confirmAt + 60 * minute)
+      );
+    });
+
+    it("opens nothing for a monitor disabled after the first read", () => {
+      const disabled = applyConfigChange(
+        stuck.config,
+        { ...stuck.config, enabled: false, updatedAt: batchAt },
+        stuck.state,
+        batchAt
+      );
+      const after = { config: disabled.config, state: disabled.state };
+      assert.isAbove(after.state.summaryRevision, suspect.revision);
+      assert.isNull(confirmSuspect(suspect, live(after), confirmAt));
+      // Disabled is never stale, whatever the revision.
+      assert.isNull(
+        confirmSuspect(
+          { ...suspect, revision: after.state.summaryRevision },
+          live(after),
+          confirmAt
+        )
+      );
+    });
+
+    it("opens nothing for a monitor deleted or unreadable", () => {
+      assert.isNull(confirmSuspect(suspect, tombstoned, confirmAt));
+      assert.isNull(confirmSuspect(suspect, unconfigured, confirmAt));
+      assert.isNull(confirmSuspect(suspect, null, confirmAt));
+    });
+
+    it("opens a monitor still stale at the same revision", () => {
+      const confirmed = confirmSuspect(suspect, live(stuck), confirmAt);
+      assert.deepStrictEqual(confirmed, {
+        ...suspect,
+        observation: { ...suspect.observation, alarmRestored: false },
+      });
+      assert.deepStrictEqual(
+        watchOutcome(watched(), confirmed ?? suspect, true),
+        { applied: true, change: "open" }
+      );
+      // A newer revision pushed before the confirming write still wins.
+      assert.deepStrictEqual(
+        watchOutcome(
+          watched({ summaryRevision: 6 }),
+          confirmed ?? suspect,
+          true
+        ),
+        { applied: false, change: "none" }
+      );
     });
   });
 
@@ -738,21 +862,48 @@ const registryRow = (
  * A watchdog over fake objects that records every call as
  * `<object>.<method>`: `snapshots` are the monitors' `reconcile()` answers,
  * `batch` the Registry's `reconcile` (null: it fails), `restored` the
- * monitors whose `reconcile()` restored a lost alarm.
+ * monitors whose `reconcile()` restored a lost alarm, `rereads` the
+ * monitors' later `status()` answers (default: their `snapshots`).
+ * `confirmStale` opens an episode for every item it gets.
  */
 const fakeWatchdog = (
   rows: readonly RegistryEntry[],
   snapshots: ReadonlyMap<string, MonitorSnapshot>,
   batch: ((items: readonly ReconcileItem[]) => ReconcileReport) | null,
-  restored: ReadonlySet<string> = new Set()
+  restored: ReadonlySet<string> = new Set(),
+  rereads: ReadonlyMap<string, MonitorSnapshot> = snapshots
 ) => {
   const calls: string[] = [];
   const batches: (readonly ReconcileItem[])[] = [];
+  const confirms: (readonly ReconcileItem[])[] = [];
   const registry: Pick<
     RegistryStub,
-    "activate" | "list" | "markDeleting" | "reconcile" | "remove"
+    | "activate"
+    | "confirmStale"
+    | "list"
+    | "markDeleting"
+    | "reconcile"
+    | "remove"
   > = {
     activate: () => Effect.sync(() => calls.push("registry.activate") > 0),
+    confirmStale: (items: readonly ReconcileItem[]) =>
+      Effect.sync(() => {
+        calls.push("registry.confirmStale");
+        confirms.push(items);
+        return {
+          alarmAt: t0 + 6,
+          results: items.map((item) => ({
+            error: null,
+            id: item.id,
+            summaryUpdated: false,
+            watch: {
+              applied: true,
+              change: "open" as const,
+              episodeId: `watchdog-${item.id}`,
+            },
+          })),
+        };
+      }),
     list: () =>
       Effect.sync(() => {
         calls.push("registry.list");
@@ -775,7 +926,7 @@ const fakeWatchdog = (
   };
   const monitorOf = (
     id: string
-  ): Pick<MonitorStub, "destroy" | "reconcile"> => ({
+  ): Pick<MonitorStub, "destroy" | "reconcile" | "status"> => ({
     destroy: () =>
       Effect.sync(() => {
         calls.push(`${id}.destroy`);
@@ -790,21 +941,31 @@ const fakeWatchdog = (
           tombstonedAt: null,
         };
       }),
+    status: () =>
+      Effect.sync(() => {
+        calls.push(`${id}.status`);
+        return {
+          alarmAt: t0 + 1,
+          snapshot: rereads.get(id) ?? null,
+          tombstonedAt: null,
+        };
+      }),
   });
   const deps: WatchdogDeps = {
     // SAFETY: the run only calls `getByName` on the namespace, then
-    // `destroy` and `reconcile` on the stub; this double implements those.
+    // `destroy`, `reconcile` and `status` on the stub; this double
+    // implements those.
     monitors: {
       getByName: (name: string) => monitorOf(name),
     } as WatchdogDeps["monitors"],
     // SAFETY: the run only calls `getByName` on the namespace, then
-    // `activate`, `list`, `markDeleting`, `reconcile` and `remove` on the
-    // stub; this double implements exactly those.
+    // `activate`, `confirmStale`, `list`, `markDeleting`, `reconcile` and
+    // `remove` on the stub; this double implements exactly those.
     registries: {
       getByName: (_name: string) => registry,
     } as WatchdogDeps["registries"],
   };
-  return { batches, calls, deps };
+  return { batches, calls, confirms, deps };
 };
 
 describe(runWatchdog, () => {
@@ -830,8 +991,11 @@ describe(runWatchdog, () => {
       summaryUpdated: item.id === "fresh",
       watch: {
         applied: true,
-        change: item.observation.stale ? "open" : "none",
-        episodeId: item.observation.stale ? "watchdog-1" : null,
+        change:
+          item.observation.stale && !item.observation.alarmRestored
+            ? "suspect"
+            : "none",
+        episodeId: null,
       },
     })),
   });
@@ -894,7 +1058,7 @@ describe(runWatchdog, () => {
         ]),
         [
           ["fresh", "Refresh", "refreshed", true, "none"],
-          ["stale", "Refresh", "refreshed", false, "open"],
+          ["stale", "Refresh", "refreshed", false, "none"],
           ["young", "Wait", "waiting", null, null],
           ["gone", "Destroy", "removed", null, null],
         ]
@@ -904,6 +1068,117 @@ describe(runWatchdog, () => {
       assert.strictEqual(report.failed, 0);
     }).pipe(Effect.provide(RuntimeContext.phantom))
   );
+
+  describe("a monitor stale at the batch", () => {
+    // Not restored: the batch reports it as a suspect.
+    const suspectRows = [registryRow("fresh"), registryRow("stale")];
+    /** `stale`, checked just after the first read (revision bumped). */
+    const checked = snapshot({ lastCheckedAt: now, summaryRevision: 4 });
+    const disabled = snapshot({
+      config: { enabled: false },
+      lastCheckedAt: t0,
+      summaryRevision: 4,
+    });
+
+    it.effect("opens an episode only after a fresh read confirms it", () =>
+      Effect.gen(function* confirmTest() {
+        const { calls, confirms, deps } = fakeWatchdog(
+          suspectRows,
+          snapshots,
+          answer
+        );
+        const report = yield* runWatchdog(deps, now);
+        // 2 + active monitors, plus one re-read per suspect and one
+        // confirming write.
+        assert.deepStrictEqual(calls, [
+          "registry.list",
+          "fresh.reconcile",
+          "stale.reconcile",
+          "registry.reconcile",
+          "stale.status",
+          "registry.confirmStale",
+        ]);
+        assert.deepStrictEqual(
+          confirms.map((items) => items.map((item) => item.id)),
+          [["stale"]]
+        );
+        assert.deepStrictEqual(confirms[0]?.[0]?.observation, {
+          alarmRestored: false,
+          enabled: true,
+          intervalSeconds: 60,
+          lastCheckedAt: t0,
+          name: "Site",
+          stale: true,
+          url: "https://example.com/",
+        });
+        const suspect = report.results.find((result) => result.id === "stale");
+        assert.isTrue(suspect?.suspect);
+        assert.deepStrictEqual(suspect?.watch, {
+          applied: true,
+          change: "open",
+          episodeId: "watchdog-stale",
+        });
+        assert.deepStrictEqual(suspect?.errors, []);
+        assert.isUndefined(
+          report.results.find((result) => result.id === "fresh")?.suspect
+        );
+        assert.strictEqual(report.registryAlarmAt, t0 + 6);
+      }).pipe(Effect.provide(RuntimeContext.phantom))
+    );
+
+    for (const [label, reread] of [
+      ["checked", checked],
+      ["disabled", disabled],
+    ] as const) {
+      it.effect(`opens nothing for a monitor ${label} before the re-read`, () =>
+        Effect.gen(function* dismissTest() {
+          const { calls, confirms, deps } = fakeWatchdog(
+            suspectRows,
+            snapshots,
+            answer,
+            new Set(),
+            new Map([["stale", reread]])
+          );
+          const report = yield* runWatchdog(deps, now);
+          assert.deepStrictEqual(calls, [
+            "registry.list",
+            "fresh.reconcile",
+            "stale.reconcile",
+            "registry.reconcile",
+            "stale.status",
+          ]);
+          assert.deepStrictEqual(confirms, []);
+          const suspect = report.results.find(
+            (result) => result.id === "stale"
+          );
+          assert.isTrue(suspect?.suspect);
+          assert.deepStrictEqual(suspect?.watch, {
+            applied: false,
+            change: "none",
+            episodeId: null,
+          });
+          assert.strictEqual(suspect?.outcome, "refreshed");
+          assert.strictEqual(report.registryAlarmAt, t0 + 5);
+        }).pipe(Effect.provide(RuntimeContext.phantom))
+      );
+    }
+
+    it.effect("makes no extra call when nothing is a suspect", () =>
+      Effect.gen(function* steadyTest() {
+        const { calls, deps } = fakeWatchdog(
+          [registryRow("fresh")],
+          snapshots,
+          answer
+        );
+        yield* runWatchdog(deps, now);
+        assert.deepStrictEqual(calls, [
+          "registry.list",
+          "fresh.reconcile",
+          "registry.reconcile",
+        ]);
+      }).pipe(Effect.provide(RuntimeContext.phantom))
+    );
+  });
 
   it.effect("still makes the batched write with no active monitors", () =>
     Effect.gen(function* emptyTest() {

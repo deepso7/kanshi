@@ -62,10 +62,13 @@ Tables (`CREATE TABLE IF NOT EXISTS` at start, plus a `schema_version` row):
   lastCheckedAt, last result summary, open incident id, `nextCheckAt`,
   `nextCheckKind` (`scheduled|confirm`), `manualRequestedAt` (or null),
   `inflight` (checkId, generation, kind, startedAt, or null),
-  `summaryRevision` (monotonic, bumped only by a change of the Registry
+  `summaryRevision` (monotonic, bumped by a change of the Registry
   summary: status, enabled, name, URL or interval; a check that changes
-  none of them leaves it alone), `nextMaintenanceAt`, `rolledUpThrough`
-  (day).
+  none of them leaves it alone, with one exception: a check or edit that
+  revives a stale monitor, one the watchdog would call not being checked,
+  bumps it once even when the summary is unchanged, so the push lets the
+  watchdog reject observations read before it), `nextMaintenanceAt`,
+  `rolledUpThrough` (day).
 - `tombstone` (single row, only after delete): deletedAt. Once present,
   `configure` and every mutating RPC are rejected and the alarm is cleared.
 - `checks`: checkId, at, kind (`scheduled|confirm|manual`), counted (bool),
@@ -203,7 +206,8 @@ Rules:
   be re-armed.
 - A monitor pushes its summary (`upsertSummary`) only when it changed: a
   status transition, enable/disable, or an edit of the name, URL or
-  interval (`shouldPushSummary`: the revision moved). A check that changes
+  interval (`shouldPushSummary`: the revision moved), or a check or edit
+  revived a stale monitor (the one bump above). A check that changes
   nothing makes no Registry request, so the Registry is not kept awake by
   checks. A failed push is retried on the next check (in memory) and
   otherwise converged by the watchdog.
@@ -240,10 +244,16 @@ longer than `max(2 × interval + 2 min, 10 min)` (measured from the last
 check, creation or schedule reset), one observation opens an episode and
 alerts all channels "Kanshi: monitor X is not being checked"
 (deduplicated until it recovers; a fresh observation sends the recovery,
-disabling closes it silently). The same call prunes old episodes and
-re-arms the Registry's alarm, which is set only while watchdog alerts are
-due. A run is `2 + active monitors` requests; a silently stuck monitor is
-noticed within about 1–2 hours.
+disabling closes it silently). The batch does not open episodes itself:
+it returns those monitors as suspects, the watchdog reads each suspect
+again (`status()`, after the batch), and one `registry.confirmStale`
+opens episodes only for those still stale, enabled and active at the
+same revision, so a check or disable the monitor committed but had not
+yet pushed never opens one. The batch prunes old episodes; both calls
+re-arm the Registry's alarm, which is set only while watchdog alerts are
+due. A run is `2 + active monitors` requests in the steady state
+(nothing opens), and `3 + active monitors + suspects` when a monitor is
+found stale; a silently stuck monitor is noticed within about 1–2 hours.
 
 ## History and uptime
 

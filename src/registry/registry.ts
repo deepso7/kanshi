@@ -1,4 +1,3 @@
-import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator";
 import type { RuntimeContext } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Cause from "effect/Cause";
@@ -33,6 +32,7 @@ import { openDurableSql } from "../storage/sqlite.ts";
 import type { ReconcileItem } from "../watchdog/rules.ts";
 import { episodeRetentionMs } from "../watchdog/rules.ts";
 import { KeyTaken, QuotaExceeded, registryErrors } from "./errors.ts";
+import { registryMigrations } from "./migrations.ts";
 import type { ObserveResult } from "./watchdog-store.ts";
 import {
   closeMonitorEpisode,
@@ -43,7 +43,6 @@ import {
   readWatchdogPair,
   readWatchdogWork,
   recentWatchdogAlerts,
-  watchdogMigration,
   writeWatchdogOutbox,
 } from "./watchdog-store.ts";
 
@@ -103,6 +102,13 @@ export interface ReconcileReport {
   readonly alarmAt: number | null;
   /** Resolved episodes pruned, or null if pruning failed. */
   readonly pruned: number | null;
+  readonly results: readonly ReconcileResult[];
+}
+
+/** The watchdog's confirming write, made only when a batch had suspects. */
+export interface ConfirmReport {
+  /** The Registry alarm after the write: set only when alerts are due. */
+  readonly alarmAt: number | null;
   readonly results: readonly ReconcileResult[];
 }
 
@@ -304,17 +310,30 @@ export class Registry extends Cloudflare.DurableObject<
      * The watchdog's one write per run, for every active monitor it read:
      * store the summary (same revision rule as `upsertSummary`, so a lost
      * push converges and a newer one is never overwritten) and record the
-     * observation, opening (alerting every channel), resolving or closing
-     * its "not being checked" episode, unless the observation is out of
-     * date (the row has a newer summary revision, or is no longer active).
-     * Then prune old episodes and re-arm the alarm, which is set only while
-     * watchdog alerts are due. `at` is the run's clock. Each item is its
-     * own transaction.
+     * observation, resolving or closing its "not being checked" episode,
+     * unless the observation is out of date (the row has a newer summary
+     * revision, or is no longer active). An observation that would open an
+     * episode is only reported (`suspect`): the runner confirms it with a
+     * fresh read of the monitor (`confirmStale`). Then prune old episodes
+     * and re-arm the alarm, which is set only while watchdog alerts are
+     * due. `at` is the run's clock. Each item is its own transaction.
      */
     reconcile: (
       items: readonly ReconcileItem[],
       at: number
     ) => Effect.Effect<ReconcileReport, never, RuntimeContext>;
+    /**
+     * Open the episodes of the batch's suspects that a fresh read of the
+     * monitor, made after the batch, found still stale at the same
+     * revision (`confirmSuspect`). Each is re-checked like a batch item
+     * (still active, no newer revision stored, no episode open), opened
+     * alerting every channel, in its own transaction; then the alarm is
+     * re-armed. `at` is the run's clock.
+     */
+    confirmStale: (
+      items: readonly ReconcileItem[],
+      at: number
+    ) => Effect.Effect<ConfirmReport, never, RuntimeContext>;
     /** The open "not being checked" episodes, oldest first. */
     openEpisodes: () => Effect.Effect<
       readonly Episode[],
@@ -343,83 +362,6 @@ export class Registry extends Cloudflare.DurableObject<
     ) => Effect.Effect<void, never, RuntimeContext>;
   }
 >()("Registry", { errors: registryErrors }) {}
-
-const migrations = SqliteMigrator.fromRecord({
-  "1_core": Effect.gen(function* coreMigration() {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`CREATE TABLE monitors (
-      id TEXT PRIMARY KEY,
-      key TEXT NOT NULL UNIQUE,
-      managed INTEGER NOT NULL,
-      lifecycle TEXT NOT NULL,
-      op_id TEXT NOT NULL,
-      public INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      status TEXT NOT NULL,
-      enabled INTEGER NOT NULL,
-      last_checked_at INTEGER,
-      interval_seconds INTEGER NOT NULL,
-      summary_revision INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`;
-    // Dev stage only: webhook sink events and flip targets.
-    yield* sql`CREATE TABLE dev_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      at INTEGER NOT NULL,
-      kind TEXT NOT NULL,
-      detail TEXT NOT NULL
-    )`;
-    yield* sql`CREATE TABLE dev_flips (
-      name TEXT PRIMARY KEY,
-      up INTEGER NOT NULL
-    )`;
-  }),
-  "2_channels": Effect.gen(function* channelsMigration() {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`CREATE TABLE channels (
-      id TEXT PRIMARY KEY,
-      key TEXT NOT NULL UNIQUE,
-      managed INTEGER NOT NULL,
-      kind TEXT NOT NULL,
-      url TEXT NOT NULL,
-      url_hash TEXT NOT NULL,
-      name TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`;
-    // Dev stage only: counters for the webhook sink's `failTimes`.
-    yield* sql`CREATE TABLE dev_counters (
-      name TEXT PRIMARY KEY,
-      value INTEGER NOT NULL
-    )`;
-  }),
-  "3_watchdog": watchdogMigration,
-  // The summary gains the target URL. Revision 0 lets the next summary
-  // push (a check, an edit or the watchdog's refresh) fill it in.
-  "4_monitor_url": Effect.gen(function* monitorUrlMigration() {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`ALTER TABLE monitors ADD COLUMN url TEXT NOT NULL DEFAULT ''`;
-    yield* sql`UPDATE monitors SET summary_revision = 0`;
-  }),
-  // Monitors push their summary only when a Registry-visible field
-  // changes, not after every check, so the summary no longer carries the
-  // last check time (the dashboard reads it live from each monitor).
-  "5_summary_without_last_checked": Effect.gen(
-    function* summaryWithoutLastCheckedMigration() {
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`ALTER TABLE monitors DROP COLUMN last_checked_at`;
-    }
-  ),
-  // The hourly watchdog opens an episode on one stale observation, so the
-  // consecutive-stale-runs counter is gone (`stale_episode_id` stays).
-  "6_watchdog_single_observation": Effect.gen(
-    function* watchdogSingleObservationMigration() {
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`ALTER TABLE monitors DROP COLUMN stale_runs`;
-    }
-  ),
-});
 
 const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
   createdAt: row.createdAt,
@@ -451,7 +393,7 @@ export const RegistryLive = Registry.make(
     const state = yield* Cloudflare.DurableObjectState;
 
     return Effect.gen(function* RegistryInstance() {
-      const sql = yield* openDurableSql(state, migrations);
+      const sql = yield* openDurableSql(state, registryMigrations);
       // Serialises alarm updates so the last one written is computed from
       // the latest committed state.
       const alarmLock = yield* Semaphore.make(1);
@@ -770,18 +712,31 @@ export const RegistryLive = Registry.make(
           yield* rearm;
         }).pipe(Effect.withSpan("Registry.alarm"));
 
-      /** One item of `reconcile`: summary, then episode, in one transaction. */
-      const reconcileOne = (item: ReconcileItem, at: number) =>
+      /**
+       * One item of `reconcile` (summary, then observation) or of
+       * `confirmStale` (`confirmed`: the observation only, which may open
+       * an episode), in one transaction.
+       */
+      const reconcileOne = (
+        item: ReconcileItem,
+        at: number,
+        confirmed: boolean
+      ) =>
         transact(
           Effect.gen(function* reconcileOneTx() {
-            const summaryUpdated = yield* upsertSummary(
-              item.id,
-              item.summary,
-              item.revision
-            );
+            // The confirming item's revision was stored by the batch.
+            const summaryUpdated = confirmed
+              ? false
+              : yield* upsertSummary(item.id, item.summary, item.revision);
             // Skipped if a newer summary was pushed since the watchdog read
             // the monitor (a disable, say), or the row is being deleted.
-            const watch = yield* observeMonitor(item.id, item, at, Date.now());
+            const watch = yield* observeMonitor(
+              item.id,
+              item,
+              at,
+              Date.now(),
+              confirmed
+            );
             return { summaryUpdated, watch };
           })
         ).pipe(
@@ -818,7 +773,7 @@ export const RegistryLive = Registry.make(
           // One item after another: each is a storage transaction.
           const results = yield* Effect.forEach(
             items,
-            (item) => reconcileOne(item, at),
+            (item) => reconcileOne(item, at, false),
             { concurrency: 1 }
           );
           const pruned = yield* transact(
@@ -833,6 +788,17 @@ export const RegistryLive = Registry.make(
           const alarmAt = yield* rearm;
           return { alarmAt, pruned, results } satisfies ReconcileReport;
         }).pipe(Effect.withSpan("Registry.reconcile"));
+
+      const confirmStale = (items: readonly ReconcileItem[], at: number) =>
+        Effect.gen(function* confirmStaleEffect() {
+          const results = yield* Effect.forEach(
+            items,
+            (item) => reconcileOne(item, at, true),
+            { concurrency: 1 }
+          );
+          const alarmAt = yield* rearm;
+          return { alarmAt, results } satisfies ConfirmReport;
+        }).pipe(Effect.withSpan("Registry.confirmStale"));
 
       // Dev inspection: calls per method, in memory (see `devCalls`).
       const instanceId = crypto.randomUUID();
@@ -876,6 +842,7 @@ export const RegistryLive = Registry.make(
             )
           )
         ),
+        confirmStale: counted("confirmStale", confirmStale),
         createChannel: counted("createChannel", createChannel),
         deleteChannel: counted("deleteChannel", (id: string) =>
           sql<{

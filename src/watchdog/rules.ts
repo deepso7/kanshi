@@ -229,8 +229,11 @@ export interface WatchState {
  * - `open`: start an episode and alert every channel.
  * - `resolve`: checks resumed; send the recovery to the channels alerted.
  * - `close`: the monitor was disabled; end the episode without a message.
+ * - `suspect`: would open, but the observation came from the batch, so
+ *   nothing is recorded; the runner re-reads the monitor and opens only if
+ *   the fresh read confirms it (`confirmSuspect`, `Registry.confirmStale`).
  */
-export type WatchChange = "close" | "none" | "open" | "resolve";
+export type WatchChange = "close" | "none" | "open" | "resolve" | "suspect";
 
 /**
  * One watchdog observation's effect on the monitor's episode. A single
@@ -285,16 +288,70 @@ export interface WatchOutcome {
  * ignored, and the next run decides on a fresh one. An
  * equal or older stored revision means the observation is at least as new
  * as anything the Registry knows (the caller stores its summary first).
+ *
+ * Only a `confirmed` observation opens an episode. The batch's (not
+ * confirmed) would-be opens come back as `suspect`: the Registry cannot
+ * see a check or disable the Monitor committed but has not pushed yet, so
+ * the runner re-reads the monitor itself after the batch
+ * (`confirmSuspect`) and sends the fresh observation back confirmed.
+ * Resolves and closes apply from the batch: a stale read cannot make them
+ * wrong (at worst they come an hour late).
  */
 export const watchOutcome = (
   row: WatchedRow | null,
-  item: Pick<ReconcileItem, "observation" | "revision">
-): WatchOutcome =>
-  row === null ||
-  row.lifecycle !== "active" ||
-  row.summaryRevision > item.revision
-    ? { applied: false, change: "none" }
-    : {
-        applied: true,
-        change: watchTransition({ episodeId: row.episodeId }, item.observation),
-      };
+  item: Pick<ReconcileItem, "observation" | "revision">,
+  confirmed: boolean
+): WatchOutcome => {
+  if (
+    row === null ||
+    row.lifecycle !== "active" ||
+    row.summaryRevision > item.revision
+  ) {
+    return { applied: false, change: "none" };
+  }
+  const change = watchTransition(
+    { episodeId: row.episodeId },
+    item.observation
+  );
+  return {
+    applied: true,
+    change: change === "open" && !confirmed ? "suspect" : change,
+  };
+};
+
+/**
+ * The confirming observation of a `suspect`, from the monitor's own state
+ * read after the batch (`status()`), or null when it no longer warrants an
+ * episode: unreadable, deleted or unconfigured, no longer stale (a check
+ * completed, or its schedule restarted), disabled (never stale), or its
+ * summary revision moved since the batch's read (any change pushed or not,
+ * a reviving check included). The Monitor's storage is read directly, so
+ * a change it committed but has not pushed yet counts. Nothing is
+ * restored by this read, so `alarmRestored` is false.
+ */
+export const confirmSuspect = (
+  suspect: ReconcileItem,
+  status: Pick<WatchdogStatus, "snapshot" | "tombstonedAt"> | null,
+  now: number
+): ReconcileItem | null => {
+  if (
+    status === null ||
+    status.tombstonedAt !== null ||
+    status.snapshot === null
+  ) {
+    return null;
+  }
+  const { snapshot } = status;
+  if (
+    snapshot.state.summaryRevision !== suspect.revision ||
+    !isStale(snapshot, now)
+  ) {
+    return null;
+  }
+  return {
+    id: suspect.id,
+    observation: observe(snapshot, now, false),
+    revision: snapshot.state.summaryRevision,
+    summary: summaryOf(snapshot.config, snapshot.state),
+  };
+};
