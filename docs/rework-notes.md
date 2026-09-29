@@ -1601,6 +1601,126 @@ page needs per row goes into the API response instead of a fetch per row.
 - **Delete channel** keeps its dialog open while the request is pending,
   like the monitor's.
 
+## Lean usage
+
+Cut Durable Object requests for a small install. Before, every check made
+two DO requests (the alarm, plus a summary push that kept the singleton
+Registry awake around the clock) and the watchdog ran every 5 minutes
+with three to four calls per monitor.
+
+Estimate, 10 monitors at 60s:
+
+- Before: 14,400 alarms + 14,400 summary pushes + 288 watchdog runs of
+  `list` and, per monitor, `status`, `ensureAlarm`, `upsertSummary` and
+  `observe` (plus prune and the Registry's `ensureAlarm`): 28,800 + 288 ×
+  43 ≈ **38–41k DO requests a day** (38k counting three watchdog calls per
+  monitor). The Registry got a request every few seconds, so it never went
+  idle.
+- After: 14,400 alarms + 24 runs × 12 requests (288) ≈ **15k a day**, plus
+  one push per status change or edit, and whatever the dashboard, API and
+  status page read. The Registry is only woken by those, the hourly
+  watchdog and alerts.
+- Trade-off: a silently stuck monitor (lost alarm, wedged object) is
+  noticed within about 1–2 hours instead of about 10 minutes, and a lost
+  status push can leave the Registry's cached status (list, status page)
+  behind for up to an hour (the next check retries it first; the dashboard
+  reads status live).
+
+### Summary pushes
+
+- `MonitorSummary` is `{ enabled, intervalSeconds, name, status, url }`:
+  `lastCheckedAt` is gone. Registry migration
+  `5_summary_without_last_checked` drops the column.
+- `reviseSummary(before, after)` bumps `summaryRevision` only when a
+  summary field changed; `completeCheck` and `applyConfigChange` use it
+  (before, every check and every edit bumped it). Revisions stay monotonic
+  per monitor, so stored revisions from before the change still order
+  correctly.
+- `shouldPushSummary(before, after)`: a new monitor, or the revision
+  moved. The Monitor pushes after `configure` (new only), `update` and a
+  committed check only then. A failed push sets an in-memory `pushOwed`
+  flag and the next check retries it; after an eviction the watchdog
+  converges it.
+- Other Registry calls from a monitor are unchanged and happen only for
+  alerts (`recipients` when a `down` notification is resolved,
+  `channelTarget` per delivery). The dev flip target reads the Registry
+  (`getFlip`) per check, dev only.
+
+### Reading the last check live
+
+- New Monitor RPC `overview(windowMs, buckets)`: `recent` plus the live
+  `lastCheckedAt`, summary and `stale` (`isStale`, the watchdog's rule).
+  `GET /api/overview` makes that one call per monitor (as it did with
+  `recent`): its rows use the live summary (the counts too) and
+  `lastCheckedAt`, and fall back to the Registry's row with
+  `lastCheckedAt: null, recent: null` when the monitor cannot be read (the
+  dashboard then shows "unavailable").
+- **Decision:** `GET /api/monitors` returns only what the Registry knows,
+  so `MonitorListItem` has **no `lastCheckedAt`** (a cached value would be
+  up to an hour old). `kanshi sync` did not use it. `/api/public/status`
+  monitors lose `lastCheckedAt` too (the page never showed it, and a live
+  read per public monitor per view would add requests); their status is
+  the pushed summary, which follows every status change.
+- `notChecked` on `/api/overview` rows and on `MonitorResponse` (get,
+  update, check) is an open watchdog episode **or** the live snapshot is
+  stale, so it shows before the next hourly run. On `GET /api/monitors`
+  it is only the episode.
+
+### Watchdog
+
+- Cron `17 * * * *`. A run: `registry.list()`; per row as before, but an
+  active monitor gets exactly one call, `Monitor.reconcile()` (re-arm,
+  then the status view; replaces `status()` + `ensureAlarm()` for the
+  watchdog, and is also what a stuck `creating` row is decided on); then
+  one `Registry.reconcile(items, now)` with every active monitor's
+  summary, revision and observation. It upserts (revision rule) and
+  observes per item, each in its own transaction (a failing item is
+  reported, the others still apply), prunes episodes resolved over 30 days
+  ago and re-arms the Registry alarm (armed only while watchdog alerts are
+  due). The batch is made even with no active monitors, for pruning and
+  the alarm. Requests per run: `2 + active monitors` (plus repairs).
+- Removed RPCs: `Monitor.ensureAlarm`, `Registry.observe`,
+  `Registry.ensureAlarm`, `Registry.pruneWatchdog`. `Monitor.status()`
+  stays for the dev inspector.
+- **Stale** is now `max(2 × interval + 2 min, 10 min)` (`staleFloorMs`)
+  since the last sign of life, and **one** stale observation opens the
+  episode (the consecutive-runs counter is gone; migration
+  `6_watchdog_single_observation` drops `stale_runs`,
+  `RegistryEntry.watch` is `{ episodeId }`). With runs an hour apart a
+  second observation would only delay the alert by an hour. A monitor
+  whose alarm was lost is re-armed and reported in the same run, so it
+  alerts once and sends the recovery on the next run. Dedup, the recovery
+  notice and the silent close on disable are unchanged.
+- The old open issue (a real cron run between the two `now = +1h` test
+  runs) is gone with the counter.
+
+### Dev and tests
+
+- `GET /_dev/registry/calls`: `{ counts, instanceId, startedAt }`, Registry
+  calls per method (every RPC, and `alarm` runs) since the object started,
+  counted in memory (the counter itself is not counted). Tests compare two
+  readings and check the `instanceId` did not change.
+- Unit: `shouldPushSummary` (a new monitor, no push for checks without a
+  change or an unconfirmed failure, one for the confirmed transition and
+  for unknown → up, edits of name/URL/interval/enabled push, channels,
+  managed, timeout, thresholds do not, enable pushes); staleness with the
+  floor; single-observation episodes and dedup; `runWatchdog` over fakes
+  (exactly one call per active monitor, one `list`, one batched
+  `reconcile` with the right items, results merged into the report, a
+  failed batch reported per row, the batch made with no monitors); the
+  overview's live summary, `lastCheckedAt` and staleness.
+- Integration: `core.test.ts` "checks that change nothing make no Registry
+  call..." (after the first result, four checks leave every
+  check-reachable Registry counter unchanged; a URL edit and the down
+  transition push once each; the overview shows a fresh `lastCheckedAt`;
+  the list has none). `watchdog.test.ts`: the re-arm test also checks a
+  run makes one `list`, one `reconcile` and no `upsertSummary`; a new
+  "converges a lost status push that later checks do not repeat"; the
+  not-being-checked test opens on the first stale run.
+
+Commands: `pnpm typecheck`, `pnpm check` pass; `pnpm test` 311 pass;
+`pnpm test:integ` 34 pass (about 4.4 minutes).
+
 ## Lint conventions
 
 `pnpm check` runs oxlint (ultracite core, vitest, react and anti-slop

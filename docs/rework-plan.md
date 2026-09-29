@@ -41,7 +41,7 @@ export (possible later as an optional add-on).
 ## Architecture
 
 ```
-Worker (fetch + cron "*/5 * * * *")
+Worker (fetch + cron "17 * * * *", hourly)
  ├─ /api/*         Effect HttpApi, bearer token or session cookie
  ├─ /              dashboard (HTML, session cookie)
  ├─ /status        public status page (HTML) + /api/public/status (JSON)
@@ -62,8 +62,10 @@ Tables (`CREATE TABLE IF NOT EXISTS` at start, plus a `schema_version` row):
   lastCheckedAt, last result summary, open incident id, `nextCheckAt`,
   `nextCheckKind` (`scheduled|confirm`), `manualRequestedAt` (or null),
   `inflight` (checkId, generation, kind, startedAt, or null),
-  `summaryRevision` (monotonic, bumped by every change that affects the
-  Registry summary), `nextMaintenanceAt`, `rolledUpThrough` (day).
+  `summaryRevision` (monotonic, bumped only by a change of the Registry
+  summary: status, enabled, name, URL or interval; a check that changes
+  none of them leaves it alone), `nextMaintenanceAt`, `rolledUpThrough`
+  (day).
 - `tombstone` (single row, only after delete): deletedAt. Once present,
   `configure` and every mutating RPC are rejected and the alarm is cleared.
 - `checks`: checkId, at, kind (`scheduled|confirm|manual`), counted (bool),
@@ -89,7 +91,7 @@ earliest pending `outbox.nextAttemptAt`, `nextMaintenanceAt`. Every RPC that
 changes state ends by recomputing and setting the alarm. Because work is
 derived from rows rather than consumed events, a crash at any point is
 recovered by the next alarm (Cloudflare retries failed alarms) or by the
-watchdog's `ensureAlarm()`. Every step is idempotent. Alchemy's alarm type is
+watchdog's `reconcile()`. Every step is idempotent. Alchemy's alarm type is
 `Effect<void, never, never>`: each step catches its own errors so one failure
 cannot stop the others or skip rescheduling.
 
@@ -183,7 +185,8 @@ Tables:
 
 - `monitors`: id, key, managed, lifecycle (`creating|active|deleting`),
   opId (random id of the current create/delete operation), public, summary
-  (name, status, enabled, lastCheckedAt, intervalSeconds), summaryRevision,
+  (name, status, enabled, intervalSeconds, url; no last check time, which
+  changes every check), summaryRevision, the open watchdog episode id,
   updatedAt.
 - `channels`: id, key, managed, kind, url, urlHash, name.
 - `dev_events` (dev stage only).
@@ -198,27 +201,49 @@ Rules:
   leaves the tombstone) → `registry.remove(id)`. A delayed `configure`
   arriving after this hits the tombstone and fails, so no orphan monitor can
   be re-armed.
+- A monitor pushes its summary (`upsertSummary`) only when it changed: a
+  status transition, enable/disable, or an edit of the name, URL or
+  interval (`shouldPushSummary`: the revision moved). A check that changes
+  nothing makes no Registry request, so the Registry is not kept awake by
+  checks. A failed push is retried on the next check (in memory) and
+  otherwise converged by the watchdog.
 - `upsertSummary` is rejected when the row is missing or `deleting`, or when
-  its `summaryRevision` is not newer than the stored one. Pushes after checks
-  and watchdog pulls use the same revision, so a delayed snapshot can never
-  overwrite a newer status.
+  its `summaryRevision` is not newer than the stored one. Pushes and the
+  watchdog's batched refresh use the same revision, so a delayed snapshot
+  can never overwrite a newer status.
+- Readers that need the last check time read it live from the monitor:
+  the dashboard overview gets it (with the live status and staleness) in
+  the same per-monitor call as its 24h activity (`Monitor.overview`), the
+  detail page from the snapshot. `GET /api/monitors` and the public status
+  carry only what the Registry knows (no `lastCheckedAt`).
 - `public` is owned here and written synchronously by the API, so the status
   page never publishes a monitor that was made private.
 
-### Watchdog (cron every 5 min)
+### Watchdog (cron hourly, `17 * * * *`)
 
-For **every** registry row:
+`registry.list()`, then for **every** registry row (bounded concurrency):
 
-- `creating` older than 5 min: ask the DO `status()`; configured → activate
-  with the row's opId, not configured → run the normal delete path
-  (opId-conditional `markDeleting` → `destroy()` → `remove()`), which
+- `creating` older than 5 min: ask the DO `reconcile()`; configured →
+  activate with the row's opId, not configured → run the normal delete
+  path (opId-conditional `markDeleting` → `destroy()` → `remove()`), which
   tombstones the DO so a delayed `configure` cannot arm an orphan.
 - `deleting`: retry `destroy()` then `remove()`.
-- `active`: pull `status()` and refresh the summary (so failed pushes always
-  converge, including for disabled monitors), and call `ensureAlarm()`.
-  If enabled and `lastCheckedAt` is older than `2 × interval + 2 min` on two
-  consecutive runs, alert all channels "Kanshi: monitor X is not being
-  checked" (deduplicated until it recovers).
+- `active`: exactly **one** call, `monitor.reconcile()`: it re-arms the
+  alarm from persisted state and returns the status (summary, revision,
+  last check, schedule reset, tombstone).
+
+Then **one** batched `registry.reconcile(items, now)` for every active
+monitor, each item its own transaction: store the summary under the
+revision rule (so failed pushes converge, including for disabled
+monitors) and record the observation. If enabled and not checked for
+longer than `max(2 × interval + 2 min, 10 min)` (measured from the last
+check, creation or schedule reset), one observation opens an episode and
+alerts all channels "Kanshi: monitor X is not being checked"
+(deduplicated until it recovers; a fresh observation sends the recovery,
+disabling closes it silently). The same call prunes old episodes and
+re-arms the Registry's alarm, which is set only while watchdog alerts are
+due. A run is `2 + active monitors` requests; a silently stuck monitor is
+noticed within about 1–2 hours.
 
 ## History and uptime
 
@@ -252,8 +277,8 @@ Server-rendered HTML with plain forms and a little inline JS; one CSS block.
 - `/login`: paste the API token; sets an `HttpOnly; Secure; SameSite=Strict`
   cookie holding an HMAC-derived session value (rotating the token logs
   everyone out). Form posts also check `Origin`.
-- `/`: monitor list with status, last check, 24h uptime, latency sparkline
-  (inline SVG).
+- `/`: monitor list with status, last check (both read live from each
+  monitor), 24h uptime, latency sparkline (inline SVG).
 - `/monitors/:id`: 90-day uptime bars, recent checks, incidents; edit,
   pause/resume, check now, delete.
 - `/monitors/new`, `/channels`: add/edit forms, "send test alert".
@@ -363,7 +388,9 @@ checks and tests passing.
 - Alchemy is beta; the spike must prove Durable Object alarms and local dev
   before anything is built on them.
 - Monitor ↔ Registry calls are not transactional; convergence relies on
-  lifecycle states, generation-checked summaries, idempotent operations and
-  the watchdog.
+  lifecycle states, revision-checked summaries, idempotent operations and
+  the watchdog. With the hourly watchdog, a lost status push can leave the
+  Registry's cached status (list, status page) behind for up to an hour
+  unless the next check retries it; the dashboard reads status live.
 - Registry is a single object; fine for up to a few hundred monitors, the
   target scale.
