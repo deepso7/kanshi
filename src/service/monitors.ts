@@ -92,8 +92,6 @@ const toResponse = (
 const toListItem = (entry: RegistryEntry): MonitorListItem => ({
   ...entry.summary,
   id: entry.id,
-  key: entry.key,
-  managed: entry.managed,
   notChecked: isNotChecked(entry),
   public: entry.public,
 });
@@ -225,27 +223,18 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
       const { opId } = yield* registry()
         .begin({
           id,
-          key: config.key,
-          managed: config.managed,
           public: isPublic,
           quota: deps.quota,
           summary: summaryOf(config, initialState(now)),
         })
         .pipe(
-          Effect.catchTags({
-            KeyTaken: (error) =>
-              Effect.fail(
-                new Conflict({
-                  message: `a monitor with key "${error.key}" already exists`,
-                })
-              ),
-            QuotaExceeded: (error) =>
-              Effect.fail(
-                new Conflict({
-                  message: `monitor quota of ${error.quota} reached`,
-                })
-              ),
-          })
+          Effect.catchTag("QuotaExceeded", (error) =>
+            Effect.fail(
+              new Conflict({
+                message: `monitor quota of ${error.quota} reached`,
+              })
+            )
+          )
         );
 
       const delayMs = options.configureDelayMs ?? 0;
@@ -317,7 +306,6 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
    *    page reads it there), and making a monitor private must take effect
    *    even if the rest of the update fails.
    * 2. The monitor's configuration (a transaction in the Monitor object).
-   * 3. `managed` to the Registry (the list and config sync read it there).
    *
    * A patch that would be rejected is checked against a snapshot before
    * step 1, so a 400 changes nothing. Once step 1 has changed `public`,
@@ -357,7 +345,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
       }
 
       const applyRest = Effect.gen(function* applyRestEffect() {
-        const snapshot = yield* monitor(id)
+        return yield* monitor(id)
           .update(rest ?? {}, { devMode: deps.devMode })
           .pipe(
             Effect.catchTags({
@@ -367,13 +355,6 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
               MonitorTombstoned: () => Effect.fail(notFound(id)),
             })
           );
-        if (patch.managed !== undefined && patch.managed !== entry.managed) {
-          const updated = yield* registry().setManaged(id, patch.managed);
-          if (!updated) {
-            return yield* notFound(id);
-          }
-        }
-        return snapshot;
       });
 
       const publicSet = `public was set to ${String(patch.public)}`;

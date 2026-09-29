@@ -606,9 +606,6 @@ const MonitorRow = ({
               <Badge variant="warning">Not checked</Badge>
             ) : null}
             {monitor.public ? <Badge variant="outline">Public</Badge> : null}
-            {monitor.managed ? (
-              <Badge variant="secondary">Managed</Badge>
-            ) : null}
           </span>
         </div>
         <MonitorUrl url={monitor.url} />
@@ -896,14 +893,7 @@ export const DashboardPage = () => {
         <EmptyState
           action={newMonitorLink}
           heading="h2"
-          description={
-            <>
-              Add a URL to watch here, or declare monitors in{" "}
-              <code {...stylex.props(devStyles.code)}>kanshi.config.ts</code>{" "}
-              and run <code {...stylex.props(devStyles.code)}>kanshi sync</code>
-              .
-            </>
-          }
+          description="Add a URL to watch, and Kanshi alerts your channels when it goes down."
           title="No monitors yet"
         />
       ) : (

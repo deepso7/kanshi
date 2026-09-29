@@ -33,13 +33,10 @@ import {
 const channel: ChannelView = {
   createdAt: 0,
   id: "c1",
-  key: "c1",
   kind: "slack",
-  managed: false,
   maskedUrl: "https://hooks.slack.com/****abcd",
   name: "On-call",
   updatedAt: 0,
-  urlHash: "hash",
 };
 
 interface SentRequest {
@@ -188,40 +185,20 @@ describe("channel dialogs", () => {
       });
     });
 
-    it("sends the chosen kind and key; dev mode allows localhost", async () => {
+    it("sends the chosen kind; dev mode allows localhost", async () => {
       const user = userEvent.setup();
       renderAdd(true);
       await user.type(field("Name"), "Sink");
       await user.click(screen.getByRole("combobox", { name: "Kind" }));
       await user.click(await screen.findByRole("option", { name: "Webhook" }));
       await user.type(field("URL"), "http://localhost:1337/_dev/webhook");
-      await user.type(field("Key (optional)"), "dev-sink");
       await submitAdd();
       await waitFor(() => expect(server.requests).toHaveLength(1));
       expect(decodeCreate(server.requests[0]?.body)).toStrictEqual({
-        key: "dev-sink",
         kind: "webhook",
         name: "Sink",
         url: "http://localhost:1337/_dev/webhook",
       });
-    });
-
-    it("shows a taken key (409) on the key field and stays open", async () => {
-      const user = userEvent.setup();
-      const onOpenChange = renderAdd();
-      await user.type(field("Name"), "Dup");
-      await user.type(field("URL"), "https://example.com/hook");
-      await user.type(field("Key (optional)"), "taken");
-      server.failNext = {
-        message: 'a channel with key "taken" already exists',
-        status: 409,
-        tag: "Conflict",
-      };
-      await submitAdd();
-      await expect(
-        screen.findByText("A channel with this key already exists.")
-      ).resolves.toBeTruthy();
-      expect(onOpenChange).not.toHaveBeenCalled();
     });
 
     it("shows the server's URL check (400) on the URL field", async () => {
@@ -247,7 +224,6 @@ describe("channel dialogs", () => {
       expect(screen.getByText(channel.maskedUrl)).toBeTruthy();
       expect(field("Replace URL (optional)")).toHaveProperty("value", "");
       expect(saveButton()).toHaveProperty("disabled", true);
-      expect(screen.queryByText("Managed by config")).toBeNull();
     });
 
     it("patches only the new name", async () => {
@@ -280,12 +256,6 @@ describe("channel dialogs", () => {
       expect(decodePatch(server.requests[0]?.body)).toStrictEqual({
         url: "https://hooks.slack.com/services/new",
       });
-    });
-
-    it("warns that kanshi sync overwrites a managed channel", () => {
-      renderEdit({ ...channel, managed: true });
-      expect(screen.getByText("Managed by config")).toBeTruthy();
-      expect(screen.getByRole("note").textContent).toMatch(/kanshi sync/u);
     });
   });
 
@@ -335,16 +305,6 @@ describe("channel dialogs", () => {
       // Once settled, it can be dismissed again.
       await user.keyboard("{Escape}");
       expect(onClose).toHaveBeenCalledWith();
-    });
-
-    it("warns that kanshi sync recreates a managed channel", () => {
-      wrap(
-        <DeleteChannelDialog
-          channel={{ ...channel, managed: true }}
-          onClose={vi.fn<() => void>()}
-        />
-      );
-      expect(screen.getByRole("note").textContent).toMatch(/creates it again/u);
     });
   });
 });

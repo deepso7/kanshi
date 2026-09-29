@@ -25,8 +25,6 @@ import { checkTargetUrl } from "../../../src/domain/url.ts";
 export interface MonitorFormValues {
   readonly name: string;
   readonly url: string;
-  /** New monitors only; empty: the server uses the id. */
-  readonly key: string;
   readonly method: MonitorMethod;
   readonly expectedStatus: string;
   readonly bodyContains: string;
@@ -45,7 +43,6 @@ export interface MonitorFormValues {
 export type MonitorFormField =
   | "name"
   | "url"
-  | "key"
   | "expectedStatus"
   | "bodyContains"
   | "timeoutSeconds"
@@ -80,7 +77,6 @@ export const defaultFormValues: MonitorFormValues = {
   expectedStatus: monitorDefaults.expectedStatus,
   failureThreshold: String(monitorDefaults.failureThreshold),
   intervalSeconds: String(monitorDefaults.intervalSeconds),
-  key: "",
   method: monitorDefaults.method,
   name: "",
   public: monitorDefaults.public,
@@ -98,7 +94,6 @@ export const formValuesOf = (monitor: MonitorResponse): MonitorFormValues => ({
   expectedStatus: monitor.expectedStatus,
   failureThreshold: String(monitor.failureThreshold),
   intervalSeconds: String(monitor.intervalSeconds),
-  key: monitor.key,
   method: monitor.method,
   name: monitor.name,
   public: monitor.public,
@@ -109,7 +104,6 @@ export const formValuesOf = (monitor: MonitorResponse): MonitorFormValues => ({
 
 // -- validation ----------------------------------------------------------------
 
-const keyPattern = /^[\da-z][\d._a-z-]{0,63}$/iu;
 const wholeNumber = /^\d+$/u;
 
 const urlMessages = {
@@ -186,11 +180,6 @@ const checkBody = (method: MonitorMethod, body: string): string | undefined => {
     : undefined;
 };
 
-const checkKey = (key: string): string | undefined =>
-  key.trim() === "" || keyPattern.test(key.trim())
-    ? undefined
-    : "Up to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit.";
-
 /**
  * Every field's problem, as the server would report it (the server checks
  * again; `serverFieldError` maps its answer back).
@@ -214,7 +203,6 @@ export const validateMonitorForm = (
       maxIntervalSeconds,
       " seconds"
     ),
-    key: checkKey(values.key),
     name: values.name.trim() === "" ? "Enter a name." : undefined,
     successThreshold: checkWhole(
       values.successThreshold,
@@ -271,15 +259,11 @@ const editablePayload = (
   } satisfies MonitorPatchInput;
 };
 
-/** `POST /api/monitors`: every field, and the key when one was given. */
+/** `POST /api/monitors`: every field. */
 export const createPayload = (
   values: MonitorFormValues,
   channels: readonly ChannelView[]
-): MonitorCreateInput => {
-  const payload = editablePayload(values, channels);
-  const key = values.key.trim();
-  return key === "" ? payload : { ...payload, key };
-};
+): MonitorCreateInput => editablePayload(values, channels);
 
 const sameChannels = (
   left: "all" | readonly string[],
@@ -363,7 +347,6 @@ const apiFields = new Map<string, MonitorFormField>([
   ["expectedStatus", "expectedStatus"],
   ["failureThreshold", "failureThreshold"],
   ["intervalSeconds", "intervalSeconds"],
-  ["key", "key"],
   ["name", "name"],
   ["successThreshold", "successThreshold"],
   ["timeoutMs", "timeoutSeconds"],
@@ -379,18 +362,14 @@ const sentence = (text: string): string => {
 /** `<field>: <problem>`, as `buildConfig` / `patchConfig` word it. */
 const prefixed = /^(?<field>[A-Za-z]+): (?<problem>.+)$/su;
 const intervalFloor = /^intervalSeconds must be at least (?<minimum>\d+)/u;
-const keyTaken = /^a monitor with key ".*" already exists/u;
 const schemaPath = /at \["(?<field>[A-Za-z]+)"\]/u;
 
 /**
- * A 400 or 409 the server gave for one field, reworded for the form; null
- * for anything else (shown above the form).
+ * A 400 the server gave for one field, reworded for the form; null for
+ * anything else (shown above the form).
  */
 export const serverFieldError = (error: Error): ServerFieldError | null => {
-  if (
-    !Predicate.isTagged(error, "BadRequest") &&
-    !Predicate.isTagged(error, "Conflict")
-  ) {
+  if (!Predicate.isTagged(error, "BadRequest")) {
     return null;
   }
   const { message } = error;
@@ -400,9 +379,6 @@ export const serverFieldError = (error: Error): ServerFieldError | null => {
       field: "intervalSeconds",
       message: `At least ${floor.minimum} seconds.`,
     };
-  }
-  if (keyTaken.test(message)) {
-    return { field: "key", message: "Another monitor already uses this key." };
   }
   const own = prefixed.exec(message)?.groups;
   const ownField = apiFields.get(own?.field ?? "");

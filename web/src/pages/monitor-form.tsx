@@ -9,26 +9,19 @@ import {
   monitorQuery,
   updateMonitorMutation,
 } from "../api/queries.ts";
-import { Callout } from "../components/callout.tsx";
 import { MonitorForm } from "../components/monitor-form.tsx";
 import { PageHeader } from "../components/page-header.tsx";
 import { buttonStyles } from "../components/ui/button.tsx";
 import { useToastMutation } from "../lib/use-toast-mutation.ts";
-import { colors, fonts, space } from "../theme/tokens.stylex.ts";
+import { colors } from "../theme/tokens.stylex.ts";
 
 const editRoute = getRouteApi("/_app/monitors/$id/edit");
 
 const styles = stylex.create({
-  callout: {
-    marginBottom: space.xl,
-  },
   link: {
     color: colors.foreground,
     textDecorationColor: colors.border,
     textUnderlineOffset: "3px",
-  },
-  mono: {
-    fontFamily: fonts.mono,
   },
   page: {
     maxWidth: "60rem",
@@ -93,26 +86,7 @@ export const EditMonitorPage = () => {
   });
   return (
     <div {...stylex.props(styles.page)}>
-      <PageHeader
-        eyebrow={
-          <>
-            Monitors / <span {...stylex.props(styles.mono)}>{monitor.key}</span>{" "}
-            / Edit
-          </>
-        }
-        title={monitor.name}
-      />
-      {monitor.managed ? (
-        <Callout
-          style={styles.callout}
-          title="Managed by config"
-          tone="warning"
-        >
-          This monitor comes from kanshi.config.ts. The next{" "}
-          <span {...stylex.props(styles.mono)}>kanshi sync</span> overwrites
-          changes made here; edit the config instead.
-        </Callout>
-      ) : null}
+      <PageHeader eyebrow="Monitors / Edit" title={monitor.name} />
       <MonitorForm
         cancel={
           <Link

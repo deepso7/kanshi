@@ -81,8 +81,6 @@ export type MonitorResponse = typeof MonitorResponse.Type;
 export const MonitorListItem = Schema.Struct({
   ...MonitorSummary.fields,
   id: Schema.String,
-  key: Schema.String,
-  managed: Schema.Boolean,
   /** The watchdog has an open "not being checked" episode for it. */
   notChecked: Schema.Boolean,
   public: Schema.Boolean,

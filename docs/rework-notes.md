@@ -1867,6 +1867,23 @@ PR review round 2:
 Commands (round 2): `pnpm typecheck`, `pnpm check` pass; `pnpm test` 350
 pass; `pnpm test:integ` 34 pass (about 4.4 minutes).
 
+## Config sync removed
+
+The dashboard (and the API it uses) is the single source of truth; config
+as code is gone, with no backward compatibility.
+
+- Removed: `kanshi sync` (`src/sync/`, `scripts/kanshi.ts`), `src/config.ts`,
+  `kanshi.config.ts`, `kanshi.dev.config.ts`, `pnpm kanshi`, `pnpm seed` and
+  the `@effect/platform-bun` dependency.
+- Monitors and channels no longer have a `key` or a `managed` flag, and
+  channels no longer expose `urlHash` (it only let sync diff secret URLs).
+  The API drops those fields from input and output, the Registry's
+  `KeyTaken` error and `setManaged` method are gone, and the UI drops the
+  key fields, "Managed" badges and warnings.
+- Monitor migration `5_drop_key_managed` drops the two columns from
+  `config`. Registry migration `7_drop_keys` rebuilds `monitors` and
+  `channels`: `key` is `UNIQUE`, which SQLite cannot drop in place.
+
 ## Lint conventions
 
 `pnpm check` runs oxlint (ultracite core, vitest, react and anti-slop

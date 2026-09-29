@@ -230,21 +230,20 @@ test(
 test(
   "removes a stuck create whose monitor was never configured, and a late configure cannot arm it",
   Effect.gen(function* stuckAbandonTest() {
-    const key = `abandoned-${crypto.randomUUID()}`;
+    const name = `abandoned-${crypto.randomUUID()}`;
     const creating = yield* send("POST", "/api/monitors", {
       body: {
         intervalSeconds: 5,
-        key,
-        name: "abandoned",
+        name,
         url: yield* devUrl("/target"),
       },
       headers: { "x-kanshi-dev-configure-delay": "4000" },
     }).pipe(Effect.forkChild({ startImmediately: true }));
 
     const rows = yield* waitFor("creating row", registryRows, (entries) =>
-      entries.some((row) => row.key === key)
+      entries.some((row) => row.summary.name === name)
     );
-    const id = rows.find((row) => row.key === key)?.id ?? "";
+    const id = rows.find((row) => row.summary.name === name)?.id ?? "";
     expect((yield* detail(id)).status.snapshot).toBeNull();
 
     const report = yield* watchdog(Date.now() + 6 * minute);

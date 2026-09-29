@@ -22,9 +22,10 @@ import type { EnabledPeriod, PeriodChange, Sample } from "./history.ts";
  * Monitor DO schema. Column names are snake_case; the SQL client maps them
  * to and from camelCase. Add a new numbered entry for every schema change
  * (never edit an applied one): migrations run once per object, on its next
- * activation.
+ * activation. Tests run them against a local SQLite
+ * (`test/unit/monitor-migrations.test.ts`).
  */
-export const migrations = SqliteMigrator.fromRecord({
+export const monitorMigrationRecord = {
   "1_core": Effect.gen(function* coreMigration() {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE config (
@@ -158,7 +159,18 @@ export const migrations = SqliteMigrator.fromRecord({
     yield* sql`UPDATE state SET schedule_reset_at = coalesce(
       (SELECT updated_at FROM config WHERE singleton = 1), 0)`;
   }),
-});
+  // Config sync is gone: monitors no longer have a key or a managed flag.
+  "5_drop_key_managed": Effect.gen(function* dropKeyManagedMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`ALTER TABLE config DROP COLUMN key`;
+    yield* sql`ALTER TABLE config DROP COLUMN managed`;
+  }),
+} satisfies Record<
+  string,
+  Effect.Effect<unknown, unknown, SqlClient.SqlClient>
+>;
+
+export const migrations = SqliteMigrator.fromRecord(monitorMigrationRecord);
 
 /** Tables wiped by `destroy()`; the tombstone is kept. */
 const dataTables = [
@@ -177,7 +189,6 @@ const ConfigRow = Schema.Struct({
   ...MonitorConfig.fields,
   channels: Schema.fromJsonString(ChannelSelection),
   enabled: Schema.BooleanFromBit,
-  managed: Schema.BooleanFromBit,
 });
 
 const StateRow = Schema.Struct({

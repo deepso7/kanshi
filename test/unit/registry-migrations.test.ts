@@ -3,112 +3,19 @@
 // (`@effect/sql-sqlite-do`), over Node's built-in SQLite instead of the
 // object's storage.
 import { DatabaseSync } from "node:sqlite";
-import type { SQLInputValue } from "node:sqlite";
 
-import * as SqliteClient from "@effect/sql-sqlite-do/SqliteClient";
-import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as String from "effect/String";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { registryMigrationRecord } from "../../src/registry/migrations.ts";
-
-type Storage = NonNullable<SqliteClient.SqliteClientConfig["storage"]>;
-
-/**
- * The part of Durable Object storage the SQLite client uses: `sql.exec`
- * (a cursor with `columnNames` and `raw()`) and `transaction`, which
- * commits unless the closure throws or calls `rollback()`.
- */
-interface ClientStorage {
-  readonly sql: {
-    readonly exec: (
-      query: string,
-      ...params: SQLInputValue[]
-    ) => {
-      readonly columnNames: string[];
-      readonly raw: () => Iterator<unknown>;
-    };
-  };
-  readonly transaction: (
-    closure: (txn: { readonly rollback: () => void }) => Promise<void>
-  ) => Promise<void>;
-}
-
-const localStorage = (db: DatabaseSync): Storage => {
-  const storage: ClientStorage = {
-    sql: {
-      exec: (query, ...params) => {
-        const statement = db.prepare(query);
-        statement.setReturnArrays(true);
-        const columnNames = statement.columns().map((column) => column.name);
-        const rows: readonly unknown[] =
-          columnNames.length === 0
-            ? (statement.run(...params), [])
-            : statement.all(...params);
-        return { columnNames, raw: () => rows.values() };
-      },
-    },
-    transaction: async (closure) => {
-      let rolledBack = false;
-      db.exec("BEGIN");
-      try {
-        await closure({
-          rollback: () => {
-            rolledBack = true;
-          },
-        });
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
-      db.exec(rolledBack ? "ROLLBACK" : "COMMIT");
-    },
-  };
-  // SAFETY: the client only calls `sql.exec` (reading `columnNames` and
-  // `raw()`) and `transaction(closure)` on the storage; this double
-  // implements exactly those over a local SQLite database.
-  return storage as Storage;
-};
-
-/** The client the Registry opens, over `db`. */
-const clientLayer = (db: DatabaseSync) =>
-  SqliteClient.layer({
-    storage: localStorage(db),
-    transformQueryNames: String.camelToSnake,
-    transformResultNames: String.snakeToCamel,
-  });
-
-/** Run the Registry migrations with an id up to `through`. */
-const migrate = (db: DatabaseSync, through: number) =>
-  SqliteMigrator.run({
-    loader: SqliteMigrator.fromRecord(
-      Object.fromEntries(
-        Object.entries(registryMigrationRecord).filter(
-          ([key]) => Number(key.split("_", 1)[0]) <= through
-        )
-      )
-    ),
-  }).pipe(Effect.provide(clientLayer(db)));
-
-const columns = (db: DatabaseSync, table: string): readonly string[] =>
-  db
-    .prepare(`SELECT name FROM pragma_table_info(?) ORDER BY cid`)
-    .all(table)
-    .map((row) => `${row.name}`);
-
-const rows = (db: DatabaseSync, query: string) =>
-  db
-    .prepare(query)
-    .all()
-    .map((row) => ({ ...row }));
+import { clientLayer, columns, migrate, rows } from "./local-sqlite.ts";
 
 describe("Registry migrations", () => {
   it.effect("upgrade a populated version 4 Registry, keeping its data", () =>
     Effect.gen(function* upgradeTest() {
       const db = new DatabaseSync(":memory:");
-      const applied = yield* migrate(db, 4);
+      const applied = yield* migrate(db, registryMigrationRecord, 4);
       assert.deepStrictEqual(
         applied.map(([id]) => id),
         [1, 2, 3, 4]
@@ -153,17 +60,23 @@ describe("Registry migrations", () => {
       );
       const outboxBefore = rows(db, "SELECT * FROM watchdog_outbox");
 
-      // The full list: only 5 and 6 are pending.
-      const upgraded = yield* migrate(db, Number.POSITIVE_INFINITY);
+      // The full list: 5 to 7 are pending.
+      const upgraded = yield* migrate(
+        db,
+        registryMigrationRecord,
+        Number.POSITIVE_INFINITY
+      );
       assert.deepStrictEqual(
         upgraded.map(([id, name]) => `${id}_${name}`),
-        ["5_summary_without_last_checked", "6_watchdog_single_observation"]
+        [
+          "5_summary_without_last_checked",
+          "6_watchdog_single_observation",
+          "7_drop_keys",
+        ]
       );
 
       assert.deepStrictEqual(columns(db, "monitors"), [
         "id",
-        "key",
-        "managed",
         "lifecycle",
         "op_id",
         "public",
@@ -174,8 +87,8 @@ describe("Registry migrations", () => {
         "summary_revision",
         "created_at",
         "updated_at",
-        "stale_episode_id",
         "url",
+        "stale_episode_id",
       ]);
       assert.deepStrictEqual(rows(db, "SELECT * FROM monitors ORDER BY id"), [
         {
@@ -183,9 +96,7 @@ describe("Registry migrations", () => {
           enabled: 1,
           id: "m1",
           interval_seconds: 60,
-          key: "site",
           lifecycle: "active",
-          managed: 1,
           name: "Site",
           op_id: "op1",
           public: 1,
@@ -200,9 +111,7 @@ describe("Registry migrations", () => {
           enabled: 0,
           id: "m2",
           interval_seconds: 300,
-          key: "api",
           lifecycle: "creating",
-          managed: 0,
           name: "API",
           op_id: "op2",
           public: 0,
@@ -213,9 +122,20 @@ describe("Registry migrations", () => {
           url: "",
         },
       ]);
+      assert.deepStrictEqual(columns(db, "channels"), [
+        "id",
+        "kind",
+        "url",
+        "name",
+        "created_at",
+        "updated_at",
+      ]);
       assert.deepStrictEqual(
         rows(db, "SELECT * FROM channels"),
-        channelsBefore
+        channelsBefore.map(
+          ({ key: _key, managed: _managed, url_hash: _urlHash, ...rest }) =>
+            rest
+        )
       );
       assert.deepStrictEqual(
         rows(db, "SELECT * FROM watchdog_episodes ORDER BY id"),
@@ -225,14 +145,12 @@ describe("Registry migrations", () => {
         rows(db, "SELECT * FROM watchdog_outbox"),
         outboxBefore
       );
-      // The unique key survives the column drops.
-      assert.throws(() =>
-        db.exec(`INSERT INTO monitors (id, key, managed, lifecycle, op_id,
-            public, name, status, enabled, interval_seconds,
-            summary_revision, created_at, updated_at, url)
-          VALUES ('m3', 'site', 0, 'active', 'op3', 0, 'Dup', 'up', 1, 60,
-            0, 1, 1, '')`)
-      );
+      // Rows no longer need a key: two monitors may share a name.
+      db.exec(`INSERT INTO monitors (id, lifecycle, op_id, public, name,
+          status, enabled, interval_seconds, summary_revision, created_at,
+          updated_at)
+        VALUES ('m3', 'active', 'op3', 0, 'Site', 'up', 1, 60, 0, 300, 300)`);
+      db.exec(`DELETE FROM monitors WHERE id = 'm3'`);
 
       // The Registry's own queries work on the upgraded schema.
       const listed = yield* Effect.gen(function* listEffect() {
@@ -251,7 +169,10 @@ describe("Registry migrations", () => {
       );
 
       // Applied migrations are skipped on the next activation.
-      assert.deepStrictEqual(yield* migrate(db, Number.POSITIVE_INFINITY), []);
+      assert.deepStrictEqual(
+        yield* migrate(db, registryMigrationRecord, Number.POSITIVE_INFINITY),
+        []
+      );
       db.close();
     })
   );

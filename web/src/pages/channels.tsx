@@ -24,7 +24,6 @@ import {
 import { EmptyState } from "../components/empty-state.tsx";
 import { PageHeader } from "../components/page-header.tsx";
 import { RelativeTime } from "../components/relative-time.tsx";
-import { Badge } from "../components/ui/badge.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { CloseIcon, PlusIcon } from "../components/ui/icons.tsx";
 import { shared } from "../components/ui/shared.ts";
@@ -126,9 +125,6 @@ const styles = stylex.create({
     flexWrap: "wrap",
     fontSize: fontSizes.xs,
     gap: space.md,
-  },
-  metaKey: {
-    fontFamily: fonts.mono,
   },
   name: {
     fontSize: fontSizes.lg,
@@ -326,13 +322,6 @@ const ChannelRow = ({ channel, now, onDelete, onEdit }: ChannelRowProps) => {
               <ChannelKindIcon height="12" kind={channel.kind} width="12" />
               {channelKindLabels[channel.kind]}
             </span>
-            {channel.managed ? (
-              <SimpleTooltip content="Created by kanshi sync from kanshi.config.ts">
-                <Badge tabIndex={0} variant="outline">
-                  Managed
-                </Badge>
-              </SimpleTooltip>
-            ) : null}
           </div>
           <span
             aria-label="URL (masked)"
@@ -342,11 +331,6 @@ const ChannelRow = ({ channel, now, onDelete, onEdit }: ChannelRowProps) => {
             {channel.maskedUrl}
           </span>
           <div {...stylex.props(styles.meta)}>
-            {channel.key === channel.id ? null : (
-              <span>
-                Key <span {...stylex.props(styles.metaKey)}>{channel.key}</span>
-              </span>
-            )}
             <span>
               Updated <RelativeTime at={channel.updatedAt} now={now} />
             </span>
@@ -453,7 +437,6 @@ export const ChannelsPage = () => {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ChannelView | null>(null);
   const [deleting, setDeleting] = useState<ChannelView | null>(null);
-  const managed = channels.filter((channel) => channel.managed).length;
 
   const addButton = (
     <Button onClick={() => setAdding(true)}>
@@ -483,16 +466,13 @@ export const ChannelsPage = () => {
           <div aria-hidden {...stylex.props(styles.bar)}>
             <span>Alert routing</span>
             <span {...stylex.props(styles.barCount)}>
-              {managed === 0
-                ? `[ ${pad(channels.length)} ]`
-                : `[ ${pad(channels.length)} // ${pad(managed)} managed ]`}
+              {`[ ${pad(channels.length)} ]`}
             </span>
           </div>
           <span {...stylex.props(shared.srOnly)}>
             {channels.length === 1
               ? "1 channel"
               : `${channels.length} channels`}
-            {managed === 0 ? "" : `, ${managed} managed by config`}
           </span>
           <ul {...stylex.props(styles.list)}>
             {channels.map((channel) => (

@@ -6,13 +6,13 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 
 import { DeliveryResult, deliver } from "../alerts/delivery.ts";
 import { AlertMessage, alertRequest } from "../alerts/message.ts";
-import { BadRequest, Conflict, NotFound } from "../api/spec.ts";
+import { BadRequest, NotFound } from "../api/spec.ts";
 import type { ChannelTestResult } from "../api/spec.ts";
 import type {
   ChannelCreateInput,
   ChannelPatchInput,
 } from "../domain/channel.ts";
-import { checkChannelUrl, hashUrl } from "../domain/channel.ts";
+import { checkChannelUrl } from "../domain/channel.ts";
 import type { ChannelRecordPatch } from "../registry/registry.ts";
 import { Registry, registryName } from "../registry/registry.ts";
 import { KanshiSettings } from "../settings.ts";
@@ -27,15 +27,13 @@ export interface ChannelServiceDeps {
 const notFound = (id: string) =>
   new NotFound({ message: `channel ${id} not found` });
 
-/** Validate and normalise a channel URL and hash it. */
-const secretUrl = (url: string, devMode: boolean) =>
-  Effect.gen(function* secretUrlEffect() {
-    const checked = checkChannelUrl(url, { devMode });
-    if (Result.isFailure(checked)) {
-      return yield* new BadRequest({ message: checked.failure });
-    }
-    return { url: checked.success, urlHash: yield* hashUrl(checked.success) };
-  });
+/** Validate and normalise a channel URL. */
+const secretUrl = (url: string, devMode: boolean) => {
+  const checked = checkChannelUrl(url, { devMode });
+  return Result.isFailure(checked)
+    ? Effect.fail(new BadRequest({ message: checked.failure }))
+    : Effect.succeed(checked.success);
+};
 
 /**
  * The alert channel operations shared by the `/api` handlers and the
@@ -46,31 +44,18 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
 
   const create = (payload: ChannelCreateInput) =>
     Effect.gen(function* createChannel() {
-      const secret = yield* secretUrl(payload.url, deps.devMode);
-      const id = crypto.randomUUID();
-      return yield* registry()
-        .createChannel({
-          id,
-          key: payload.key ?? id,
-          kind: payload.kind,
-          managed: payload.managed ?? false,
-          name: payload.name,
-          ...secret,
-        })
-        .pipe(
-          Effect.catchTag("KeyTaken", (error) =>
-            Effect.fail(
-              new Conflict({
-                message: `a channel with key "${error.key}" already exists`,
-              })
-            )
-          )
-        );
+      const url = yield* secretUrl(payload.url, deps.devMode);
+      return yield* registry().createChannel({
+        id: crypto.randomUUID(),
+        kind: payload.kind,
+        name: payload.name,
+        url,
+      });
     });
 
   const update = (id: string, payload: ChannelPatchInput) =>
     Effect.gen(function* updateChannel() {
-      const secret =
+      const url =
         payload.url === undefined
           ? null
           : yield* secretUrl(payload.url, deps.devMode);
@@ -80,15 +65,11 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
       if (payload.kind !== undefined) {
         patch.kind = payload.kind;
       }
-      if (payload.managed !== undefined) {
-        patch.managed = payload.managed;
-      }
       if (payload.name !== undefined) {
         patch.name = payload.name;
       }
-      if (secret !== null) {
-        patch.url = secret.url;
-        patch.urlHash = secret.urlHash;
+      if (url !== null) {
+        patch.url = url;
       }
       const updated = yield* registry().updateChannel(id, patch);
       return updated ?? (yield* notFound(id));

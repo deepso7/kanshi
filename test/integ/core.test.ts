@@ -53,20 +53,6 @@ test(
     });
     expect(privateTarget.status).toBe(400);
 
-    const key = `key-${crypto.randomUUID()}`;
-    const monitor = yield* create({
-      enabled: false,
-      key,
-      url: yield* devUrl("/target"),
-    });
-    const duplicate = yield* send("POST", "/api/monitors", {
-      body: { key, name: "dup", url: yield* devUrl("/target") },
-    });
-    expect(duplicate.status).toBe(409);
-    expect((yield* send("DELETE", `/api/monitors/${monitor.id}`)).status).toBe(
-      204
-    );
-
     // HEAD cannot check a body: rejected on create and on the merged
     // config of a patch; a rejected patch changes nothing, `public` included.
     const headKeyword = yield* send("POST", "/api/monitors", {
@@ -306,21 +292,20 @@ test(
 test(
   "deleting during a delayed configure leaves no running monitor",
   Effect.gen(function* deleteRacesConfigureTest() {
-    const key = `race-${crypto.randomUUID()}`;
+    const name = `race-${crypto.randomUUID()}`;
     const creating = yield* send("POST", "/api/monitors", {
       body: {
         intervalSeconds: 5,
-        key,
-        name: "race",
+        name,
         url: yield* devUrl("/target"),
       },
       headers: { "x-kanshi-dev-configure-delay": "3000" },
     }).pipe(Effect.forkChild({ startImmediately: true }));
 
     const rows = yield* waitFor("creating row", registryRows, (entries) =>
-      entries.some((row) => row.key === key)
+      entries.some((row) => row.summary.name === name)
     );
-    const row = rows.find((entry) => entry.key === key);
+    const row = rows.find((entry) => entry.summary.name === name);
     expect(row?.lifecycle).toBe("creating");
     const id = row?.id ?? "";
 

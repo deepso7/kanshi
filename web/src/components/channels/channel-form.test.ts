@@ -1,7 +1,7 @@
 import * as Result from "effect/Result";
 import { describe, expect, it } from "vitest";
 
-import { BadRequest, Conflict, NotFound } from "../../../../src/api/spec.ts";
+import { BadRequest, NotFound } from "../../../../src/api/spec.ts";
 import type { ChannelView } from "../../../../src/domain/channel.ts";
 import {
   createPayload,
@@ -17,13 +17,10 @@ const dev = { devMode: true };
 const channel: ChannelView = {
   createdAt: 0,
   id: "c1",
-  key: "c1",
   kind: "slack",
-  managed: false,
   maskedUrl: "https://hooks.slack.com/****abcd",
   name: "On-call",
   updatedAt: 0,
-  urlHash: "hash",
 };
 
 describe(urlProblem, () => {
@@ -63,10 +60,9 @@ describe(urlProblem, () => {
 });
 
 describe(createPayload, () => {
-  it("trims the values and leaves out an empty key", () => {
+  it("trims the values", () => {
     const result = createPayload(
       {
-        key: "  ",
         kind: "discord",
         name: "  Team  ",
         url: " https://discord.com/api/webhooks/1/x ",
@@ -82,34 +78,10 @@ describe(createPayload, () => {
     );
   });
 
-  it("sends a key when given", () => {
-    const result = createPayload(
-      {
-        key: "team-discord",
-        kind: "ntfy",
-        name: "Team",
-        url: "https://ntfy.sh/t",
-      },
-      prod
-    );
-    expect(result).toStrictEqual(
-      Result.succeed({
-        key: "team-discord",
-        kind: "ntfy",
-        name: "Team",
-        url: "https://ntfy.sh/t",
-      })
-    );
-  });
-
   it("reports every invalid field at once", () => {
-    const result = createPayload(
-      { key: "-bad key", kind: "slack", name: " ", url: "" },
-      prod
-    );
+    const result = createPayload({ kind: "slack", name: " ", url: "" }, prod);
     expect(result).toStrictEqual(
       Result.fail({
-        key: "Up to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit.",
         name: "Enter a name.",
         url: "Enter the URL alerts are sent to.",
       })
@@ -118,7 +90,7 @@ describe(createPayload, () => {
 
   it("limits the name to 200 characters", () => {
     const result = createPayload(
-      { key: "", kind: "slack", name: "x".repeat(201), url: "https://a.com" },
+      { kind: "slack", name: "x".repeat(201), url: "https://a.com" },
       prod
     );
     expect(Result.isFailure(result) && result.failure.name).toBe(
@@ -170,14 +142,6 @@ describe(serverErrors, () => {
         new BadRequest({ message: "url: local hostnames are not allowed" })
       )
     ).toStrictEqual({ url: "Local hostnames are not allowed." });
-  });
-
-  it("puts a taken key on the key field", () => {
-    expect(
-      serverErrors(
-        new Conflict({ message: 'a channel with key "x" already exists' })
-      )
-    ).toStrictEqual({ key: "A channel with this key already exists." });
   });
 
   it("shows anything else above the form", () => {

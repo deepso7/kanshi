@@ -298,8 +298,6 @@ describe("alarm computation with alert work", () => {
     generation: 0,
     id: "m1",
     intervalSeconds: 60,
-    key: "m1",
-    managed: false,
     method: "GET",
     name: "Site",
     successThreshold: 1,

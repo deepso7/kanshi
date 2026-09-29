@@ -671,7 +671,7 @@ const Layout = () => (
         <PageHeader eyebrow="Overview" title="Monitors" />
         <EmptyState
           action={<Button>Add a monitor</Button>}
-          description="Add one, or sync kanshi.config.ts."
+          description="Add a URL to watch."
           title="No monitors yet"
         />
       </AppShell>

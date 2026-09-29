@@ -39,8 +39,6 @@ const config: MonitorConfig = {
   generation: 0,
   id: "m1",
   intervalSeconds: 60,
-  key: "m1",
-  managed: false,
   method: "GET",
   name: "Site",
   successThreshold: 1,
@@ -579,7 +577,6 @@ describe(shouldPushSummary, () => {
     }
     for (const patch of [
       { channels: ["c1"] },
-      { managed: true },
       { timeoutMs: 5000 },
       { failureThreshold: 3 },
     ] satisfies readonly Partial<MonitorConfig>[]) {

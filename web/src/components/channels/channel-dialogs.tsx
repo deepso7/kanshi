@@ -88,11 +88,6 @@ const styles = stylex.create({
     borderColor: colors.danger,
     color: colors.dangerForeground,
   },
-  calloutWarning: {
-    backgroundColor: colors.warningSurface,
-    borderColor: colors.warning,
-    color: colors.warningForeground,
-  },
   code: {
     fontFamily: fonts.mono,
     fontSize: "0.95em",
@@ -165,49 +160,15 @@ const styles = stylex.create({
 
 // -- small parts ---------------------------------------------------------------
 
-/** A note inside a dialog: a warning (managed) or a failure. */
-const Callout = ({
-  children,
-  tone,
-}: {
-  readonly children: ReactNode;
-  readonly tone: "warning" | "danger";
-}) => (
-  <div
-    role={tone === "danger" ? "alert" : "note"}
-    {...stylex.props(
-      styles.callout,
-      tone === "danger" ? styles.calloutDanger : styles.calloutWarning
-    )}
-  >
+/** A failure inside a dialog. */
+const Callout = ({ children }: { readonly children: ReactNode }) => (
+  <div role="alert" {...stylex.props(styles.callout, styles.calloutDanger)}>
     {children}
   </div>
 );
 
 const Code = ({ children }: { readonly children: ReactNode }) => (
   <code {...stylex.props(styles.code)}>{children}</code>
-);
-
-/** Channels created by `kanshi sync` are overwritten by the next one. */
-const ManagedNote = ({ action }: { readonly action: "edit" | "delete" }) => (
-  <Callout tone="warning">
-    <strong {...stylex.props(shared.label, styles.calloutWarning)}>
-      Managed by config
-    </strong>
-    <span>
-      {action === "edit" ? (
-        <>
-          The next <Code>kanshi sync</Code> overwrites edits made here. Change{" "}
-          <Code>kanshi.config.ts</Code> instead.
-        </>
-      ) : (
-        <>
-          The next <Code>kanshi sync</Code> creates it again. Remove it from{" "}
-          <Code>kanshi.config.ts</Code> as well.
-        </>
-      )}
-    </span>
-  </Callout>
 );
 
 const LockIcon = () => (
@@ -318,7 +279,6 @@ const AddChannelForm = ({
 }) => {
   const [name, setName] = useState("");
   const [kind, setKind] = useState<ChannelKind>("slack");
-  const [key, setKey] = useState("");
   const [url, setUrl] = useState("");
   const [errors, setErrors] = useState<ChannelFieldErrors>({});
   const create = useToastMutation(createChannelMutation, {
@@ -329,7 +289,7 @@ const AddChannelForm = ({
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const payload = createPayload({ key, kind, name, url }, { devMode });
+    const payload = createPayload({ kind, name, url }, { devMode });
     if (Result.isFailure(payload)) {
       setErrors(payload.failure);
       return;
@@ -355,9 +315,7 @@ const AddChannelForm = ({
           a secret: it is stored, never shown again.
         </DialogDescription>
       </DialogHeader>
-      {errors.form === undefined ? null : (
-        <Callout tone="danger">{errors.form}</Callout>
-      )}
+      {errors.form === undefined ? null : <Callout>{errors.form}</Callout>}
       <div {...stylex.props(styles.fields)}>
         <div {...stylex.props(styles.row)}>
           <FormField error={errors.name} label="Name" name="name">
@@ -397,25 +355,6 @@ const AddChannelForm = ({
             value={url}
           />
         </FormField>
-        <FormField
-          description="A stable name for kanshi.config.ts; the id when empty."
-          error={errors.key}
-          label={<Optional>Key</Optional>}
-          name="key"
-        >
-          <Input
-            autoComplete="off"
-            disabled={busy}
-            mono
-            onValueChange={(value) => {
-              setKey(value);
-              setErrors(clearing("key"));
-            }}
-            placeholder="oncall-slack"
-            spellCheck={false}
-            value={key}
-          />
-        </FormField>
       </div>
       <DialogFooter>
         <DialogClose disabled={busy} render={<Button variant="outline" />}>
@@ -429,7 +368,7 @@ const AddChannelForm = ({
   );
 };
 
-/** "Add channel": name, kind, URL and an optional key. */
+/** "Add channel": name, kind and URL. */
 export const AddChannelDialog = ({
   devMode,
   onOpenChange,
@@ -506,10 +445,7 @@ const EditChannelForm = ({
           The current URL stays secret. Enter a new one only to replace it.
         </DialogDescription>
       </DialogHeader>
-      {channel.managed ? <ManagedNote action="edit" /> : null}
-      {errors.form === undefined ? null : (
-        <Callout tone="danger">{errors.form}</Callout>
-      )}
+      {errors.form === undefined ? null : <Callout>{errors.form}</Callout>}
       <div {...stylex.props(styles.fields)}>
         <div {...stylex.props(styles.row)}>
           <FormField error={errors.name} label="Name" name="name">
@@ -648,10 +584,7 @@ const DeleteChannelBody = ({
         alerting the others. This cannot be undone.
       </AlertDialogDescription>
     </AlertDialogHeader>
-    {channel.managed ? <ManagedNote action="delete" /> : null}
-    {error === null ? null : (
-      <Callout tone="danger">{describeError(error).message}</Callout>
-    )}
+    {error === null ? null : <Callout>{describeError(error).message}</Callout>}
     <AlertDialogFooter>
       <AlertDialogCancel disabled={pending} />
       <AlertDialogAction disabled={pending} onClick={onDelete}>

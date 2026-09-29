@@ -70,9 +70,7 @@ export type Detail = typeof Detail.Type;
 const RegistryEntry = Schema.Struct({
   createdAt: Schema.Number,
   id: Schema.String,
-  key: Schema.String,
   lifecycle: Lifecycle,
-  managed: Schema.Boolean,
   opId: Schema.String,
   public: Schema.Boolean,
   summary: MonitorSummary,

@@ -533,7 +533,6 @@ test(
     const overview = yield* read("/api/overview", Overview);
     const item = overview.monitors.find((entry) => entry.id === monitor.id);
     expect(item).toMatchObject({
-      managed: false,
       name: monitor.name,
       notChecked: false,
       public: false,

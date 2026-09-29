@@ -4,7 +4,7 @@ A small, self-hosted uptime monitor that runs as **one Cloudflare Worker**
 with **one secret**. Each monitor is a Durable Object that checks its URL on
 its own alarm, keeps its history and incidents in its own SQLite storage and
 sends alerts to Slack, Discord, ntfy or any webhook. You get a dashboard, a
-public status page, a JSON API and config-as-code.
+public status page and a JSON API.
 
 - HTTP(S) checks: method, expected status (`200`, `2xx`, `200,204`), body
   keyword, timeout, interval (30s minimum), failure/success thresholds. A
@@ -39,57 +39,8 @@ You need Node, pnpm, [Bun](https://bun.sh) and a Cloudflare account.
 2. **Open the dashboard** at the Worker URL and sign in with the token. The
    public status page is at `/status`.
 
-3. **Add monitors and channels**, in the dashboard or as code:
-
-   ```sh
-   pnpm kanshi sync --url https://<your-worker> --dry-run   # show the plan
-   pnpm kanshi sync --url https://<your-worker>             # apply it
-   ```
-
-## Config as code
-
-`kanshi.config.ts` (see the example in this repo):
-
-```ts
-import { defineConfig, env } from "./src/config.ts";
-
-export default defineConfig({
-  channels: [
-    {
-      key: "ops",
-      kind: "slack",
-      name: "#ops",
-      url: env("KANSHI_SLACK_WEBHOOK_URL"),
-    },
-  ],
-  monitors: [
-    {
-      key: "api",
-      name: "API",
-      url: "https://api.example.com/health",
-      channels: ["ops"],
-      public: true,
-    },
-  ],
-});
-```
-
-`pnpm kanshi sync [--url <base>] [--config <path>] [--dry-run] [--adopt]
-[--wait <seconds>]` (`--url` defaults to `KANSHI_URL`; needs
-`KANSHI_API_TOKEN`; `pnpm kanshi sync --help` lists the flags):
-
-- Resources are matched by `key`. Sync creates, updates and deletes only the
-  resources it created (`managed`); anything added in the dashboard is left
-  alone. A config key that belongs to a dashboard-created resource is an
-  error, unless `--adopt` takes it over.
-- Fields left out get the defaults, so removing a field resets it. Edits made
-  in the dashboard to a managed resource are overwritten by the next sync
-  (the dashboard marks those resources "managed by config").
-- Channel URLs are secrets: use `env("NAME")`. They are never read back;
-  sync compares SHA-256 hashes of the normalised URLs.
-- Monitors use every channel (`"all"`, the default) or a list of channel keys.
-- The plan is printed first. Config errors abort before any change; a failed
-  request stops the run, and running sync again converges.
+3. **Add monitors and channels** in the dashboard (or through the
+   [API](#api)).
 
 ## Alerts
 
@@ -123,7 +74,7 @@ invalid) or 503 (`Unavailable`); the message says so: retry it.
 | `GET /api/watchdog/episodes`                               | open "not being checked" episodes              |
 | `GET /api/meta`                                            | dev mode, minimum interval, quota              |
 | `GET /api/dev/events?limit=20`                             | dev webhook sink events (dev mode only)        |
-| `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked + hash)       |
+| `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked)              |
 | `POST /api/channels/:id/test`                              | send a test alert                              |
 | `GET /api/public/status`                                   | public monitors only, no URLs (no auth)        |
 | `GET/POST/DELETE /api/session`                             | dashboard sign-in state, sign in, out          |
@@ -148,7 +99,6 @@ derived from the API's spec.
 
 ```sh
 pnpm dev    # alchemy dev --stage dev, fully offline: open http://localhost:5173
-pnpm seed   # kanshi sync of kanshi.dev.config.ts to the dev stack
 pnpm build  # build the UI (web/dist), as deploys and integration tests do
 ```
 
@@ -174,8 +124,10 @@ host):
   `/_dev/registry/calls` (Registry calls per method), `POST
 /_dev/watchdog`, `POST /_dev/monitors/:id/maintain`.
 
-The seeded monitors watch those fixtures and alert the sink, so flipping
-`demo` shows the whole down/alert/recovery cycle within seconds.
+Add a monitor on `http://localhost:1337/_dev/target/flip/demo` with a
+5-second interval and a webhook channel on
+`http://localhost:1337/_dev/webhook`, and flipping `demo` shows the whole
+down/alert/recovery cycle within seconds.
 
 ## Checks and tests
 

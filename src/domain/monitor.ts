@@ -81,8 +81,6 @@ export const MonitorConfig = Schema.Struct({
   generation: NonNegativeInt,
   id: Schema.NonEmptyString,
   intervalSeconds: NonNegativeInt,
-  key: Schema.NonEmptyString,
-  managed: Schema.Boolean,
   method: MonitorMethod,
   name: Schema.NonEmptyString,
   successThreshold: NonNegativeInt,

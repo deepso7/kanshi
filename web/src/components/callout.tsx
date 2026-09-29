@@ -102,7 +102,7 @@ export interface CalloutProps {
   readonly style?: stylex.StyleXStyles;
 }
 
-/** A banner in a page: a state to know about (managed, paused, stale). */
+/** A banner in a page: a state to know about (paused, stale). */
 export const Callout = ({
   action,
   children,

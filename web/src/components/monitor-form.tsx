@@ -403,10 +403,8 @@ const urlHint = (values: MonitorFormValues, rules: FormRules): ReactNode => {
 
 const TargetSection = ({
   form: { errorFor, rules, set, touch, values },
-  isNew,
 }: {
   readonly form: FormControl;
-  readonly isNew: boolean;
 }) => (
   <Section
     description="The URL to request, and what counts as a healthy answer."
@@ -495,24 +493,6 @@ const TargetSection = ({
         value={values.bodyContains}
       />
     </FormField>
-    {isNew ? (
-      <FormField
-        description="Optional. A stable identifier for config as code (kanshi.config.ts); the monitor’s id when empty."
-        error={errorFor("key")}
-        label="Key"
-        name="key"
-      >
-        <Input
-          autoComplete="off"
-          mono
-          onBlur={touch("key")}
-          onValueChange={(value) => set("key", value)}
-          placeholder="api-health"
-          spellCheck={false}
-          value={values.key}
-        />
-      </FormField>
-    ) : null}
   </Section>
 );
 
@@ -857,11 +837,11 @@ export const MonitorForm = ({
 
   const onFailure = (failure: Error) => {
     const mapped = serverFieldError(failure);
-    if (mapped !== null && (isNew || mapped.field !== "key")) {
+    if (mapped === null) {
+      setFormError(failure);
+    } else {
       setServerErrors({ [mapped.field]: mapped.message });
       focusFirstInvalid();
-    } else {
-      setFormError(failure);
     }
   };
 
@@ -896,7 +876,7 @@ export const MonitorForm = ({
       {...stylex.props(styles.form)}
     >
       {formError === null ? null : <ErrorPanel error={formError} />}
-      <TargetSection form={form} isNew={isNew} />
+      <TargetSection form={form} />
       <ScheduleSection form={form} />
       <AlertingSection
         channels={channels}

@@ -66,8 +66,6 @@ const config: MonitorConfig = {
   generation: 0,
   id: "m1",
   intervalSeconds: 60,
-  key: "m1",
-  managed: false,
   method: "GET",
   name: "Site",
   successThreshold: 1,
@@ -270,7 +268,6 @@ describe("staleness", () => {
       for (const patch of [
         { name: "Renamed" },
         { channels: ["c1"] },
-        { managed: true },
       ] satisfies readonly Partial<MonitorConfig>[]) {
         const edited = edit(patch);
         assert.strictEqual(edited.config.updatedAt, editedAt);
@@ -907,9 +904,7 @@ const registryRow = (
 ): RegistryEntry => ({
   createdAt: t0,
   id,
-  key: id,
   lifecycle: "active",
-  managed: false,
   opId: `op-${id}`,
   public: false,
   summary: summaryOf(config, snapshot().state),
