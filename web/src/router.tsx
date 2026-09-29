@@ -127,10 +127,13 @@ const loginRoute = createRoute({
 /** Public: no session needed (it reads `/api/public/status`). */
 const statusRoute = createRoute({
   component: StatusPage,
+  // Its own frame, not the app shell's.
+  errorComponent: StandaloneRouteError,
   getParentRoute: () => rootRoute,
   loader: ({ context: { queryClient: client } }) =>
     client.ensureQueryData(publicStatusQuery),
   path: "/status",
+  pendingComponent: StandalonePending,
 });
 
 // -- signed in ---------------------------------------------------------------
