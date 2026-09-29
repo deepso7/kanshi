@@ -80,8 +80,9 @@ const describeCause = (cause: Cause.Cause<unknown>): string =>
  * 4. Only with suspects: each is read again (`status()`, after the batch,
  *    so it sees any check or disable the monitor committed since its first
  *    read, pushed or not), and one `registry.confirmStale(items, now)`
- *    opens episodes for those still stale at the same revision
- *    (`confirmSuspect`); none left, no call.
+ *    opens episodes for those the fresh read finds still stale, enabled
+ *    and not deleted (`confirmSuspect`), at the fresh read's revision;
+ *    none left, no call.
  *
  * So a run makes `2 + active monitors` requests when nothing is stuck and
  * nothing opens (the steady state), and `3 + active monitors + suspects`

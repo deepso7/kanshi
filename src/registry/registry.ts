@@ -324,11 +324,11 @@ export class Registry extends Cloudflare.DurableObject<
     ) => Effect.Effect<ReconcileReport, never, RuntimeContext>;
     /**
      * Open the episodes of the batch's suspects that a fresh read of the
-     * monitor, made after the batch, found still stale at the same
-     * revision (`confirmSuspect`). Each is re-checked like a batch item
-     * (still active, no newer revision stored, no episode open), opened
-     * alerting every channel, in its own transaction; then the alarm is
-     * re-armed. `at` is the run's clock.
+     * monitor, made after the batch, found still stale (`confirmSuspect`).
+     * Each carries that read's revision and is re-checked like a batch
+     * item (still active, no revision newer than the fresh read's stored,
+     * no episode open), opened alerting every channel, in its own
+     * transaction; then the alarm is re-armed. `at` is the run's clock.
      */
     confirmStale: (
       items: readonly ReconcileItem[],
@@ -724,7 +724,9 @@ export const RegistryLive = Registry.make(
       ) =>
         transact(
           Effect.gen(function* reconcileOneTx() {
-            // The confirming item's revision was stored by the batch.
+            // A confirming item records the observation only: its summary
+            // is the fresh read's, which the monitor pushes itself (or the
+            // next run's batch stores), and its revision is only compared.
             const summaryUpdated = confirmed
               ? false
               : yield* upsertSummary(item.id, item.summary, item.revision);

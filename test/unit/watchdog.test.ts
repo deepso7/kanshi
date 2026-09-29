@@ -642,12 +642,73 @@ describe("checks between the watchdog's read and its batch", () => {
         applied: true,
         change: "suspect",
       });
-      // The re-read sees the Monitor's own state: not stale, newer revision.
+      // The re-read sees the Monitor's own state: checked, so not stale.
       assert.isNull(confirmSuspect(suspect, live(after), confirmAt));
-      // Even with a clock at which the check would be stale again, the
-      // moved revision dismisses it.
-      assert.isNull(
-        confirmSuspect(suspect, live(after), confirmAt + 60 * minute)
+    });
+
+    it("opens nothing for a schedule reset after the first read", () => {
+      // A probe-affecting edit, or an enable, restarts checks: not stale,
+      // whether or not its revision moved.
+      for (const patch of [
+        { timeoutMs: 5000 },
+        { url: "https://example.org/" },
+      ] satisfies readonly Partial<MonitorConfig>[]) {
+        const edited = applyConfigChange(
+          stuck.config,
+          { ...stuck.config, ...patch, updatedAt: batchAt },
+          stuck.state,
+          batchAt
+        );
+        const after = { config: edited.config, state: edited.state };
+        assert.strictEqual(after.state.scheduleResetAt, batchAt);
+        assert.isNull(
+          confirmSuspect(suspect, live(after), confirmAt),
+          JSON.stringify(patch)
+        );
+      }
+    });
+
+    it("still opens a monitor renamed after the first read", () => {
+      // A cosmetic edit commits between the batch and the re-read: the
+      // revision moves (the name is in the summary) but checks do not
+      // restart, so the monitor is still stuck.
+      const renamed = applyConfigChange(
+        stuck.config,
+        { ...stuck.config, name: "Renamed", updatedAt: batchAt },
+        stuck.state,
+        batchAt
+      );
+      const after = { config: renamed.config, state: renamed.state };
+      assert.strictEqual(after.state.summaryRevision, 6);
+      assert.strictEqual(
+        after.state.scheduleResetAt,
+        stuck.state.scheduleResetAt
+      );
+      const confirmed = confirmSuspect(suspect, live(after), confirmAt);
+      assert.isNotNull(confirmed);
+      // The confirming item is the fresh read: its revision and name.
+      assert.strictEqual(confirmed?.revision, 6);
+      assert.strictEqual(confirmed?.observation.name, "Renamed");
+      assert.isTrue(confirmed?.observation.stale);
+      // The Registry opens it whether the rename's push has landed or not,
+      // and not if a revision newer than the fresh read is stored.
+      for (const summaryRevision of [5, 6]) {
+        assert.deepStrictEqual(
+          watchOutcome(
+            watched({ summaryRevision }),
+            confirmed ?? suspect,
+            true
+          ),
+          { applied: true, change: "open" }
+        );
+      }
+      assert.deepStrictEqual(
+        watchOutcome(
+          watched({ summaryRevision: 7 }),
+          confirmed ?? suspect,
+          true
+        ),
+        { applied: false, change: "none" }
       );
     });
 
@@ -1126,9 +1187,52 @@ describe(runWatchdog, () => {
       }).pipe(Effect.provide(RuntimeContext.phantom))
     );
 
+    it.effect("opens an episode for a monitor renamed before the re-read", () =>
+      Effect.gen(function* renamedTest() {
+        const renamed = snapshot({
+          config: { name: "Renamed" },
+          lastCheckedAt: t0,
+          summaryRevision: 4,
+        });
+        const { calls, confirms, deps } = fakeWatchdog(
+          suspectRows,
+          snapshots,
+          answer,
+          new Set(),
+          new Map([["stale", renamed]])
+        );
+        const report = yield* runWatchdog(deps, now);
+        assert.deepStrictEqual(calls, [
+          "registry.list",
+          "fresh.reconcile",
+          "stale.reconcile",
+          "registry.reconcile",
+          "stale.status",
+          "registry.confirmStale",
+        ]);
+        // Sent with the fresh read's revision and summary.
+        assert.strictEqual(confirms[0]?.[0]?.revision, 4);
+        assert.strictEqual(confirms[0]?.[0]?.observation.name, "Renamed");
+        assert.strictEqual(confirms[0]?.[0]?.summary.name, "Renamed");
+        assert.deepStrictEqual(
+          report.results.find((result) => result.id === "stale")?.watch,
+          { applied: true, change: "open", episodeId: "watchdog-stale" }
+        );
+      }).pipe(Effect.provide(RuntimeContext.phantom))
+    );
+
     for (const [label, reread] of [
       ["checked", checked],
       ["disabled", disabled],
+      [
+        "restarted",
+        snapshot({
+          config: { timeoutMs: 5000 },
+          lastCheckedAt: t0,
+          scheduleResetAt: now - minute,
+          summaryRevision: 3,
+        }),
+      ],
     ] as const) {
       it.effect(`opens nothing for a monitor ${label} before the re-read`, () =>
         Effect.gen(function* dismissTest() {

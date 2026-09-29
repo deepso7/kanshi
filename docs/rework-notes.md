@@ -1592,9 +1592,15 @@ page needs per row goes into the API response instead of a fetch per row.
   without auth that read a body (only `POST /api/session`, 4 KB). The
   Worker checks the Origin (403) and the size (413, for a declared
   `content-length` or a chunked body) before the API decodes anything.
-  A refused body is still read and dropped (up to 1 MiB, larger ones
-  unread): an unread body closes the connection under the response and
-  the local dev gateway resets it (`ECONNRESET`), as with form posts. Authenticated endpoints decode only
+  A refused body is still read and dropped (up to 1 MiB and at most 1 s,
+  `drainMaxMs`; larger ones unread): an unread body closes the connection
+  under the response and the local dev gateway resets it (`ECONNRESET`),
+  as with form posts. Past the second the body is cancelled and the
+  refusal sent, so a sender that uploads slowly or never finishes cannot
+  hold a 403/413 open; for a chunked body the clock starts once it is
+  over the limit (a slow body within it is waited for, as the API
+  would). Kept chunks are appended to one array per request (no copy
+  per chunk). Authenticated endpoints decode only
   after the auth middleware. The token schema caps at 1024 characters,
   and `KANSHI_API_TOKEN` must fit.
 - **Uptime next to the bars** is over the days the bars show (90, or 60 on
@@ -1748,11 +1754,13 @@ after, now)`: stale before, not after; passed to `reviseSummary` by
   back as `suspect`, with nothing recorded. The runner then re-reads each
   suspect with `Monitor.status()` (after the batch returned, no re-arm)
   and `confirmSuspect(item, status, now)` keeps only those still stale
-  (so enabled), not deleted, and at the **same summary revision** as the
-  batch's read. One `Registry.confirmStale(items, now)` (new RPC, only when
+  (so enabled) and not deleted, carrying the fresh read (its revision and
+  summary). One `Registry.confirmStale(items, now)` (new RPC, only when
   some are left) opens them: each item in its own transaction, re-checked
-  with `confirmed = true` (row still active, no newer revision stored, no
-  episode open), then the alarm is re-armed. Why it closes the gap: the
+  with `confirmed = true` (row still active, no revision newer than the
+  fresh read's stored, no episode open), then the alarm is re-armed.
+  (Round 1 also required the fresh revision to equal the batch's read;
+  dropped in round 2, below.) Why it closes the gap: the
   re-read reads the Monitor's own storage, so any check, disable or edit
   it committed before the re-read is seen whether or not its push has
   arrived (a reviving check moves the revision and ends staleness, a
@@ -1829,6 +1837,35 @@ PR review round 1:
   unique key, and that a second run applies nothing.
 - The plan's revision rule documents the revival bump (and
   `reviseSummary`'s comment).
+
+PR review round 2:
+
+- **Decision: confirm on the fresh read's own staleness.** Round 1 also
+  dismissed a suspect whose summary revision moved since the batch's
+  read. A cosmetic edit (a rename) committing between the batch and the
+  re-read bumps the revision without restarting checks, so a stuck
+  monitor was dismissed and alerted an hour late. Every change that
+  should suppress the episode ends staleness in the Monitor's storage
+  itself (a completed check sets `lastCheckedAt`; an enable or a
+  probe-affecting edit, a URL one included, stamps `scheduleResetAt`; a
+  disable is never stale), so the revision comparison added nothing but
+  this false dismissal. `confirmSuspect` now checks stale (enabled), not
+  deleted, readable; the confirming item carries the fresh read's
+  revision, so `confirmStale` opens only while the Registry stores
+  nothing newer than that read. Unit: a rename between the batch and the
+  re-read still opens (whether its push landed or not; not once a newer
+  revision is stored), a check, disable, probe-affecting edit or URL
+  edit still dismisses, and `runWatchdog` sends the renamed monitor's
+  fresh revision and name to `confirmStale`.
+- **Drain bounded by time** (`drainMaxMs`, above) and **kept chunks
+  appended in place**. Unit (`body-limit.test.ts`, test clock): a
+  never-ending body is given up on after exactly `drainMaxMs` and
+  cancelled (`discardBody`, a chunked body over the limit, and a
+  cross-origin `guardBody` answering 403); a slow chunked body within the
+  limit is still waited for; 4096 one-byte chunks buffer intact.
+
+Commands (round 2): `pnpm typecheck`, `pnpm check` pass; `pnpm test` 350
+pass; `pnpm test:integ` 34 pass (about 4.4 minutes).
 
 ## Lint conventions
 

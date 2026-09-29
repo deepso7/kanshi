@@ -1,10 +1,17 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import {
   discardBody,
   drainMaxBytes,
+  drainMaxMs,
+  guardBody,
   guardedBodyOf,
   limitBody,
   signInMaxBytes,
@@ -22,6 +29,28 @@ const chunked = (size: number, chunkSize = 512) =>
       controller.close();
     },
   });
+
+/**
+ * A body that sends `sent` bytes, then never another nor its end (a slow
+ * or stalled upload); `cancelled` says whether the reader gave up on it.
+ */
+const stalled = (sent: number) => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled = true;
+    },
+    start(controller) {
+      if (sent > 0) {
+        controller.enqueue(new Uint8Array(sent));
+      }
+    },
+  });
+  return { body, cancelled: () => cancelled };
+};
+
+/** Let the body's promises run (real time; the Effect clock is a test one). */
+const settle = Effect.promise(() => sleep(20));
 
 const post = (init: RequestInit) =>
   HttpServerRequest.fromWeb(new Request(url, { method: "POST", ...init }));
@@ -84,6 +113,71 @@ describe(limitBody, () => {
     })
   );
 
+  it.effect(
+    "refuses a chunked body over the limit that never ends, in time",
+    () =>
+      Effect.gen(function* stalledTest() {
+        const upload = stalled(signInMaxBytes + 1);
+        const fiber = yield* limitBody(
+          post({ body: upload.body, duplex: "half" }),
+          signInMaxBytes
+        ).pipe(Effect.forkChild);
+        yield* settle;
+        yield* TestClock.adjust(drainMaxMs - 1);
+        assert.isUndefined(fiber.pollUnsafe());
+        yield* TestClock.adjust(1);
+        assert.isNull(yield* Fiber.join(fiber));
+        assert.isTrue(upload.cancelled());
+      })
+  );
+
+  it.effect("waits for a slow chunked body while it is within the limit", () =>
+    Effect.gen(function* slowTest() {
+      const text = JSON.stringify({ token: "slow" });
+      const sent = Promise.withResolvers<undefined>();
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          await sent.promise;
+          controller.enqueue(new TextEncoder().encode(text));
+          controller.close();
+        },
+      });
+      const fiber = yield* limitBody(
+        post({ body, duplex: "half" }),
+        signInMaxBytes
+      ).pipe(Effect.forkChild);
+      yield* settle;
+      // Not refused (yet), so no drain deadline runs.
+      yield* TestClock.adjust(10 * drainMaxMs);
+      assert.isUndefined(fiber.pollUnsafe());
+      sent.resolve();
+      const limited = yield* Fiber.join(fiber);
+      assert.strictEqual(yield* limited?.text ?? Effect.succeed(""), text);
+    })
+  );
+
+  it.effect("buffers a body of one-byte chunks up to the limit", () =>
+    Effect.gen(function* byteChunksTest() {
+      const bytes = new Uint8Array(signInMaxBytes).map((_, index) => index);
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const byte of bytes) {
+            controller.enqueue(Uint8Array.of(byte));
+          }
+          controller.close();
+        },
+      });
+      const limited = yield* limitBody(
+        post({ body, duplex: "half" }),
+        signInMaxBytes
+      );
+      const read = yield* (
+        limited?.arrayBuffer ?? Effect.succeed(new ArrayBuffer(0))
+      );
+      assert.deepStrictEqual(new Uint8Array(read), bytes);
+    })
+  );
+
   it.effect("buffers a chunked body within the limit for the API", () =>
     Effect.gen(function* withinTest() {
       const text = JSON.stringify({ token: "t".repeat(1000) });
@@ -114,6 +208,21 @@ describe(discardBody, () => {
     })
   );
 
+  it.effect("gives up on a body that never ends after the drain time", () =>
+    Effect.gen(function* stalledTest() {
+      const upload = stalled(100);
+      const fiber = yield* discardBody(
+        post({ body: upload.body, duplex: "half" })
+      ).pipe(Effect.forkChild);
+      yield* settle;
+      yield* TestClock.adjust(drainMaxMs - 1);
+      assert.isUndefined(fiber.pollUnsafe());
+      yield* TestClock.adjust(1);
+      yield* Fiber.join(fiber);
+      assert.isTrue(upload.cancelled());
+    })
+  );
+
   it.effect("leaves a body declared past the drain limit unread", () =>
     Effect.gen(function* unreadTest() {
       const { request, web } = postWeb({
@@ -122,6 +231,29 @@ describe(discardBody, () => {
       });
       yield* discardBody(request);
       assert.isFalse(web.bodyUsed);
+    })
+  );
+});
+
+describe(guardBody, () => {
+  it.effect("refuses another origin's never-ending upload in time", () =>
+    Effect.gen(function* forbiddenTest() {
+      const upload = stalled(0);
+      const request = post({
+        body: upload.body,
+        duplex: "half",
+        headers: { origin: "https://evil.example.com" },
+      });
+      const fiber = yield* guardBody(
+        request,
+        "/api/session",
+        Effect.succeed(HttpServerResponse.empty({ status: 204 }))
+      ).pipe(Effect.forkChild);
+      yield* settle;
+      yield* TestClock.adjust(drainMaxMs);
+      const response = yield* Fiber.join(fiber);
+      assert.strictEqual(response.status, 403);
+      assert.isTrue(upload.cancelled());
     })
   );
 });

@@ -247,9 +247,11 @@ alerts all channels "Kanshi: monitor X is not being checked"
 disabling closes it silently). The batch does not open episodes itself:
 it returns those monitors as suspects, the watchdog reads each suspect
 again (`status()`, after the batch), and one `registry.confirmStale`
-opens episodes only for those still stale, enabled and active at the
-same revision, so a check or disable the monitor committed but had not
-yet pushed never opens one. The batch prunes old episodes; both calls
+opens episodes only for those the fresh read finds still stale (so
+enabled) and not deleted, unless the Registry stores a revision newer
+than that read, so a check or disable the monitor committed but had not
+yet pushed never opens one, and a cosmetic edit (a rename) does not
+dismiss a stuck monitor. The batch prunes old episodes; both calls
 re-arm the Registry's alarm, which is set only while watchdog alerts are
 due. A run is `2 + active monitors` requests in the steady state
 (nothing opens), and `3 + active monitors + suspects` when a monitor is

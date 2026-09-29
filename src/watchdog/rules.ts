@@ -323,11 +323,18 @@ export const watchOutcome = (
  * The confirming observation of a `suspect`, from the monitor's own state
  * read after the batch (`status()`), or null when it no longer warrants an
  * episode: unreadable, deleted or unconfigured, no longer stale (a check
- * completed, or its schedule restarted), disabled (never stale), or its
- * summary revision moved since the batch's read (any change pushed or not,
- * a reviving check included). The Monitor's storage is read directly, so
- * a change it committed but has not pushed yet counts. Nothing is
- * restored by this read, so `alarmRestored` is false.
+ * completed, or its schedule restarted by an enable or a probe-affecting
+ * edit), or disabled (never stale). The Monitor's storage is read
+ * directly, so a change it committed but has not pushed yet counts.
+ *
+ * The decision rests on the fresh read's own staleness, not on its summary
+ * revision matching the batch's read: every change that could end the
+ * episode's cause ends staleness itself, while a cosmetic edit (name, URL)
+ * moves the revision without restarting checks, and the monitor is still
+ * stuck. The confirming item carries the fresh read's revision, so the
+ * Registry opens only if it stores nothing newer than that read
+ * (`watchOutcome`). Nothing is restored by this read, so `alarmRestored`
+ * is false.
  */
 export const confirmSuspect = (
   suspect: ReconcileItem,
@@ -342,10 +349,7 @@ export const confirmSuspect = (
     return null;
   }
   const { snapshot } = status;
-  if (
-    snapshot.state.summaryRevision !== suspect.revision ||
-    !isStale(snapshot, now)
-  ) {
+  if (!isStale(snapshot, now)) {
     return null;
   }
   return {
