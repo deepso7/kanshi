@@ -7,8 +7,10 @@ decisions, deviations and gotchas per phase.
 
 ## Layout
 
-- `src/worker.ts`: the Worker. Routes `/api/*` (Effect `HttpApi`), `/_dev/*`
-  (dev stage only) and pages; registers the watchdog cron; provides both DOs.
+- `src/worker.ts`: the Worker. Serves the SPA (`web/dist`) as static
+  assets; runs first for `/api/*` (Effect `HttpApi`), `/_dev/*` (dev stage
+  only) and the legacy pages (`src/http/worker-paths.ts` lists them, shared
+  with the Vite proxy); registers the watchdog cron; provides both DOs.
 - `src/monitor/`: the **Monitor DO** (`monitor.ts`, one object per monitor,
   named by monitor id) and its pure rules (`machine.ts`, `cycle.ts`,
   `reset.ts`, `outbox.ts`, `history.ts`) and storage/migrations
@@ -20,9 +22,19 @@ decisions, deviations and gotchas per phase.
   status, probe, channels). `src/alerts/`: messages and delivery.
 - `src/service/`: operations shared by the API and the dashboard, each a
   `Context.Service` with a static `layer`. `src/api/`: `HttpApi` spec,
-  auth and thin handler layers. `src/settings.ts`: `KanshiSettings`, the
+  auth and thin handler layers. `src/api/spec.ts` and everything it imports
+  (`middleware.ts`, `src/domain/`, `src/auth/session.ts`) is also bundled
+  into the SPA: keep it browser-safe (no Worker, DO, Node or Bun imports;
+  `tsc -p web` checks it against the DOM). `src/auth/session.ts`: the
+  session cookie (HMAC) and the Origin check. `src/settings.ts`: `KanshiSettings`, the
   Worker's config (API token, dev mode, quota).
-- `src/ui/`: server-rendered dashboard and status page (no build step).
+- `web/`: the SPA (Vite, React 19, StyleX, TanStack Router and Query), its
+  own `tsconfig.json`. `web/src/api/`: the typed client (`HttpApiClient`
+  from the spec) and query options; `web/src/pages/` (components only, for
+  Fast Refresh); `web/src/router.tsx` (the route tree);
+  `web/src/theme/tokens.stylex.ts` (design tokens). `web/public/_headers`:
+  CSP and caching for the static assets.
+- `src/ui/`: the legacy server-rendered pages, being replaced by `web/`.
 - `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*`.
 - `src/config.ts`: `defineConfig` for `kanshi.config.ts` /
   `kanshi.dev.config.ts`. `src/sync/`: `kanshi sync` (`plan.ts` is the pure
@@ -41,7 +53,7 @@ Run all of these before committing:
 
 ```sh
 pnpm typecheck && pnpm check && pnpm test
-pnpm test:integ   # local stack on port 1337, ~4 min; stop `pnpm dev` first
+pnpm test:integ   # builds web/, local stack on port 1337, ~4 min; stop `pnpm dev` first
 ```
 
 `pnpm fix` applies formatting and safe lint fixes.
@@ -128,7 +140,10 @@ Overrides in `oxlint.config.ts`, each a false positive on idiomatic code:
 
 - `pnpm dev` runs `alchemy dev --stage dev` offline with **placeholder**
   `CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN` set in the script. Never put
-  those placeholders in `.env`: `alchemy deploy` would use them too.
+  those placeholders in `.env`: `alchemy deploy` would use them too. The
+  stack also starts the SPA's Vite dev server (`Command.Dev`, HMR) on
+  http://localhost:5173; it proxies the Worker's paths to port 1337.
+- Deploy with `pnpm run deploy` (`pnpm deploy` is pnpm's own command).
 - `.env` holds `KANSHI_API_TOKEN` (the API token and dashboard password).
   `pnpm seed` syncs `kanshi.dev.config.ts` to the dev stack.
 - Integration tests use their own token (`test/integ/alchemy.run.ts`).

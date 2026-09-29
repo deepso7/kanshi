@@ -1114,3 +1114,201 @@ tests pass there. `30ece7d` fails `pnpm typecheck` and `pnpm check`;
   (`Alchemy.localState()`).
 - The local `.env` (untracked) still has old `TINYBIRD_*` variables; they
   are unused and can be deleted.
+
+## UI rework
+
+Replacing the server-rendered pages (`src/ui/`) with a React SPA in `web/`,
+in phases. Phase 1 is the foundation only: tooling, serving, auth
+endpoints and a placeholder page.
+
+### Research: Alchemy (2.0.0-beta.79) and static assets / Vite
+
+- `Cloudflare.Worker` takes `assets`: a directory (or `{ directory, ...config
+}`) uploaded as Workers static assets with `htmlHandling`,
+  `notFoundHandling: "single-page-application"` and `runWorkerFirst`
+  (`true` or rules like `["/api/*"]`). `_headers` / `_redirects` in the
+  directory are applied, in deploys and under `alchemy dev` (the local
+  runtime puts the same asset router in front of the Worker). Assets-first
+  by default: a request matching a file, or falling back to `index.html`,
+  never runs the Worker.
+- `Cloudflare.Website.Vite` (and `StaticSite`, `Command.Build`) build with
+  Vite and, under `alchemy dev`, run Vite's dev server with the Worker
+  inside it (HMR included). But its Worker entry is an **async** module
+  (`main: "worker.ts"` exporting `fetch`), bundled by Vite. Our Worker is
+  an Effect-native class (`main: import.meta.url`, bundled by alchemy's
+  rolldown pipeline, hosting the DOs and the cron through Effect layers),
+  which that path does not support. The git-service example pairs an
+  Effect Worker with a separate `Website.Vite` Worker bound by a service
+  binding; that would be a second Worker and a hop per API call.
+- `Command.Dev` (alchemy/Command) runs a long-lived command during `alchemy
+dev` only (a no-op on deploy), owned by the dev sidecar, restarted when
+  its props change, output prefixed in the alchemy log. It is how
+  `StaticSite`'s `dev.command` works.
+
+### Decisions
+
+- **One Worker, static assets.** `src/worker.ts` sets `assets: { directory:
+"web/dist", notFoundHandling: "single-page-application", runWorkerFirst
+}`. `runWorkerFirst` comes from `src/http/worker-paths.ts`: `/api`,
+  `/_dev` and the legacy page prefixes (`/login`, `/logout`, `/monitors`,
+  `/channels`), each with `/*`. Everything else is the SPA: `/`, `/status`
+  and any client route get `index.html`, hashed files are served without
+  running the Worker. The Worker's own router is unchanged (API, dev
+  fixtures, else legacy pages).
+- **Build outside alchemy.** `pnpm build` = `vite build web` (to
+  `web/dist`); `pnpm run deploy` and `pnpm test:integ` run it first.
+  Simpler than a `Command.Build` resource (the Worker's props are declared
+  in the Worker module, which is also bundled into the Worker) and keeps
+  `alchemy dev` from rebuilding on every UI edit.
+- **Dev: two servers, one `pnpm dev`.** The stack adds, only under `alchemy
+dev` in a dev stage, `Command.Dev("Web", { command: "pnpm exec vite web",
+env: { KANSHI_WORKER_URL: worker.url, NODE_ENV: "development" } })`. Vite
+  (http://localhost:5173, HMR) proxies `workerPrefixes` to the Worker
+  (http://localhost:1337), so the SPA and the API share one origin as in
+  production. The stack output prints both URLs. The Worker on 1337 serves
+  whatever `web/dist` holds (possibly nothing, see gotchas).
+- **Origin check through the proxy.** The proxy uses `changeOrigin` (Host
+  becomes the Worker's) and rewrites `Origin` from Vite's own origin
+  (`http://<request Host>`) to the Worker's; any other Origin is kept and
+  still refused. `Sec-Fetch-Site` is `same-origin` from the page. The
+  session cookie is host-only on `localhost` (ports do not matter), `Secure`
+  is accepted on http://localhost by Chrome and Firefox.
+- **`web/` in the root package** (no pnpm workspace package): one
+  `package.json`, one lockfile, and the SPA imports the spec with a relative
+  path (`../../../src/api/spec.ts`). `web/tsconfig.json` (DOM, JSX,
+  bundler resolution, `vite/client` types) also type-checks the spec and
+  everything it imports without Node/Bun/Worker types, which enforces that
+  it stays browser-safe. The root tsconfig excludes `web/src`; `pnpm
+typecheck` runs both. `web/vite.config.ts` is checked by the root config.
+- **StyleX:** `@stylexjs/unplugin` 0.19.1 (the official plugin; the older
+  `vite-plugin-stylex` is unmaintained since 2024), `stylex.vite({
+useCSSLayers: true })` before `@vitejs/plugin-react`. In build it appends
+  its CSS to `web/src/index.css`'s output (one hashed stylesheet); in dev
+  it injects `/virtual:stylex.css` and a runtime into the HTML itself.
+  Tokens: `web/src/theme/tokens.stylex.ts` (`defineVars` for colors with
+  a `prefers-color-scheme: dark` branch, fonts, space, radius; the palette
+  of the legacy pages). `createTheme` can derive overrides later.
+- **Router: TanStack Router, code-based** (`createRoute` in
+  `web/src/router.tsx`): typed links/params/search without the router
+  plugin's generated `routeTree.gen.ts` (one less generated file to keep
+  out of lint/format and git). Page components live in `web/src/pages/`,
+  modules that export only components, so React Fast Refresh can swap them
+  (a module that also exports a route object makes Vite reload the page).
+  The router context carries the `QueryClient` for loaders.
+- **Data: TanStack Query + Effect `HttpApiClient`.** `web/src/api/client.ts`
+  builds `HttpApiClient.make(KanshiApi, { baseUrl: location.origin })` over
+  `FetchHttpClient` once (a `ManagedRuntime`); `callApi((api) =>
+api.monitors.list(), signal)` returns a promise for `queryFn` /
+  `mutationFn`, rejecting with the typed error (`NotFound`,
+  `HttpApiError.Unauthorized`, ...; `Effect.runPromise` squashes the cause
+  to the failure). `web/src/api/queries.ts` holds shared `queryOptions`
+  (one cache key per read). The spec's middleware is not
+  `requiredForClient`, so the client needs no auth layer: same-origin
+  `fetch` sends the cookie.
+- **Spec split.** `ApiAuth` and `CredentialValidator` moved to
+  `src/api/middleware.ts` (browser-safe tags); `src/api/auth.ts` keeps the
+  implementation. `src/ui/session.ts` moved to `src/auth/session.ts`.
+- **Session API** (`src/api/session.ts`, group `session` in the spec):
+  `GET /api/session` -> `{ signedIn }`; `POST /api/session` `{ token }` ->
+  204 + the same HMAC cookie as `/login` (401 wrong token); `DELETE
+/api/session` -> 204 + cleared cookie. POST and DELETE require the Origin
+  check (403), like the legacy form posts; responses are `no-store`.
+- **CSP** (`web/public/_headers`, applied to asset responses only):
+  `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'
+data:; font-src 'self'; connect-src 'self'; manifest-src 'self';
+base-uri 'none'; form-action 'self'; frame-ancestors 'none'`, plus
+  `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`.
+  `/assets/*` (content-hashed) is `immutable` for a year; `index.html` keeps
+  Cloudflare's default (`max-age=0, must-revalidate` + ETag). StyleX output
+  is a static stylesheet and Vite emits module scripts only
+  (`assetsInlineLimit: 0` keeps `data:` out); no `eval` in the bundle.
+  Inline `style` props are set through the CSSOM, which CSP allows.
+
+### Gotchas
+
+- **`alchemy dev` fails to start the Worker when the assets directory is
+  missing** (workerd: `Directory named "assets:files" not found`). The stack
+  creates an empty `web/dist` in local mode; the Worker then answers every
+  path itself (legacy pages). Run `pnpm build` (and restart `pnpm dev`) to
+  serve the built SPA on 1337; the running runtime does not pick up a new
+  build.
+- **The local asset router sits in front of `/cdn-cgi/handler/*`** (the
+  cron timer and firing a cron by hand), so without a rule the watchdog
+  cron never ran locally (the SPA fallback answered 405). Under local mode
+  the Worker adds `/cdn-cgi/handler/*` to `runWorkerFirst`
+  (`localRunWorkerFirst`); deploys leave it out (the edge owns `/cdn-cgi/`).
+  The Worker's props are therefore an Effect reading
+  `Alchemy.ProviderMode.defaultProviderMode`.
+- **`Command.Dev` inherits `NODE_ENV=production`** from the alchemy CLI:
+  Vite then disables React Fast Refresh (every edit reloads the page) and
+  StyleX emits production class names. The stack sets `NODE_ENV:
+"development"` for it.
+- `@stylexjs/unplugin`'s types are CommonJS: under `NodeNext` its default
+  import is the module object; `web/vite.config.ts` imports `{ unplugin as
+stylex }`.
+- The `vite` dev server listens on `localhost` (`[::1]` here); use
+  `localhost`, not `127.0.0.1`.
+- `pnpm deploy` is pnpm's built-in command (it never ran the script); use
+  `pnpm run deploy` / `pnpm run destroy`.
+- The bundle is about 490 KB (156 KB gzip), mostly Effect (Schema,
+  HttpApiClient) plus React and the router. Route-level code splitting
+  (`lazy` route components) can come later.
+
+### Tests
+
+- Unit: `test/unit/worker-paths.test.ts` (prefix matching, rule shape).
+- Integration (`test/integ/ui.test.ts`): new "the SPA is served as static
+  assets" (shell for `/`, `/status` and a deep link, CSP and security
+  headers, immutable hashed asset, `/api/*` never falls back, legacy
+  `/login` still the Worker's) and "/api/session signs in and out" (wrong
+  token 401, cross-site and Origin-less 403, cookie attributes, `signedIn`
+  with a good and a forged cookie, the cookie works for `/api`, sign-out
+  Origin check). Route ownership changes: the signed-out redirect and the
+  forged-cookie checks use `/channels` instead of `/`; the legacy
+  dashboard (`/`) and status page HTML (`/status`) checks were removed
+  (the public-status JSON checks stay). The harness `raw` helper takes a
+  `json` body.
+
+### Manual check
+
+`pnpm dev`: Vite on 5173 serves the placeholder with StyleX styles; editing
+`web/src/pages/home.tsx` (text and a StyleX color) logged `hmr update`,
+kept page state and applied both; through the proxy, `GET /api/session`,
+`POST` with a wrong token (401), from another origin (403), with the token
+(204 + cookie), cookie-authenticated `GET /api/monitors`, a cookie write
+from Vite's origin (reaches validation, 400) and from another origin (403),
+`DELETE` from the browser page (204), legacy `/login` and `/_dev/events`.
+After `pnpm build` and a restart, the Worker on 1337 served `index.html`
+with the CSP for `/`, `/status` and a deep link, hashed JS/CSS with
+`immutable`, `/api/*` and legacy pages from the Worker, and the page
+rendered in a browser with no CSP violations.
+
+### Commands (end of UI phase 1)
+
+- `pnpm typecheck`: pass
+- `pnpm check`: pass
+- `pnpm test`: pass (187 tests)
+- `pnpm test:integ`: pass (30 tests, about 3.7 minutes)
+
+### For the next phases
+
+- Port pages into `web/src/pages/` + routes in `web/src/router.tsx`, data
+  through `queryOptions` in `web/src/api/queries.ts` and `callApi`;
+  mutations with `useMutation` + `callApi`, then invalidate the query
+  keys. Styles with `stylex.create` and the tokens; no global CSS beyond
+  `index.css`.
+- Sign-in page: `POST /api/session`, then invalidate `["session"]`; guard
+  private routes in `beforeLoad` with
+  `context.queryClient.ensureQueryData(sessionQuery)` and redirect to the
+  login route; treat a 401 (`HttpApiError.Unauthorized`) from any call as
+  signed out.
+- As each legacy page is ported, remove its prefix from
+  `legacyPagePrefixes` (Worker-first rules and the Vite proxy follow), then
+  its code in `src/ui/`, and move its integration checks to the SPA (for
+  `/status`: that only public monitors appear). When the list is empty,
+  drop `src/ui/` and the Worker's page fallback (answer 404 there).
+- The dashboard's dev events list (`registry.devEvents()`) and the 24h
+  "recent" data are not exposed over `/api` yet (the legacy pages read
+  them directly); the dashboard port needs endpoints for them.
+- Vitest runs `test/unit` only; component tests in `web/` would need a DOM
+  environment (e.g. happy-dom) and an include pattern.

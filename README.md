@@ -24,14 +24,15 @@ You need Node, pnpm, [Bun](https://bun.sh) and a Cloudflare account.
    ```sh
    pnpm install
    cp .env.example .env   # set KANSHI_API_TOKEN, e.g. `openssl rand -hex 32`
-   pnpm deploy            # alchemy deploy --stage prod; prints the Worker URL
+   pnpm run deploy        # builds the UI, alchemy deploy --stage prod; prints the Worker URL
    ```
 
    Alchemy authenticates with a Cloudflare profile (manage it with
    `pnpm exec alchemy profile`) or with `CLOUDFLARE_ACCOUNT_ID` /
    `CLOUDFLARE_API_TOKEN` from the environment. The token is deployed as
    a Worker secret. Deployment state lives in `.alchemy/`; keep it on the
-   machine you deploy from. `pnpm destroy` removes everything.
+   machine you deploy from. `pnpm run destroy` removes everything. (Use
+   `pnpm run deploy`: plain `pnpm deploy` is pnpm's own command.)
 
 2. **Open the dashboard** at the Worker URL and sign in with the token. The
    public status page is at `/status`.
@@ -99,8 +100,8 @@ hour (30s doubling to 30m, 8 attempts); 4xx responses other than
 
 ## API
 
-All routes except `/api/public/*` need `Authorization: Bearer
-$KANSHI_API_TOKEN` (or the dashboard session). Errors are JSON such as
+All routes except `/api/public/*` and `/api/session` need `Authorization:
+Bearer $KANSHI_API_TOKEN` (or the dashboard session). Errors are JSON such as
 `{ "_tag": "NotFound", "message": "monitor … not found" }` with 400, 404, 409
 or 503. A monitor `PATCH` that changed
 `public` but could not apply the rest answers 409 (a concurrent edit made it
@@ -117,13 +118,23 @@ invalid) or 503 (`Unavailable`); the message says so: retry it.
 | `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked + hash) |
 | `POST /api/channels/:id/test`                              | send a test alert                        |
 | `GET /api/public/status`                                   | public monitors only, no URLs (no auth)  |
+| `GET/POST/DELETE /api/session`                             | dashboard sign-in state, sign in, out    |
 
 ## Local development
 
 ```sh
-pnpm dev    # alchemy dev --stage dev on http://localhost:1337, fully offline
+pnpm dev    # alchemy dev --stage dev, fully offline: open http://localhost:5173
 pnpm seed   # kanshi sync of kanshi.dev.config.ts to the dev stack
+pnpm build  # build the UI (web/dist), as deploys and integration tests do
 ```
+
+`pnpm dev` runs the Worker on http://localhost:1337 and the UI's Vite dev
+server (hot reload) on http://localhost:5173, which proxies `/api`, `/_dev`
+and the not yet ported server-rendered pages to the Worker. Sign-in works on
+`localhost` in Chrome and Firefox (the session cookie is `Secure`; Safari
+may refuse it over http). The UI is a React app in `web/` (Vite, StyleX,
+TanStack Router and Query); deployed, the Worker serves its build as static
+assets.
 
 `pnpm dev` needs only `KANSHI_API_TOKEN` in `.env` (it uses placeholder
 Cloudflare credentials; no account or network). Durable Object data persists
@@ -146,10 +157,10 @@ The seeded monitors watch those fixtures and alert the sink, so flipping
 ## Checks and tests
 
 ```sh
-pnpm typecheck    # tsc
+pnpm typecheck    # tsc (the Worker, then web/)
 pnpm check        # ultracite (oxlint + oxfmt); `pnpm fix` to fix
 pnpm test         # unit tests (vitest)
-pnpm test:integ   # integration tests against a local stack (bun, ~4 min)
+pnpm test:integ   # builds the UI, then integration tests against a local stack (bun, ~4 min)
 ```
 
 `pnpm test:integ` runs the Worker locally on port 1337 with real alarms; stop
