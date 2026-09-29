@@ -101,14 +101,17 @@ export const CardHeader = ({ style, ...props }: DivProps) => (
 /** A heading (`h3`), with the square marker. */
 export const CardTitle = ({
   children,
+  heading: Heading = "h3",
   style,
   ...props
 }: Omit<ComponentProps<"h3">, "className" | "style"> & {
+  /** The heading element: `h2` for a card that is a page section. */
+  readonly heading?: "h2" | "h3";
   readonly style?: stylex.StyleXStyles;
 }) => (
-  <h3 {...props} {...stylex.props(styles.title, style)}>
+  <Heading {...props} {...stylex.props(styles.title, style)}>
     {children}
-  </h3>
+  </Heading>
 );
 
 export const CardDescription = ({

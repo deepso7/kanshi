@@ -74,6 +74,8 @@ export interface EmptyStateProps {
   readonly icon?: ReactNode;
   /** A button or link. */
   readonly action?: ReactNode;
+  /** The title's heading element: `h1` when it is the whole page. */
+  readonly heading?: "h1" | "h2" | "h3";
   readonly style?: stylex.StyleXStyles;
 }
 
@@ -81,6 +83,7 @@ export interface EmptyStateProps {
 export const EmptyState = ({
   action,
   description,
+  heading: Heading = "h3",
   icon,
   style,
   title,
@@ -93,7 +96,7 @@ export const EmptyState = ({
         {icon}
       </span>
     )}
-    <h3 {...stylex.props(styles.title)}>{title}</h3>
+    <Heading {...stylex.props(styles.title)}>{title}</Heading>
     {description === undefined ? null : (
       <p {...stylex.props(styles.description)}>{description}</p>
     )}

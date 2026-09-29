@@ -354,6 +354,10 @@ const ChannelRow = ({ channel, now, onDelete, onEdit }: ChannelRowProps) => {
         </div>
         <div {...stylex.props(styles.actions)}>
           <Button
+            // Each card has these buttons: name the channel for AT.
+            aria-label={
+              test.isPending ? undefined : `Send test to ${channel.name}`
+            }
             disabled={test.isPending}
             onClick={() =>
               test.mutate(channel.id, {
@@ -366,7 +370,12 @@ const ChannelRow = ({ channel, now, onDelete, onEdit }: ChannelRowProps) => {
             <SendIcon />
             {test.isPending ? "Sending…" : "Send test"}
           </Button>
-          <Button onClick={() => onEdit(channel)} size="sm" variant="ghost">
+          <Button
+            aria-label={`Edit ${channel.name}`}
+            onClick={() => onEdit(channel)}
+            size="sm"
+            variant="ghost"
+          >
             Edit
           </Button>
           <SimpleTooltip content="Delete channel">
@@ -465,6 +474,7 @@ export const ChannelsPage = () => {
         <EmptyState
           action={addButton}
           description="Add a Slack, Discord, ntfy or webhook channel, and monitors alert it when they go down or recover."
+          heading="h2"
           icon={<BellIcon />}
           title="No channels yet"
         />

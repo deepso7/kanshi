@@ -21,6 +21,7 @@ import { PageSkeleton } from "../components/page-skeleton.tsx";
 import { ThemeToggle } from "../components/theme-toggle.tsx";
 import { Badge } from "../components/ui/badge.tsx";
 import { Button, buttonStyles } from "../components/ui/button.tsx";
+import { shared } from "../components/ui/shared.ts";
 import { useToastMutation } from "../lib/use-toast-mutation.ts";
 import {
   colors,
@@ -119,6 +120,7 @@ export const AppLayout = () => {
             <span aria-hidden {...stylex.props(styles.external)}>
               ↗
             </span>
+            <span {...stylex.props(shared.srOnly)}>(opens in a new tab)</span>
           </AppShellNavLink>
         </>
       }
@@ -176,6 +178,7 @@ export const NotFoundPanel = () => (
       </Link>
     }
     description="It does not exist, or it was deleted."
+    heading="h1"
     title="Not found"
   />
 );

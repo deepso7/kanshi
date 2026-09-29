@@ -38,6 +38,7 @@ export const NotFoundPage = () => {
             <code {...stylex.props(styles.path)}>{pathname}</code>.
           </>
         }
+        heading="h1"
         style={styles.panel}
         title="Signal lost"
       />

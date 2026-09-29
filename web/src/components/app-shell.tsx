@@ -150,6 +150,21 @@ const styles = stylex.create({
     top: 0,
     zIndex: 10,
   },
+  // Off screen until focused: the first Tab stop, past the sidebar.
+  skip: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.sm,
+    color: colors.primaryForeground,
+    fontSize: fontSizes.sm,
+    left: space.sm,
+    paddingBlock: space.xs,
+    paddingInline: space.sm,
+    position: "fixed",
+    textDecoration: "none",
+    top: space.sm,
+    transform: { ":focus": "none", default: "translateY(-200%)" },
+    zIndex: 20,
+  },
 });
 
 const logo = stylex.create({
@@ -195,6 +210,9 @@ export const AppShell = ({
   style,
 }: AppShellProps) => (
   <div {...stylex.props(styles.shell, style)}>
+    <a href="#main" {...stylex.props(styles.skip, shared.focusRing)}>
+      Skip to content
+    </a>
     <aside {...stylex.props(styles.sidebar)}>
       <div {...stylex.props(styles.brand)}>
         {brand ?? (
@@ -213,7 +231,7 @@ export const AppShell = ({
         <div {...stylex.props(styles.footer)}>{footer}</div>
       )}
     </aside>
-    <main {...stylex.props(styles.main)}>
+    <main id="main" tabIndex={-1} {...stylex.props(styles.main)}>
       <div {...stylex.props(styles.content)}>{children}</div>
     </main>
   </div>

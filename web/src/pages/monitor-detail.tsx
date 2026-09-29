@@ -1018,6 +1018,7 @@ const MonitorHeader = ({ monitor }: { readonly monitor: MonitorResponse }) => (
             {...stylex.props(styles.url)}
           >
             {monitor.url}
+            <span {...stylex.props(shared.srOnly)}> (opens in a new tab)</span>
           </a>
         </span>
       </span>
@@ -1104,7 +1105,7 @@ const UptimeCard = ({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Uptime · 90 days</CardTitle>
+        <CardTitle heading="h2">Uptime · 90 days</CardTitle>
         <CardDescription>
           One bar per UTC day; hover a bar for its uptime.
         </CardDescription>
@@ -1145,7 +1146,7 @@ const LatencyCard = ({
 }) => (
   <Card>
     <CardHeader>
-      <CardTitle>Latency · 24 hours</CardTitle>
+      <CardTitle heading="h2">Latency · 24 hours</CardTitle>
       <CardDescription>
         Mean response time of successful checks, per half hour. The strip below
         marks half hours with failed checks.

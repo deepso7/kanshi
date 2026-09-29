@@ -831,7 +831,7 @@ const DevEventsPanel = () => {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Dev webhook events</CardTitle>
+        <CardTitle heading="h2">Dev webhook events</CardTitle>
         <CardDescription>
           Alerts the dev sink (
           <code {...stylex.props(devStyles.code)}>/_dev/webhook</code>)
@@ -890,6 +890,7 @@ export const DashboardPage = () => {
       {monitors.length === 0 ? (
         <EmptyState
           action={newMonitorLink}
+          heading="h2"
           description={
             <>
               Add a URL to watch here, or declare monitors in{" "}
