@@ -50,6 +50,28 @@ Durable Object schema changes are new `SqliteMigrator` entries (`"<n>_name"`)
 in `src/monitor/storage.ts` or `src/registry/`; never edit an applied one.
 Keep `fetch` and cross-DO RPC out of SQL transactions.
 
+## Web conventions
+
+- Pages (`web/src/pages/`) export components only; routes, guards and
+  loaders live in `web/src/router.tsx`. Reads go through the
+  `queryOptions` in `web/src/api/queries.ts` (`callApi`, typed errors);
+  writes through their `mutationOptions` with `useToastMutation`, whose
+  `onSuccess` invalidates the affected keys. Add a field the page needs to
+  the API response instead of fetching per row.
+- Styles: `stylex.create` with the tokens in `web/src/theme/tokens.stylex.ts`
+  (semantic colours, so both themes work); no CSS beyond `index.css`.
+  Reuse `components/ui/` (Base UI wrappers) and `shared` (`focusRing`,
+  `srOnly`, `label`). Check new pages at 390px and desktop, light and
+  dark: grid and flex children holding long text need `minWidth: 0` /
+  `minmax(0, 1fr)` and `overflowWrap: "anywhere"`.
+- A11y: one `h1` per page (`PageHeader`), sections `h2` (`CardTitle` and
+  `EmptyState` take a `heading`); every interactive element gets
+  `shared.focusRing`; icon-only buttons an `aria-label`; status is never
+  colour alone (text or an icon too).
+- Component tests sit next to the component (`*.test.tsx`, happy-dom,
+  Testing Library; the `web` vitest project). `/_ui` (dev only) shows the
+  design system.
+
 ## Checks
 
 Run all of these before committing:

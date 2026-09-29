@@ -125,6 +125,22 @@ invalid) or 503 (`Unavailable`); the message says so: retry it.
 | `GET /api/public/status`                                   | public monitors only, no URLs (no auth)  |
 | `GET/POST/DELETE /api/session`                             | dashboard sign-in state, sign in, out    |
 
+## UI
+
+The dashboard (monitors, their history and incidents, channels) and the
+public status page are a React app in `web/` (Vite, React 19, StyleX,
+TanStack Router and Query, Base UI), with a light and a dark theme. It talks
+to the Worker only through the JSON API above, with the typed client
+derived from the API's spec.
+
+- **Development:** `pnpm dev` serves it on http://localhost:5173 with hot
+  reload; Vite proxies `/api` and `/_dev` to the Worker on port 1337, so
+  the page and the API share one origin, as deployed.
+- **Production:** `pnpm build` bundles it into `web/dist`, which the
+  Worker serves as static assets (every page path gets `index.html`; only
+  `/api/*`, and `/_dev/*` in the dev stage, run the Worker code). `pnpm run deploy` builds first, so a deploy
+  always ships the current UI.
+
 ## Local development
 
 ```sh
@@ -133,13 +149,11 @@ pnpm seed   # kanshi sync of kanshi.dev.config.ts to the dev stack
 pnpm build  # build the UI (web/dist), as deploys and integration tests do
 ```
 
-`pnpm dev` runs the Worker on http://localhost:1337 and the UI's Vite dev
-server (hot reload) on http://localhost:5173, which proxies `/api`, `/_dev`
-and the not yet ported server-rendered pages to the Worker. Sign-in works on
-`localhost` in Chrome and Firefox (the session cookie is `Secure`; Safari
-may refuse it over http). The UI is a React app in `web/` (Vite, StyleX,
-TanStack Router and Query); deployed, the Worker serves its build as static
-assets.
+`pnpm dev` runs the Worker on http://localhost:1337 and the UI's dev server
+on http://localhost:5173 (see [UI](#ui)). The Worker on 1337 serves whatever
+`web/dist` held when it started; use 5173. Sign-in works on `localhost` in
+Chrome and Firefox (the session cookie is `Secure`; Safari may refuse it
+over http).
 
 `pnpm dev` needs only `KANSHI_API_TOKEN` in `.env` (it uses placeholder
 Cloudflare credentials; no account or network). Durable Object data persists
