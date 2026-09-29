@@ -4,23 +4,40 @@
 // - `pnpm dev`: stage `dev`, run locally by `alchemy dev` (dev mode on),
 //   plus the SPA's Vite dev server (HMR) proxying the API to the Worker.
 // - `pnpm run deploy` / `pnpm run destroy`: stage `prod` on Cloudflare (`deploy`
-//   builds the SPA first), as the Worker `kanshi` (see `src/stages.ts`).
-//   State is kept in `.alchemy/` on the machine that deploys.
+//   builds the SPA first), as the Worker `kanshi`. Its state is kept in the
+//   account's Cloudflare state store; other stages keep theirs in `.alchemy/`
+//   (see `src/stages.ts`).
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Command from "alchemy/Command";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 
-import { devStages } from "./src/stages.ts";
+import { devStages, stateStoreFor } from "./src/stages.ts";
 import Kanshi, { webAssetsDirectory } from "./src/worker.ts";
+
+/**
+ * The state store, chosen by stage once the CLI has resolved it (`Stage`
+ * is among the services the Stack builds its `state` layer with). Only
+ * the chosen layer is built, so local stages never contact Cloudflare.
+ */
+const state = Layer.unwrap(
+  Alchemy.Stage.pipe(
+    Effect.map((stage) =>
+      stateStoreFor(stage) === "cloudflare"
+        ? Cloudflare.state()
+        : Alchemy.localState()
+    )
+  )
+);
 
 export default Alchemy.Stack(
   "Kanshi",
   {
     providers: Cloudflare.providers(),
-    state: Alchemy.localState(),
+    state,
   },
   Effect.gen(function* KanshiStack() {
     const stage = yield* Alchemy.Stage;

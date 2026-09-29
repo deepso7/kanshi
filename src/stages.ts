@@ -28,3 +28,12 @@ export const deployWorkerName = "kanshi";
  */
 export const workerNameFor = (stage: string): string | undefined =>
   stage === deployStage ? deployWorkerName : undefined;
+
+/**
+ * Where a stage keeps its Alchemy state: the deploy stage in the
+ * account's Cloudflare state store (`Cloudflare.state()`), every other
+ * stage in `.alchemy/` (`Alchemy.localState()`), so `pnpm dev` and the
+ * integration tests stay offline.
+ */
+export const stateStoreFor = (stage: string): "cloudflare" | "local" =>
+  stage === deployStage ? "cloudflare" : "local";
