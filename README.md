@@ -74,7 +74,7 @@ invalid) or 503 (`Unavailable`); the message says so: retry it.
 | `GET /api/watchdog/episodes`                               | open "not being checked" episodes              |
 | `GET /api/meta`                                            | dev mode, minimum interval, quota              |
 | `GET /api/dev/events?limit=20`                             | dev webhook sink events (dev mode only)        |
-| `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked + hash)       |
+| `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked)              |
 | `POST /api/channels/:id/test`                              | send a test alert                              |
 | `GET /api/public/status`                                   | public monitors only, no URLs (no auth)        |
 | `GET/POST/DELETE /api/session`                             | dashboard sign-in state, sign in, out          |
@@ -124,9 +124,10 @@ host):
   `/_dev/registry/calls` (Registry calls per method), `POST
 /_dev/watchdog`, `POST /_dev/monitors/:id/maintain`.
 
-Add a monitor on `http://localhost:1337/_dev/target/flip/demo` and a
-webhook channel on `http://localhost:1337/_dev/webhook`, and flipping
-`demo` shows the whole down/alert/recovery cycle within seconds.
+Add a monitor on `http://localhost:1337/_dev/target/flip/demo` with a
+5-second interval and a webhook channel on
+`http://localhost:1337/_dev/webhook`, and flipping `demo` shows the whole
+down/alert/recovery cycle within seconds.
 
 ## Checks and tests
 

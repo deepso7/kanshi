@@ -22,9 +22,10 @@ import type { EnabledPeriod, PeriodChange, Sample } from "./history.ts";
  * Monitor DO schema. Column names are snake_case; the SQL client maps them
  * to and from camelCase. Add a new numbered entry for every schema change
  * (never edit an applied one): migrations run once per object, on its next
- * activation.
+ * activation. Tests run them against a local SQLite
+ * (`test/unit/monitor-migrations.test.ts`).
  */
-export const migrations = SqliteMigrator.fromRecord({
+export const monitorMigrationRecord = {
   "1_core": Effect.gen(function* coreMigration() {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE config (
@@ -164,7 +165,12 @@ export const migrations = SqliteMigrator.fromRecord({
     yield* sql`ALTER TABLE config DROP COLUMN key`;
     yield* sql`ALTER TABLE config DROP COLUMN managed`;
   }),
-});
+} satisfies Record<
+  string,
+  Effect.Effect<unknown, unknown, SqlClient.SqlClient>
+>;
+
+export const migrations = SqliteMigrator.fromRecord(monitorMigrationRecord);
 
 /** Tables wiped by `destroy()`; the tombstone is kept. */
 const dataTables = [
