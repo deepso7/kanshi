@@ -7,10 +7,10 @@ import { colors, space } from "../theme/tokens.stylex.ts";
 
 const styles = stylex.create({
   muted: {
-    color: colors.muted,
+    color: colors.mutedForeground,
   },
   title: {
-    color: colors.accent,
+    color: colors.foreground,
     fontSize: "2rem",
     letterSpacing: "0.02em",
     marginBlock: space.lg,

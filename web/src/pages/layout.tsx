@@ -5,8 +5,8 @@ import { colors, fonts, space } from "../theme/tokens.stylex.ts";
 
 const styles = stylex.create({
   app: {
-    backgroundColor: colors.bg,
-    color: colors.text,
+    backgroundColor: colors.background,
+    color: colors.foreground,
     fontFamily: fonts.sans,
     fontSize: "15px",
     lineHeight: 1.5,
