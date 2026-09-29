@@ -19,6 +19,8 @@ const styles = stylex.create({
   brand: {
     alignItems: "center",
     display: "flex",
+    // Narrow: pushes the footer to the end of the top bar.
+    flexGrow: { default: 1, [media.md]: 0 },
     flexShrink: 0,
     fontSize: fontSizes.sm,
     fontWeight: fontWeights.semibold,
@@ -40,6 +42,8 @@ const styles = stylex.create({
     flexShrink: 0,
     gap: space.sm,
     justifyContent: "space-between",
+    // Narrow: the footer sits beside the brand, the nav wraps below.
+    order: { default: 1, [media.md]: 3 },
     paddingTop: { default: 0, [media.md]: space.md },
   },
   main: {
@@ -49,11 +53,17 @@ const styles = stylex.create({
   },
   nav: {
     display: "flex",
+    // Narrow: its own full-width row under the brand, scrolling sideways.
+    flexBasis: { default: "100%", [media.md]: "auto" },
     flexDirection: { default: "row", [media.md]: "column" },
     flexGrow: 1,
     gap: "1px",
+    marginInline: { default: `calc(-1 * ${space.md})`, [media.md]: 0 },
     minWidth: 0,
+    order: 2,
     overflowX: { default: "auto", [media.md]: "visible" },
+    paddingInline: { default: space.md, [media.md]: 0 },
+    scrollbarWidth: "none",
   },
   navLabel: {
     display: { default: "none", [media.md]: "block" },
@@ -103,7 +113,12 @@ const styles = stylex.create({
     color: colors.foreground,
     display: "grid",
     fontSize: fontSizes.md,
-    gridTemplateColumns: { default: "1fr", [media.md]: "15rem 1fr" },
+    // minmax(0, ...): a wide child (a table, the nav) must not widen the
+    // column past the viewport.
+    gridTemplateColumns: {
+      default: "minmax(0, 1fr)",
+      [media.md]: "15rem minmax(0, 1fr)",
+    },
     // minmax: the sidebar's own height must not size the row.
     gridTemplateRows: {
       default: "auto minmax(0, 1fr)",
@@ -123,7 +138,9 @@ const styles = stylex.create({
     color: colors.sidebarForeground,
     display: "flex",
     flexDirection: { default: "row", [media.md]: "column" },
-    gap: { default: space.md, [media.md]: space.lg },
+    flexWrap: { default: "wrap", [media.md]: "nowrap" },
+    gap: { default: space.sm, [media.md]: space.lg },
+    minWidth: 0,
     // The viewport's height, or less inside a shorter container.
     height: { default: "auto", [media.md]: "100dvh" },
     maxHeight: "100%",

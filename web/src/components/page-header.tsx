@@ -72,6 +72,9 @@ const styles = stylex.create({
     letterSpacing: tracking.wide,
     lineHeight: lineHeights.tight,
     margin: 0,
+    // A long monitor name or URL must not widen the page.
+    minWidth: 0,
+    overflowWrap: "anywhere",
     textTransform: "uppercase",
   },
 });
