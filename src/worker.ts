@@ -3,6 +3,7 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Etag from "effect/unstable/http/Etag";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
@@ -34,6 +35,7 @@ import { DevService } from "./service/dev.ts";
 import { MonitorService } from "./service/monitors.ts";
 import { StatusService } from "./service/status.ts";
 import { KanshiSettings } from "./settings.ts";
+import { workerNameFor } from "./stages.ts";
 import { runWatchdog } from "./watchdog/run.ts";
 
 /**
@@ -84,6 +86,9 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
   "Kanshi",
   Effect.gen(function* KanshiProps() {
     const local = (yield* Alchemy.ProviderMode.defaultProviderMode) === "local";
+    // Set when the stack is planned or deployed; this effect also runs in
+    // the Worker itself, where there is no stage (nor a name to pick).
+    const stage = yield* Effect.serviceOption(Alchemy.Stage);
     return {
       // The SPA is served by Cloudflare's asset layer; unknown paths get
       // `index.html`. The Worker only runs for its own paths.
@@ -96,6 +101,8 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
         port: Config.Number("PORT").pipe(Config.withDefault(1337)),
       },
       main: import.meta.url,
+      // `kanshi` for the deploy stage; a generated, distinct name otherwise.
+      name: stage.pipe(Option.map(workerNameFor), Option.getOrUndefined),
     };
   }),
   Effect.gen(function* KanshiInit() {
