@@ -108,7 +108,7 @@ export const staleThresholdMs = (intervalSeconds: number): number =>
 /**
  * The last time the monitor was known to be checked, created, or had its
  * check schedule restarted (enable or probe-affecting edit). Cosmetic edits
- * (name, channels, public, managed) bump `updatedAt` but do not restart the
+ * (name, channels, public) bump `updatedAt` but do not restart the
  * schedule, so they must not restart the clock.
  */
 export const lastSignOfLife = (snapshot: MonitorSnapshot): number =>

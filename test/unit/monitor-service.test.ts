@@ -33,8 +33,6 @@ const config: MonitorConfig = {
   generation: 0,
   id: "m1",
   intervalSeconds: 60,
-  key: "m1",
-  managed: false,
   method: "GET",
   name: "Site",
   successThreshold: 1,
@@ -48,9 +46,7 @@ const snapshot: MonitorSnapshot = { config, state: initialState(t0) };
 const entry: RegistryEntry = {
   createdAt: t0,
   id: "m1",
-  key: "m1",
   lifecycle: "active",
-  managed: false,
   opId: "op1",
   public: false,
   summary: summaryOf(config, snapshot.state),
@@ -161,7 +157,6 @@ const entryOf = (
 ): RegistryEntry => ({
   ...entry,
   id,
-  key: id,
   summary: { ...entry.summary, ...overrides, name: id },
   watch: { episodeId },
 });
@@ -229,7 +224,6 @@ describe(toOverview, () => {
     );
     assert.strictEqual(overview.monitors[0]?.name, "a");
     assert.strictEqual(overview.monitors[0]?.url, "https://example.com/");
-    assert.strictEqual(overview.monitors[0]?.managed, false);
   });
 
   it("prefers the live summary over a Registry row that lags", () => {
@@ -325,7 +319,6 @@ const makeReadService = (
           ...config,
           createdAt: id === "old" ? t0 : Date.now(),
           id,
-          key: id,
         },
       }),
   });

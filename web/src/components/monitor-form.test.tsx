@@ -21,13 +21,10 @@ import { MonitorForm } from "./monitor-form.tsx";
 const channel = (id: string, name: string): ChannelView => ({
   createdAt: 0,
   id,
-  key: id,
   kind: "slack",
-  managed: false,
   maskedUrl: `https://hooks.example.com/****${id}`,
   name,
   updatedAt: 0,
-  urlHash: id,
 });
 
 const channels = [channel("c1", "Ops Slack"), channel("c2", "Pager")];
@@ -42,8 +39,6 @@ const monitor: MonitorResponse = {
   generation: 0,
   id: "m1",
   intervalSeconds: 60,
-  key: "api",
-  managed: false,
   method: "GET",
   name: "API",
   notChecked: false,
@@ -141,7 +136,6 @@ describe(validateMonitorForm, () => {
         expectedStatus: "2xx,abc",
         failureThreshold: "11",
         intervalSeconds: "10",
-        key: "-bad",
         method: "HEAD",
         name: " ",
         successThreshold: "1.5",
@@ -157,7 +151,6 @@ describe(validateMonitorForm, () => {
         "Use codes like 200 or classes like 2xx, separated by commas.",
       failureThreshold: "At most 10.",
       intervalSeconds: "At least 30 seconds.",
-      key: "Up to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit.",
       name: "Enter a name.",
       successThreshold: "Use a whole number.",
       timeoutSeconds: "Between 1 and 30 seconds.",
@@ -198,14 +191,6 @@ describe(serverFieldError, () => {
     ).toStrictEqual({
       field: "intervalSeconds",
       message: "At least 30 seconds.",
-    });
-    expect(
-      serverFieldError(
-        new Conflict({ message: 'a monitor with key "api" already exists' })
-      )
-    ).toStrictEqual({
-      field: "key",
-      message: "Another monitor already uses this key.",
     });
   });
 
@@ -308,17 +293,20 @@ describe(MonitorForm, () => {
   it("shows a server error on its field", async () => {
     const { onCreate, user } = setup();
     onCreate.mockRejectedValueOnce(
-      new Conflict({ message: 'a monitor with key "api" already exists' })
+      new BadRequest({
+        message: "url: private and reserved IP addresses are not allowed",
+      })
     );
     await user.type(field("Name"), "API");
     await user.type(field("URL"), "example.com");
-    await user.type(field("Key"), "api");
     await user.click(screen.getByRole("button", { name: "Create monitor" }));
 
-    const key = field("Key");
-    expect(key.getAttribute("aria-invalid")).toBe("true");
-    const message = screen.getByText("Another monitor already uses this key.");
-    expect(key.getAttribute("aria-describedby")).toContain(message.id);
+    const url = field("URL");
+    expect(url.getAttribute("aria-invalid")).toBe("true");
+    const message = screen.getByText(
+      "Private and reserved IP addresses are not allowed."
+    );
+    expect(url.getAttribute("aria-describedby")).toContain(message.id);
   });
 
   it("shows other server errors above the form", async () => {

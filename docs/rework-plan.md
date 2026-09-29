@@ -303,18 +303,14 @@ Server-rendered HTML with plain forms and a little inline JS; one CSS block.
 
 ## Config as code
 
-`kanshi.config.ts` with `defineConfig({ channels, monitors })`, keyed by the
-stable `key` fields. `pnpm kanshi sync [--url]` diffs against `/api` and
-applies creates/updates/deletes, touching only `managed` resources. Monitors
-created in the dashboard are left alone. Channel URLs come from env vars and
-are diffed by hash.
+Removed after the rework: the dashboard (and the API) is the single source
+of truth. See "Config sync removed" in `docs/rework-notes.md`.
 
 ## Dev mode
 
 - `pnpm dev` runs `alchemy dev` (local workerd, Durable Object SQLite
-  persisted on disk), then `pnpm seed` creates the monitors and channels in
-  `kanshi.dev.config.ts` that do not exist yet (by `key`). Phase 7 grows this
-  into full `sync`.
+  persisted on disk). Monitors and channels on the fixtures below are added
+  in the dashboard.
 - Dev stage enables `/_dev/*`:
   - `/_dev/target?status=500&delay=2000&body=...` fake target
   - `/_dev/target/flip/:name` stateful target toggled up/down

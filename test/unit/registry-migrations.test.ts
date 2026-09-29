@@ -153,17 +153,19 @@ describe("Registry migrations", () => {
       );
       const outboxBefore = rows(db, "SELECT * FROM watchdog_outbox");
 
-      // The full list: only 5 and 6 are pending.
+      // The full list: 5 to 7 are pending.
       const upgraded = yield* migrate(db, Number.POSITIVE_INFINITY);
       assert.deepStrictEqual(
         upgraded.map(([id, name]) => `${id}_${name}`),
-        ["5_summary_without_last_checked", "6_watchdog_single_observation"]
+        [
+          "5_summary_without_last_checked",
+          "6_watchdog_single_observation",
+          "7_drop_keys",
+        ]
       );
 
       assert.deepStrictEqual(columns(db, "monitors"), [
         "id",
-        "key",
-        "managed",
         "lifecycle",
         "op_id",
         "public",
@@ -174,8 +176,8 @@ describe("Registry migrations", () => {
         "summary_revision",
         "created_at",
         "updated_at",
-        "stale_episode_id",
         "url",
+        "stale_episode_id",
       ]);
       assert.deepStrictEqual(rows(db, "SELECT * FROM monitors ORDER BY id"), [
         {
@@ -183,9 +185,7 @@ describe("Registry migrations", () => {
           enabled: 1,
           id: "m1",
           interval_seconds: 60,
-          key: "site",
           lifecycle: "active",
-          managed: 1,
           name: "Site",
           op_id: "op1",
           public: 1,
@@ -200,9 +200,7 @@ describe("Registry migrations", () => {
           enabled: 0,
           id: "m2",
           interval_seconds: 300,
-          key: "api",
           lifecycle: "creating",
-          managed: 0,
           name: "API",
           op_id: "op2",
           public: 0,
@@ -213,9 +211,20 @@ describe("Registry migrations", () => {
           url: "",
         },
       ]);
+      assert.deepStrictEqual(columns(db, "channels"), [
+        "id",
+        "kind",
+        "url",
+        "name",
+        "created_at",
+        "updated_at",
+      ]);
       assert.deepStrictEqual(
         rows(db, "SELECT * FROM channels"),
-        channelsBefore
+        channelsBefore.map(
+          ({ key: _key, managed: _managed, url_hash: _urlHash, ...rest }) =>
+            rest
+        )
       );
       assert.deepStrictEqual(
         rows(db, "SELECT * FROM watchdog_episodes ORDER BY id"),
@@ -225,14 +234,12 @@ describe("Registry migrations", () => {
         rows(db, "SELECT * FROM watchdog_outbox"),
         outboxBefore
       );
-      // The unique key survives the column drops.
-      assert.throws(() =>
-        db.exec(`INSERT INTO monitors (id, key, managed, lifecycle, op_id,
-            public, name, status, enabled, interval_seconds,
-            summary_revision, created_at, updated_at, url)
-          VALUES ('m3', 'site', 0, 'active', 'op3', 0, 'Dup', 'up', 1, 60,
-            0, 1, 1, '')`)
-      );
+      // Rows no longer need a key: two monitors may share a name.
+      db.exec(`INSERT INTO monitors (id, lifecycle, op_id, public, name,
+          status, enabled, interval_seconds, summary_revision, created_at,
+          updated_at)
+        VALUES ('m3', 'active', 'op3', 0, 'Site', 'up', 1, 60, 0, 300, 300)`);
+      db.exec(`DELETE FROM monitors WHERE id = 'm3'`);
 
       // The Registry's own queries work on the upgraded schema.
       const listed = yield* Effect.gen(function* listEffect() {

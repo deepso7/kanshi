@@ -22,8 +22,6 @@ const config = (id: string): MonitorConfig => ({
   generation: 0,
   id,
   intervalSeconds: 60,
-  key: id,
-  managed: false,
   method: "GET",
   // Names need not be unique.
   name: "Website",
@@ -36,9 +34,7 @@ const config = (id: string): MonitorConfig => ({
 const entry = (id: string, isPublic: boolean): RegistryEntry => ({
   createdAt: t0,
   id,
-  key: id,
   lifecycle: "active",
-  managed: false,
   opId: "op1",
   public: isPublic,
   summary: summaryOf(config(id), initialState(t0)),

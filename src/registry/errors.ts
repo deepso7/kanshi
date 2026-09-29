@@ -6,8 +6,4 @@ export class QuotaExceeded extends Schema.TaggedError<QuotaExceeded>()(
   { quota: Schema.Number }
 ) {}
 
-export class KeyTaken extends Schema.TaggedError<KeyTaken>()("KeyTaken", {
-  key: Schema.String,
-}) {}
-
-export const registryErrors = [KeyTaken, QuotaExceeded];
+export const registryErrors = [QuotaExceeded];

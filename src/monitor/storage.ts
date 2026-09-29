@@ -158,6 +158,12 @@ export const migrations = SqliteMigrator.fromRecord({
     yield* sql`UPDATE state SET schedule_reset_at = coalesce(
       (SELECT updated_at FROM config WHERE singleton = 1), 0)`;
   }),
+  // Config sync is gone: monitors no longer have a key or a managed flag.
+  "5_drop_key_managed": Effect.gen(function* dropKeyManagedMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`ALTER TABLE config DROP COLUMN key`;
+    yield* sql`ALTER TABLE config DROP COLUMN managed`;
+  }),
 });
 
 /** Tables wiped by `destroy()`; the tombstone is kept. */
@@ -177,7 +183,6 @@ const ConfigRow = Schema.Struct({
   ...MonitorConfig.fields,
   channels: Schema.fromJsonString(ChannelSelection),
   enabled: Schema.BooleanFromBit,
-  managed: Schema.BooleanFromBit,
 });
 
 const StateRow = Schema.Struct({

@@ -157,7 +157,6 @@ describe("monitor input", () => {
       buildConfig("m1", { name: "Site", url: "example.com" }, options)
     );
     assert.strictEqual(config.url, "https://example.com/");
-    assert.strictEqual(config.key, "m1");
     assert.strictEqual(config.expectedStatus, "2xx");
     assert.strictEqual(config.intervalSeconds, 60);
     assert.strictEqual(config.generation, 0);

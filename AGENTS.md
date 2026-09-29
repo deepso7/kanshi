@@ -15,7 +15,6 @@ phase in `docs/rework-notes.md`.
 - `src/api/`: the `HttpApi` spec, auth and handlers.
 - `web/`: the SPA (Vite, React 19, StyleX, TanStack Router and Query).
 - `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*` (dev stage only).
-- `src/sync/`: `kanshi sync` (command in `src/sync/cli.ts`, run by `scripts/kanshi.ts`; config via `src/config.ts`).
 - `alchemy.run.ts`: the stack (stage `dev` = dev mode, `prod` for deploys).
 - `test/unit/` (vitest), `test/integ/` (bun + alchemy, own stack); component tests sit next to components.
 
@@ -55,7 +54,7 @@ Fix the code, don't disable rules; the overrides and their reasons are in
 
 - `pnpm dev` sets placeholder Cloudflare credentials in the script itself;
   never put them in `.env`, or `alchemy deploy` uses them too. `.env` holds
-  `KANSHI_API_TOKEN`; `pnpm seed` syncs `kanshi.dev.config.ts`.
+  `KANSHI_API_TOKEN`.
 - Deploy with `pnpm run deploy` (`pnpm deploy` is pnpm's own command).
 
 ## Vendored Repositories

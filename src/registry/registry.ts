@@ -32,7 +32,7 @@ import {
 import { openDurableSql } from "../storage/sqlite.ts";
 import type { ReconcileItem } from "../watchdog/rules.ts";
 import { episodeRetentionMs } from "../watchdog/rules.ts";
-import { KeyTaken, QuotaExceeded, registryErrors } from "./errors.ts";
+import { QuotaExceeded, registryErrors } from "./errors.ts";
 import { registryMigrations } from "./migrations.ts";
 import type { ObserveResult } from "./watchdog-store.ts";
 import {
@@ -58,9 +58,7 @@ const EntryRow = Schema.Struct({
   enabled: Schema.BooleanFromBit,
   id: Schema.String,
   intervalSeconds: Schema.Number,
-  key: Schema.String,
   lifecycle: Lifecycle,
-  managed: Schema.BooleanFromBit,
   name: Schema.String,
   opId: Schema.String,
   public: Schema.BooleanFromBit,
@@ -74,9 +72,7 @@ const EntryRow = Schema.Struct({
 export interface RegistryEntry {
   readonly createdAt: number;
   readonly id: string;
-  readonly key: string;
   readonly lifecycle: Lifecycle;
-  readonly managed: boolean;
   readonly opId: string;
   readonly public: boolean;
   readonly summary: MonitorSummary;
@@ -139,51 +135,40 @@ const watchdogTag: Record<
 
 export interface BeginInput {
   readonly id: string;
-  readonly key: string;
-  readonly managed: boolean;
   readonly public: boolean;
   readonly quota: number;
   readonly summary: MonitorSummary;
 }
 
-/** A channel as stored, including its secret URL and the URL's hash. */
+/** A channel as stored, including its secret URL. */
 export interface ChannelRecord {
   readonly id: string;
-  readonly key: string;
   readonly kind: ChannelKind;
-  readonly managed: boolean;
   readonly name: string;
   readonly url: string;
-  readonly urlHash: string;
 }
 
 export type ChannelRecordPatch = Partial<
-  Pick<ChannelRecord, "kind" | "managed" | "name" | "url" | "urlHash">
+  Pick<ChannelRecord, "kind" | "name" | "url">
 >;
 
 const ChannelRow = Schema.Struct({
   createdAt: Schema.Number,
   id: Schema.String,
-  key: Schema.String,
   kind: ChannelKind,
-  managed: Schema.BooleanFromBit,
   name: Schema.String,
   updatedAt: Schema.Number,
   url: Schema.String,
-  urlHash: Schema.String,
 });
 type ChannelRow = typeof ChannelRow.Type;
 
 const toChannelView = (row: ChannelRow): ChannelView => ({
   createdAt: row.createdAt,
   id: row.id,
-  key: row.key,
   kind: row.kind,
-  managed: row.managed,
   maskedUrl: maskUrl(row.url),
   name: row.name,
   updatedAt: row.updatedAt,
-  urlHash: row.urlHash,
 });
 
 const decodeChannels = (rows: readonly unknown[]) =>
@@ -214,12 +199,12 @@ const noWatchdogWork: readonly OutboxEntry[] = [];
 export class Registry extends Cloudflare.DurableObject<
   Registry,
   {
-    /** Insert a `creating` row with a fresh opId (quota and unique key). */
+    /** Insert a `creating` row with a fresh opId (within the quota). */
     begin: (
       input: BeginInput
     ) => Effect.Effect<
       { readonly opId: string },
-      KeyTaken | QuotaExceeded,
+      QuotaExceeded,
       RuntimeContext
     >;
     /**
@@ -247,11 +232,6 @@ export class Registry extends Cloudflare.DurableObject<
       id: string,
       isPublic: boolean
     ) => Effect.Effect<boolean, never, RuntimeContext>;
-    /** Mirror the monitor's `managed` flag (config sync adopts monitors). */
-    setManaged: (
-      id: string,
-      managed: boolean
-    ) => Effect.Effect<boolean, never, RuntimeContext>;
     /**
      * Store a monitor's summary unless the row is missing or `deleting`, or
      * `revision` is not newer than the stored one.
@@ -276,10 +256,9 @@ export class Registry extends Cloudflare.DurableObject<
     bumpDevCounter: (
       name: string
     ) => Effect.Effect<number, never, RuntimeContext>;
-    /** Insert a channel (unique key). */
     createChannel: (
       record: ChannelRecord
-    ) => Effect.Effect<ChannelView, KeyTaken, RuntimeContext>;
+    ) => Effect.Effect<ChannelView, never, RuntimeContext>;
     updateChannel: (
       id: string,
       patch: ChannelRecordPatch
@@ -367,9 +346,7 @@ export class Registry extends Cloudflare.DurableObject<
 const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
   createdAt: row.createdAt,
   id: row.id,
-  key: row.key,
   lifecycle: row.lifecycle,
-  managed: row.managed,
   opId: row.opId,
   public: row.public,
   summary: {
@@ -450,11 +427,6 @@ export const RegistryLive = Registry.make(
               if ((count?.n ?? 0) >= input.quota) {
                 return yield* new QuotaExceeded({ quota: input.quota });
               }
-              const taken =
-                yield* sql`SELECT id FROM monitors WHERE key = ${input.key}`;
-              if (taken.length > 0) {
-                return yield* new KeyTaken({ key: input.key });
-              }
               const opId = crypto.randomUUID();
               const now = Date.now();
               yield* sql`INSERT INTO monitors ${sql.insert({
@@ -462,9 +434,7 @@ export const RegistryLive = Registry.make(
                 enabled: input.summary.enabled ? 1 : 0,
                 id: input.id,
                 intervalSeconds: input.summary.intervalSeconds,
-                key: input.key,
                 lifecycle: "creating",
-                managed: input.managed ? 1 : 0,
                 name: input.summary.name,
                 opId,
                 public: input.public ? 1 : 0,
@@ -547,34 +517,23 @@ export const RegistryLive = Registry.make(
         );
 
       const createChannel = (record: ChannelRecord) =>
-        sql
-          .withTransaction(
-            Effect.gen(function* createChannelTx() {
-              const taken =
-                yield* sql`SELECT id FROM channels WHERE key = ${record.key}`;
-              if (taken.length > 0) {
-                return yield* new KeyTaken({ key: record.key });
-              }
-              const now = Date.now();
-              const rows = yield* sql`INSERT INTO channels ${sql.insert({
-                createdAt: now,
-                id: record.id,
-                key: record.key,
-                kind: record.kind,
-                managed: record.managed ? 1 : 0,
-                name: record.name,
-                updatedAt: now,
-                url: record.url,
-                urlHash: record.urlHash,
-              })} RETURNING *`;
-              const [row] = yield* decodeChannels(rows);
-              if (row === undefined) {
-                return yield* Effect.die("channel insert returned no row");
-              }
-              return toChannelView(row);
-            })
-          )
-          .pipe(Effect.catchTag("SqlError", Effect.die));
+        Effect.gen(function* createChannelEffect() {
+          const now = Date.now();
+          const [row] = yield* channelRows(
+            sql`INSERT INTO channels ${sql.insert({
+              createdAt: now,
+              id: record.id,
+              kind: record.kind,
+              name: record.name,
+              updatedAt: now,
+              url: record.url,
+            })} RETURNING *`
+          );
+          if (row === undefined) {
+            return yield* Effect.die("channel insert returned no row");
+          }
+          return toChannelView(row);
+        });
 
       const updateChannel = (id: string, patch: ChannelRecordPatch) =>
         Effect.gen(function* updateChannelEffect() {
@@ -584,10 +543,8 @@ export const RegistryLive = Registry.make(
           }
           const rows = yield* channelRows(sql`UPDATE channels
             SET kind = ${patch.kind ?? current.kind},
-                managed = ${(patch.managed ?? current.managed) ? 1 : 0},
                 name = ${patch.name ?? current.name},
                 url = ${patch.url ?? current.url},
-                url_hash = ${patch.urlHash ?? current.urlHash},
                 updated_at = ${Date.now()}
             WHERE id = ${id}
             RETURNING *`);
@@ -936,15 +893,6 @@ export const RegistryLive = Registry.make(
           ).pipe(Effect.andThen(rearm), Effect.asVoid)
         ),
         setFlip: counted("setFlip", setFlip),
-        setManaged: counted("setManaged", (id: string, managed: boolean) =>
-          sql<{ id: string }>`UPDATE monitors
-            SET managed = ${managed ? 1 : 0}, updated_at = ${Date.now()}
-            WHERE id = ${id} AND lifecycle != 'deleting'
-            RETURNING id`.pipe(
-            Effect.map((rows) => rows.length === 1),
-            Effect.orDie
-          )
-        ),
         setPublic: counted("setPublic", (id: string, isPublic: boolean) =>
           sql<{ id: string }>`UPDATE monitors
             SET public = ${isPublic ? 1 : 0}, updated_at = ${Date.now()}

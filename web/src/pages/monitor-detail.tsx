@@ -774,11 +774,8 @@ const SettingsPanel = ({
       <Definition label="Status page">
         {monitor.public ? "Public" : "Private"}
       </Definition>
-      <Definition label="Key">
-        <span {...stylex.props(styles.mono)}>{monitor.key}</span>
-      </Definition>
-      <Definition label="Source">
-        {monitor.managed ? "kanshi.config.ts" : "Dashboard or API"}
+      <Definition label="ID">
+        <span {...stylex.props(styles.mono)}>{monitor.id}</span>
       </Definition>
       <Definition label="Created">
         <span title={formatUtc(monitor.createdAt)}>
@@ -833,9 +830,6 @@ const DeleteMonitor = ({ monitor }: { readonly monitor: MonitorResponse }) => {
           <AlertDialogDescription>
             Its checks, uptime history and incidents are deleted too. This
             cannot be undone.
-            {monitor.managed
-              ? " It is managed by config: the next kanshi sync creates it again unless you remove it from kanshi.config.ts."
-              : ""}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -979,12 +973,6 @@ const PageBanners = ({ monitor }: { readonly monitor: MonitorResponse }) => (
         resume it to start checking again.
       </Callout>
     )}
-    {monitor.managed ? (
-      <Callout title="Managed by config" tone="warning">
-        This monitor comes from kanshi.config.ts. Edits made here are
-        overwritten by the next kanshi sync; change the config instead.
-      </Callout>
-    ) : null}
   </>
 );
 
@@ -1003,9 +991,6 @@ const MonitorHeader = ({ monitor }: { readonly monitor: MonitorResponse }) => (
           <Badge variant="outline">
             {monitor.public ? "Public" : "Private"}
           </Badge>
-          {monitor.managed ? (
-            <Badge variant="secondary">Managed by config</Badge>
-          ) : null}
           <Badge variant="outline">
             Every {formatInterval(monitor.intervalSeconds)}
           </Badge>
@@ -1025,17 +1010,9 @@ const MonitorHeader = ({ monitor }: { readonly monitor: MonitorResponse }) => (
       </span>
     }
     eyebrow={
-      <>
-        <Link to="/" {...stylex.props(styles.crumb)}>
-          Monitors
-        </Link>
-        {monitor.key === monitor.id ? null : (
-          <>
-            {" / "}
-            <span {...stylex.props(styles.mono)}>{monitor.key}</span>
-          </>
-        )}
-      </>
+      <Link to="/" {...stylex.props(styles.crumb)}>
+        Monitors
+      </Link>
     }
     style={styles.pageHeader}
     title={<span {...stylex.props(styles.titleText)}>{monitor.name}</span>}

@@ -85,6 +85,46 @@ export const registryMigrationRecord = {
       yield* sql`ALTER TABLE monitors DROP COLUMN stale_runs`;
     }
   ),
+  // Config sync is gone: monitors and channels lose their key and managed
+  // flag, channels their URL hash. `key` is UNIQUE, which SQLite cannot
+  // drop in place, so both tables are rebuilt.
+  "7_drop_keys": Effect.gen(function* dropKeysMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE monitors_new (
+      id TEXT PRIMARY KEY,
+      lifecycle TEXT NOT NULL,
+      op_id TEXT NOT NULL,
+      public INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      interval_seconds INTEGER NOT NULL,
+      summary_revision INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      url TEXT NOT NULL DEFAULT '',
+      stale_episode_id TEXT
+    )`;
+    yield* sql`INSERT INTO monitors_new
+      SELECT id, lifecycle, op_id, public, name, status, enabled,
+        interval_seconds, summary_revision, created_at, updated_at, url,
+        stale_episode_id
+      FROM monitors`;
+    yield* sql`DROP TABLE monitors`;
+    yield* sql`ALTER TABLE monitors_new RENAME TO monitors`;
+    yield* sql`CREATE TABLE channels_new (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      url TEXT NOT NULL,
+      name TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`;
+    yield* sql`INSERT INTO channels_new
+      SELECT id, kind, url, name, created_at, updated_at FROM channels`;
+    yield* sql`DROP TABLE channels`;
+    yield* sql`ALTER TABLE channels_new RENAME TO channels`;
+  }),
 } satisfies Record<
   string,
   Effect.Effect<unknown, unknown, SqlClient.SqlClient>

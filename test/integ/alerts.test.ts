@@ -74,14 +74,11 @@ const createChannel = Effect.fn("Test.createChannel")(function* createChannel(
 });
 
 test(
-  "channel URLs are write-only: masked and hashed, never returned",
+  "channel URLs are write-only: masked, never returned",
   Effect.gen(function* channelSecrecyTest() {
     const secret = `secret-${crypto.randomUUID()}`;
-    const key = `c-${crypto.randomUUID()}`;
     const url = yield* sinkUrl(secret);
-    const channel = yield* createChannel({ key, url });
-    const hash = new Bun.CryptoHasher("sha256").update(url).digest("hex");
-    expect(channel.urlHash).toBe(hash);
+    const channel = yield* createChannel({ url });
     expect(channel.maskedUrl).toStartWith("http://localhost:");
     expect(channel.maskedUrl).not.toContain(secret);
 
@@ -103,17 +100,12 @@ test(
     expect(JSON.stringify(patched.body)).not.toContain(secret);
     const patchedView = yield* bodyOf(ChannelView)(patched);
     expect(patchedView.name).toBe("renamed");
-    expect(patchedView.urlHash).not.toBe(hash);
 
-    // Validation: https only outside loopback, unique keys, known ids.
+    // Validation: https only outside loopback, known ids.
     const insecure = yield* send("POST", "/api/channels", {
       body: { kind: "slack", name: "x", url: "http://example.com/hook" },
     });
     expect(insecure.status).toBe(400);
-    const duplicate = yield* send("POST", "/api/channels", {
-      body: { key, kind: "webhook", name: "x", url },
-    });
-    expect(duplicate.status).toBe(409);
     const unknownChannel = yield* send("POST", "/api/monitors", {
       body: {
         channels: [channel.id, "missing-channel"],

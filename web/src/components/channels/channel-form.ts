@@ -4,7 +4,6 @@
 // dialogs send, and where a server error belongs.
 import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
-import * as Schema from "effect/Schema";
 import type { Mutable } from "effect/Types";
 
 import type {
@@ -14,7 +13,6 @@ import type {
   ChannelView,
 } from "../../../../src/domain/channel.ts";
 import { checkChannelUrl } from "../../../../src/domain/channel.ts";
-import { MonitorKey } from "../../../../src/domain/monitor-input.ts";
 import { describeError } from "../../api/errors.ts";
 
 /** Every kind, in the order the forms list them. */
@@ -53,7 +51,6 @@ export const maxNameLength = 200;
 /** A field's problem, or none; `form` is not tied to one field. */
 export interface ChannelFieldErrors {
   name?: string;
-  key?: string;
   url?: string;
   form?: string;
 }
@@ -75,13 +72,6 @@ const nameProblem = (name: string): string | undefined => {
   }
   return undefined;
 };
-
-const isKey = Schema.is(MonitorKey);
-
-const keyProblem = (key: string): string | undefined =>
-  key === "" || isKey(key)
-    ? undefined
-    : "Up to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit.";
 
 /** `url: local hostnames are not allowed` -> `Local hostnames are not allowed.` */
 const sentence = (message: string): string => {
@@ -117,7 +107,6 @@ export const urlProblem = (
 export interface ChannelCreateValues {
   readonly name: string;
   readonly kind: ChannelKind;
-  readonly key: string;
   readonly url: string;
 }
 
@@ -127,21 +116,15 @@ export const createPayload = (
   options: ChannelFormOptions
 ): Result.Result<ChannelCreateInput, ChannelFieldErrors> => {
   const name = values.name.trim();
-  const key = values.key.trim();
   const url = values.url.trim();
   const errors: ChannelFieldErrors = {
-    key: keyProblem(key),
     name: nameProblem(name),
     url: urlProblem(url, options),
   };
   if (hasErrors(errors)) {
     return Result.fail(errors);
   }
-  return Result.succeed(
-    key === ""
-      ? { kind: values.kind, name, url }
-      : { key, kind: values.kind, name, url }
-  );
+  return Result.succeed({ kind: values.kind, name, url });
 };
 
 /** What the edit form holds; an empty `url` keeps the current one. */
@@ -184,8 +167,7 @@ export const editPayload = (
 
 /**
  * Where a failed create or update belongs: the server's URL check (a 400
- * `url: ...`) on the URL field, a taken key (409) on the key field,
- * anything else above the form.
+ * `url: ...`) on the URL field, anything else above the form.
  */
 export const serverErrors = (error: Error): ChannelFieldErrors => {
   if (
@@ -193,9 +175,6 @@ export const serverErrors = (error: Error): ChannelFieldErrors => {
     error.message.startsWith("url:")
   ) {
     return { url: sentence(error.message) };
-  }
-  if (Predicate.isTagged(error, "Conflict")) {
-    return { key: "A channel with this key already exists." };
   }
   return { form: describeError(error).message };
 };

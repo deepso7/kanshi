@@ -1,8 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
-import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
-import { checkChannelUrl, hashUrl, maskUrl } from "../../src/domain/channel.ts";
+import { checkChannelUrl, maskUrl } from "../../src/domain/channel.ts";
 import { buildConfig, patchConfig } from "../../src/domain/monitor-input.ts";
 
 const prod = { devMode: false };
@@ -60,15 +59,6 @@ describe("channel URL secrecy", () => {
     assert.strictEqual(maskUrl("https://ntfy.sh/abc"), "https://ntfy.sh/****");
     assert.strictEqual(maskUrl("not a url"), "****");
   });
-
-  it.effect("hashes with SHA-256 hex", () =>
-    Effect.gen(function* hashTest() {
-      assert.strictEqual(
-        yield* hashUrl("abc"),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-      );
-    })
-  );
 });
 
 describe("monitor channel selection", () => {

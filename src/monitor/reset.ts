@@ -96,7 +96,7 @@ const resetFor = (
  *   still-down target therefore opens a new incident.
  * - Probe-affecting edit: bump generation, streaks reset, in-flight and
  *   pending confirm cleared, check now. Status is kept.
- * - Anything else (name, channels, managed): no reset.
+ * - Anything else (name, channels): no reset.
  */
 export const applyConfigChange = (
   before: MonitorConfig,

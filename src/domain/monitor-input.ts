@@ -22,9 +22,6 @@ const TimeoutMs = Schema.Int.check(
 const IntervalSeconds = Schema.Int.check(
   Schema.isBetween({ maximum: maxIntervalSeconds, minimum: 1 })
 );
-export const MonitorKey = Schema.String.check(
-  Schema.isPattern(/^[\da-z][\d._a-z-]{0,63}$/iu)
-);
 const ExpectedStatusInput = Schema.Union([Schema.Int, Schema.String]);
 const BodyContains = Schema.NullOr(
   Schema.String.check(Schema.isMaxLength(1024))
@@ -37,7 +34,6 @@ const editableFields = {
   expectedStatus: Schema.optionalKey(ExpectedStatusInput),
   failureThreshold: Schema.optionalKey(Threshold),
   intervalSeconds: Schema.optionalKey(IntervalSeconds),
-  managed: Schema.optionalKey(Schema.Boolean),
   method: Schema.optionalKey(MonitorMethod),
   public: Schema.optionalKey(Schema.Boolean),
   successThreshold: Schema.optionalKey(Threshold),
@@ -46,7 +42,6 @@ const editableFields = {
 
 export const MonitorCreateInput = Schema.Struct({
   ...editableFields,
-  key: Schema.optionalKey(MonitorKey),
   name: Schema.NonEmptyString,
   url: Schema.NonEmptyString,
 });
@@ -59,10 +54,7 @@ export const MonitorPatchInput = Schema.Struct({
 });
 export type MonitorPatchInput = typeof MonitorPatchInput.Type;
 
-/**
- * What an omitted field means on create. Config sync applies the same
- * defaults, so removing a field from `kanshi.config.ts` resets it.
- */
+/** What an omitted field means on create. */
 export const monitorDefaults = {
   bodyContains: null,
   channels: "all",
@@ -154,8 +146,6 @@ export const buildConfig = (
       generation: 0,
       id,
       intervalSeconds,
-      key: input.key ?? id,
-      managed: input.managed ?? false,
       method,
       name: input.name,
       successThreshold:
@@ -217,7 +207,6 @@ export const patchConfig = (
       expectedStatus,
       failureThreshold: patch.failureThreshold ?? config.failureThreshold,
       intervalSeconds,
-      managed: patch.managed ?? config.managed,
       method,
       name: patch.name ?? config.name,
       successThreshold: patch.successThreshold ?? config.successThreshold,

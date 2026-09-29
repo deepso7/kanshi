@@ -8,8 +8,6 @@
   "scripts": {
     "dev": "CLOUDFLARE_ACCOUNT_ID=00000000000000000000000000000000 CLOUDFLARE_API_TOKEN=local-dev-placeholder alchemy dev --stage dev",
     "build": "vite build web",
-    "seed": "bun scripts/kanshi.ts sync --config kanshi.dev.config.ts --url http://localhost:1337 --adopt --wait 30",
-    "kanshi": "bun scripts/kanshi.ts",
     "deploy": "pnpm build && alchemy deploy --stage prod",
     "destroy": "alchemy destroy --stage prod",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p web",
@@ -33,7 +31,6 @@
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260929.1",
     "@effect/language-service": "0.87.3",
-    "@effect/platform-bun": "4.0.0-rc.117",
     "@effect/vitest": "4.0.0-rc.117",
     "@oxlint/plugins": "1.86.0",
     "@stylexjs/unplugin": "0.19.1",
