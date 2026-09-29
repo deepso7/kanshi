@@ -1,5 +1,5 @@
 import * as stylex from "@stylexjs/stylex";
-import { useQueries, useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
@@ -10,7 +10,6 @@ import {
   devEventsQuery,
   episodesQuery,
   metaQuery,
-  monitorQuery,
   overviewQuery,
 } from "../api/queries.ts";
 import { EmptyState } from "../components/empty-state.tsx";
@@ -57,8 +56,6 @@ import {
 
 /** The overview refreshes faster than its shared default (30 s). */
 const refreshMs = 15_000;
-/** A row's URL comes from the monitor's own read; it rarely changes. */
-const urlStaleMs = 5 * 60_000;
 
 const blink = stylex.keyframes({
   "0%, 100%": { opacity: 1 },
@@ -559,12 +556,6 @@ const tableStyles = stylex.create({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  urlSkeleton: {
-    height: "0.75rem",
-    marginTop: space.xs,
-    maxWidth: "14rem",
-    minHeight: "0.75rem",
-  },
 });
 
 const uptimeTones = stylex.create({
@@ -574,11 +565,9 @@ const uptimeTones = stylex.create({
   warning: { color: colors.warningForeground },
 });
 
-/** The API's spec for "not read yet": a skeleton, then the URL. */
-const MonitorUrl = ({ url }: { readonly url: string | undefined }) =>
-  url === undefined ? (
-    <Skeleton style={tableStyles.urlSkeleton} />
-  ) : (
+/** The target URL; empty on a Registry row not refreshed yet. */
+const MonitorUrl = ({ url }: { readonly url: string }) =>
+  url === "" ? null : (
     <span title={url} {...stylex.props(tableStyles.url)}>
       {url}
     </span>
@@ -587,11 +576,9 @@ const MonitorUrl = ({ url }: { readonly url: string | undefined }) =>
 const MonitorRow = ({
   monitor,
   now,
-  url,
 }: {
   readonly monitor: OverviewMonitor;
   readonly now: number;
-  readonly url: string | undefined;
 }) => {
   const status = displayStatus(monitor);
   const { recent } = monitor;
@@ -624,7 +611,7 @@ const MonitorRow = ({
             ) : null}
           </span>
         </div>
-        <MonitorUrl url={url} />
+        <MonitorUrl url={monitor.url} />
       </td>
       <td {...stylex.props(tableStyles.cell, tableStyles.cellLast)}>
         <span {...stylex.props(tableStyles.mobileOnly)}>Checked </span>
@@ -675,14 +662,6 @@ const MonitorTable = ({
   readonly monitors: readonly OverviewMonitor[];
 }) => {
   const now = useNow();
-  // The overview has no URLs: each row reads its monitor (cached, and warm
-  // for its detail page).
-  const details = useQueries({
-    queries: monitors.map((monitor) => ({
-      ...monitorQuery(monitor.id),
-      staleTime: urlStaleMs,
-    })),
-  });
   return (
     <Card>
       <Table style={tableStyles.table}>
@@ -697,13 +676,8 @@ const MonitorTable = ({
           </TableRow>
         </thead>
         <tbody {...stylex.props(tableStyles.body)}>
-          {monitors.map((monitor, index) => (
-            <MonitorRow
-              key={monitor.id}
-              monitor={monitor}
-              now={now}
-              url={details[index]?.data?.url}
-            />
+          {monitors.map((monitor) => (
+            <MonitorRow key={monitor.id} monitor={monitor} now={now} />
           ))}
         </tbody>
       </Table>

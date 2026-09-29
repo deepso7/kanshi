@@ -489,6 +489,7 @@ test(
       name: monitor.name,
       notChecked: false,
       public: false,
+      url: `${url}/_dev/target`,
     });
     expect(item?.recent?.buckets).toHaveLength(48);
     expect(item?.recent?.counted).toBeGreaterThanOrEqual(1);

@@ -129,6 +129,8 @@ export const MonitorSummary = Schema.Struct({
   lastCheckedAt: Schema.NullOr(NonNegativeInt),
   name: Schema.String,
   status: MonitorStatus,
+  /** The target URL (empty on a row not refreshed since migration 4). */
+  url: Schema.String,
 });
 export type MonitorSummary = typeof MonitorSummary.Type;
 
@@ -154,6 +156,7 @@ export const summaryOf = (
   lastCheckedAt: state.lastCheckedAt,
   name: config.name,
   status: state.status,
+  url: config.url,
 });
 
 /** A monitor's full view: its configuration and its current state. */

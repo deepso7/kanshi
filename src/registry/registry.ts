@@ -68,6 +68,7 @@ const EntryRow = Schema.Struct({
   status: MonitorStatus,
   summaryRevision: Schema.Number,
   updatedAt: Schema.Number,
+  url: Schema.String,
 });
 
 export interface RegistryEntry {
@@ -301,7 +302,8 @@ export class Registry extends Cloudflare.DurableObject<
     ) => Effect.Effect<WatchdogAlertsView, never, RuntimeContext>;
     /**
      * Dev stage: forget a monitor's summary (name "(stale)", status
-     * unknown, revision 0), as if every push had been lost.
+     * unknown, no URL, revision 0), as if every push had been lost (or the
+     * row predates migration 4).
      */
     devRewindSummary: (
       id: string
@@ -364,6 +366,13 @@ const migrations = SqliteMigrator.fromRecord({
     )`;
   }),
   "3_watchdog": watchdogMigration,
+  // The summary gains the target URL. Revision 0 lets the next summary
+  // push (a check, an edit or the watchdog's refresh) fill it in.
+  "4_monitor_url": Effect.gen(function* monitorUrlMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`ALTER TABLE monitors ADD COLUMN url TEXT NOT NULL DEFAULT ''`;
+    yield* sql`UPDATE monitors SET summary_revision = 0`;
+  }),
 });
 
 const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
@@ -380,6 +389,7 @@ const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
     lastCheckedAt: row.lastCheckedAt,
     name: row.name,
     status: row.status,
+    url: row.url,
   },
   summaryRevision: row.summaryRevision,
   updatedAt: row.updatedAt,
@@ -471,6 +481,7 @@ export const RegistryLive = Registry.make(
                 status: input.summary.status,
                 summaryRevision: 0,
                 updatedAt: now,
+                url: input.summary.url,
               })}`;
               return { opId };
             })
@@ -516,6 +527,7 @@ export const RegistryLive = Registry.make(
               enabled = ${summary.enabled ? 1 : 0},
               last_checked_at = ${summary.lastCheckedAt},
               interval_seconds = ${summary.intervalSeconds},
+              url = ${summary.url},
               summary_revision = ${revision},
               updated_at = ${Date.now()}
           WHERE id = ${id}
@@ -772,7 +784,7 @@ export const RegistryLive = Registry.make(
         devRewindSummary: (id: string) =>
           sql<{ id: string }>`UPDATE monitors
             SET name = '(stale)', status = 'unknown', last_checked_at = NULL,
-                summary_revision = 0, updated_at = ${Date.now()}
+                url = '', summary_revision = 0, updated_at = ${Date.now()}
             WHERE id = ${id}
             RETURNING id`.pipe(
             Effect.map((rows) => rows.length === 1),

@@ -275,10 +275,11 @@ test(
 test(
   "converges a summary whose pushes were lost, for a disabled monitor too",
   Effect.gen(function* convergeTest() {
+    const target = yield* devUrl("/target");
     const monitor = yield* create({
       enabled: false,
       name: "converge",
-      url: yield* devUrl("/target"),
+      url: target,
     });
     const rewound = yield* send("POST", `/_dev/registry/${monitor.id}/rewind`);
     expect(rewound.body).toEqual({ rewound: true });
@@ -290,7 +291,7 @@ test(
           (items) => items.find((item) => item.id === monitor.id) ?? null
         )
       );
-    expect((yield* listed())?.name).toBe("(stale)");
+    expect(yield* listed()).toMatchObject({ name: "(stale)", url: "" });
 
     const report = yield* watchdog();
     expect(resultFor(report, monitor.id)).toMatchObject({
@@ -301,6 +302,7 @@ test(
       enabled: false,
       name: "converge",
       status: "unknown",
+      url: target,
     });
     const row = yield* rowOf(monitor.id);
     expect(row?.summaryRevision).toBe(monitor.state.summaryRevision);

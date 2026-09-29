@@ -205,6 +205,7 @@ describe(toOverview, () => {
       ]
     );
     assert.strictEqual(overview.monitors[0]?.name, "a");
+    assert.strictEqual(overview.monitors[0]?.url, "https://example.com/");
     assert.strictEqual(overview.monitors[0]?.managed, false);
   });
 });

@@ -156,6 +156,7 @@ describe("watchdog decisions", () => {
           lastCheckedAt: t0 + 30_000,
           name: "Site",
           status: "up",
+          url: "https://example.com/",
         },
       })
     );
