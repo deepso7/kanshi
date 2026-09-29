@@ -12,8 +12,10 @@ public status page, a JSON API and config-as-code.
 - 90-day uptime bars, latency, incidents and alert delivery log per monitor.
 - Alerts are at-least-once, retried with backoff, and a channel never gets a
   "recovered" without the matching "down".
-- A watchdog cron (every 5 minutes) repairs lost alarms and alerts when a
-  monitor is not being checked.
+- A watchdog cron (hourly) repairs lost alarms and alerts when a monitor is
+  not being checked. Checks only talk to the shared Registry object when
+  a monitor's status or settings change, so a quiet install costs about
+  one Durable Object request per check.
 
 ## Setup
 
@@ -72,8 +74,9 @@ export default defineConfig({
 });
 ```
 
-`pnpm kanshi sync [--url <base>] [--config <path>] [--dry-run] [--adopt]`
-(`--url` defaults to `KANSHI_URL`; needs `KANSHI_API_TOKEN`):
+`pnpm kanshi sync [--url <base>] [--config <path>] [--dry-run] [--adopt]
+[--wait <seconds>]` (`--url` defaults to `KANSHI_URL`; needs
+`KANSHI_API_TOKEN`; `pnpm kanshi sync --help` lists the flags):
 
 - Resources are matched by `key`. Sync creates, updates and deletes only the
   resources it created (`managed`); anything added in the dashboard is left
@@ -107,23 +110,23 @@ or 503. A monitor `PATCH` that changed
 `public` but could not apply the rest answers 409 (a concurrent edit made it
 invalid) or 503 (`Unavailable`); the message says so: retry it.
 
-| Route                                                      | What                                     |
-| ---------------------------------------------------------- | ---------------------------------------- |
-| `GET/POST /api/monitors`                                   | list (cached status), create             |
-| `GET/PATCH/DELETE /api/monitors/:id`                       | config and state, edit, delete           |
-| `POST /api/monitors/:id/check`                             | check now                                |
-| `GET /api/monitors/:id/checks?since&limit`                 | raw checks, newest first                 |
-| `GET /api/monitors/:id/uptime?days=90`                     | daily uptime and latency                 |
-| `GET /api/monitors/:id/incidents?limit`                    | incidents with their alert deliveries    |
-| `GET /api/monitors/:id/recent?hours=24&buckets=48`         | recent uptime and latency buckets        |
-| `GET /api/overview?hours=24&buckets=48`                    | every monitor, status counts, recent     |
-| `GET /api/watchdog/episodes`                               | open "not being checked" episodes        |
-| `GET /api/meta`                                            | dev mode, minimum interval, quota        |
-| `GET /api/dev/events?limit=20`                             | dev webhook sink events (dev mode only)  |
-| `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked + hash) |
-| `POST /api/channels/:id/test`                              | send a test alert                        |
-| `GET /api/public/status`                                   | public monitors only, no URLs (no auth)  |
-| `GET/POST/DELETE /api/session`                             | dashboard sign-in state, sign in, out    |
+| Route                                                      | What                                           |
+| ---------------------------------------------------------- | ---------------------------------------------- |
+| `GET/POST /api/monitors`                                   | list (cached status, no last check), create    |
+| `GET/PATCH/DELETE /api/monitors/:id`                       | config and state, edit, delete                 |
+| `POST /api/monitors/:id/check`                             | check now                                      |
+| `GET /api/monitors/:id/checks?since&limit`                 | raw checks, newest first                       |
+| `GET /api/monitors/:id/uptime?days=90`                     | daily uptime and latency                       |
+| `GET /api/monitors/:id/incidents?limit`                    | incidents with their alert deliveries          |
+| `GET /api/monitors/:id/recent?hours=24&buckets=48`         | recent uptime and latency buckets              |
+| `GET /api/overview?hours=24&buckets=48`                    | every monitor, live status, last check, recent |
+| `GET /api/watchdog/episodes`                               | open "not being checked" episodes              |
+| `GET /api/meta`                                            | dev mode, minimum interval, quota              |
+| `GET /api/dev/events?limit=20`                             | dev webhook sink events (dev mode only)        |
+| `GET/POST /api/channels`, `PATCH/DELETE /api/channels/:id` | channels (URL write-only: masked + hash)       |
+| `POST /api/channels/:id/test`                              | send a test alert                              |
+| `GET /api/public/status`                                   | public monitors only, no URLs (no auth)        |
+| `GET/POST/DELETE /api/session`                             | dashboard sign-in state, sign in, out          |
 
 ## UI
 
@@ -168,7 +171,8 @@ host):
 - `/_dev/webhook?fail=500&failTimes=2`: an alert sink; alerts are printed to
   the console, listed on the dashboard and in `GET /_dev/events`.
 - `/_dev/monitors/:id` (raw state, checks, alerts), `/_dev/registry`,
-  `POST /_dev/watchdog`, `POST /_dev/monitors/:id/maintain`.
+  `/_dev/registry/calls` (Registry calls per method), `POST
+/_dev/watchdog`, `POST /_dev/monitors/:id/maintain`.
 
 The seeded monitors watch those fixtures and alert the sink, so flipping
 `demo` shows the whole down/alert/recovery cycle within seconds.

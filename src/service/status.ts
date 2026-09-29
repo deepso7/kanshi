@@ -185,7 +185,6 @@ export const makeStatusService = (deps: StatusDeps) => {
             Effect.map((loaded): PublicMonitor => ({
               days: loaded.history.days,
               downSince: loaded.downSince,
-              lastCheckedAt: entry.summary.lastCheckedAt,
               name: entry.summary.name,
               ref: loaded.ref,
               status: publicStatusOf(entry),

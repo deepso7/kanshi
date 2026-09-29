@@ -5,8 +5,10 @@
 // `pnpm test:integ`.
 import { expect } from "bun:test";
 
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as TestConsole from "effect/testing/TestConsole";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
 import { MonitorListItem, MonitorResponse } from "../../src/api/spec.ts";
@@ -37,9 +39,12 @@ const describeSteps = (steps: readonly Step[]) =>
     })
   );
 
+/** Run sync quietly; `environment` is what `env("NAME")` reads. */
 const runSync = (
   config: KanshiConfig,
-  options: Partial<Pick<SyncOptions, "adopt" | "dryRun" | "environment">> = {}
+  options: Partial<Pick<SyncOptions, "adopt" | "dryRun">> & {
+    readonly environment?: Record<string, string>;
+  } = {}
 ) =>
   Effect.gen(function* runSyncEffect() {
     const url = yield* baseUrl;
@@ -48,10 +53,14 @@ const runSync = (
       baseUrl: url,
       config,
       dryRun: options.dryRun,
-      environment: options.environment ?? {},
-      log: () => {},
       token: apiToken,
-    }).pipe(Effect.provide(FetchHttpClient.layer));
+    }).pipe(
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromUnknown(options.environment ?? {})
+      ),
+      Effect.provide([FetchHttpClient.layer, TestConsole.layer])
+    );
     return { ...result, steps: describeSteps(result.plan.steps) };
   });
 
@@ -303,10 +312,11 @@ test(
     const unauthorized = yield* sync({
       baseUrl: url,
       config: {},
-      environment: {},
-      log: () => {},
       token: "wrong",
-    }).pipe(Effect.provide(FetchHttpClient.layer), Effect.flip);
+    }).pipe(
+      Effect.provide([FetchHttpClient.layer, TestConsole.layer]),
+      Effect.flip
+    );
     expect(unauthorized.message).toContain("401");
   })
 );

@@ -1,4 +1,6 @@
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
 
@@ -13,8 +15,6 @@ import { checkMethodBody, monitorDefaults } from "../domain/monitor-input.ts";
 import { checkTargetUrl, describeUrlRejection } from "../domain/url.ts";
 import type { Desired, DesiredChannel, DesiredMonitor } from "./plan.ts";
 
-export type Environment = Readonly<Record<string, string | undefined>>;
-
 // Normalisation must match what the Worker stores, or every sync would
 // see changes. The Worker's dev-only loopback allowance does not change the
 // normalised form, so it is allowed here and left to the Worker to reject.
@@ -25,18 +25,39 @@ const normalizeTargetUrl = (url: string) =>
 const normalizeChannelUrl = (url: string) =>
   checkChannelUrl(url, { devMode: true });
 
+/**
+ * The value of `env("NAME")`, read with `Config` from the current
+ * `ConfigProvider` (the environment by default). Blank counts as not set.
+ */
+const readEnv = (name: string): Effect.Effect<Result.Result<string, string>> =>
+  Config.option(Config.String(name)).pipe(
+    Effect.map((value) =>
+      value.pipe(
+        Option.map((text) => text.trim()),
+        Option.filter((text) => text.length > 0),
+        Option.match({
+          onNone: () => Result.fail(`environment variable ${name} is not set`),
+          onSome: Result.succeed,
+        })
+      )
+    ),
+    Effect.catchTag("ConfigError", (cause) =>
+      Effect.succeed(
+        Result.fail(
+          `cannot read environment variable ${name}: ${cause.message}`
+        )
+      )
+    )
+  );
+
 const channelUrl = (
-  channel: ChannelDefinition,
-  environment: Environment
-): Result.Result<string, string> => {
-  if (Predicate.isString(channel.url)) {
-    return normalizeChannelUrl(channel.url);
-  }
-  const value = environment[channel.url.env];
-  return value === undefined || value.trim().length === 0
-    ? Result.fail(`environment variable ${channel.url.env} is not set`)
-    : normalizeChannelUrl(value.trim());
-};
+  channel: ChannelDefinition
+): Effect.Effect<Result.Result<string, string>> =>
+  Predicate.isString(channel.url)
+    ? Effect.succeed(normalizeChannelUrl(channel.url))
+    : readEnv(channel.url.env).pipe(
+        Effect.map(Result.flatMap(normalizeChannelUrl))
+      );
 
 /** Defaults applied, URL and expected status normalised. */
 const resolveMonitor = (
@@ -89,13 +110,13 @@ const resolveMonitor = (
 };
 
 /**
- * Resolve a decoded config into the desired state: env vars read, URLs
+ * Resolve a decoded config into the desired state: `env("NAME")` read
+ * with `Config` from the current `ConfigProvider`, URLs
  * and expected statuses normalised, defaults applied, channel URLs hashed.
  * Every problem is reported, not only the first.
  */
 export const resolveDesired = (
-  config: KanshiConfig,
-  environment: Environment
+  config: KanshiConfig
 ): Effect.Effect<{
   readonly desired: Desired;
   readonly errors: readonly string[];
@@ -104,7 +125,7 @@ export const resolveDesired = (
     const errors: string[] = [];
     const channels: DesiredChannel[] = [];
     for (const channel of config.channels ?? []) {
-      const url = channelUrl(channel, environment);
+      const url = yield* channelUrl(channel);
       if (Result.isFailure(url)) {
         errors.push(`channel "${channel.key}": ${url.failure}`);
         continue;

@@ -1590,9 +1590,17 @@ page needs per row goes into the API response instead of a fetch per row.
   shares the helper.
 - **Unauthenticated bodies**: `src/http/body-limit.ts` lists the endpoints
   without auth that read a body (only `POST /api/session`, 4 KB). The
-  Worker checks the Origin (403) and the size (413: a declared
-  `content-length` over the limit unread, a chunked body read up to it)
-  before the API decodes anything. Authenticated endpoints decode only
+  Worker checks the Origin (403) and the size (413, for a declared
+  `content-length` or a chunked body) before the API decodes anything.
+  A refused body is still read and dropped (up to 1 MiB and at most 1 s,
+  `drainMaxMs`; larger ones unread): an unread body closes the connection
+  under the response and the local dev gateway resets it (`ECONNRESET`),
+  as with form posts. Past the second the body is cancelled and the
+  refusal sent, so a sender that uploads slowly or never finishes cannot
+  hold a 403/413 open; for a chunked body the clock starts once it is
+  over the limit (a slow body within it is waited for, as the API
+  would). Kept chunks are appended to one array per request (no copy
+  per chunk). Authenticated endpoints decode only
   after the auth middleware. The token schema caps at 1024 characters,
   and `KANSHI_API_TOKEN` must fit.
 - **Uptime next to the bars** is over the days the bars show (90, or 60 on
@@ -1600,6 +1608,264 @@ page needs per row goes into the API response instead of a fetch per row.
   (`uptimeOfLastDays`); public days carry `counted` and `up` for it.
 - **Delete channel** keeps its dialog open while the request is pending,
   like the monitor's.
+
+## Lean usage
+
+Cut Durable Object requests for a small install. Before, every check made
+two DO requests (the alarm, plus a summary push that kept the singleton
+Registry awake around the clock) and the watchdog ran every 5 minutes
+with three to four calls per monitor.
+
+Estimate, 10 monitors at 60s:
+
+- Before: 14,400 alarms + 14,400 summary pushes + 288 watchdog runs of
+  `list` and, per monitor, `status`, `ensureAlarm`, `upsertSummary` and
+  `observe` (plus prune and the Registry's `ensureAlarm`): 28,800 + 288 ×
+  43 ≈ **38–41k DO requests a day** (38k counting three watchdog calls per
+  monitor). The Registry got a request every few seconds, so it never went
+  idle.
+- After: 14,400 alarms + 24 runs × 12 requests (288) ≈ **15k a day**, plus
+  one push per status change or edit, and whatever the dashboard, API and
+  status page read. The Registry is only woken by those, the hourly
+  watchdog and alerts.
+- Trade-off: a silently stuck monitor (lost alarm, wedged object) is
+  noticed within about 1–2 hours instead of about 10 minutes, and a lost
+  status push can leave the Registry's cached status (list, status page)
+  behind for up to an hour (the next check retries it first; the dashboard
+  reads status live).
+
+### Summary pushes
+
+- `MonitorSummary` is `{ enabled, intervalSeconds, name, status, url }`:
+  `lastCheckedAt` is gone. Registry migration
+  `5_summary_without_last_checked` drops the column.
+- `reviseSummary(before, after)` bumps `summaryRevision` only when a
+  summary field changed; `completeCheck` and `applyConfigChange` use it
+  (before, every check and every edit bumped it). Revisions stay monotonic
+  per monitor, so stored revisions from before the change still order
+  correctly.
+- `shouldPushSummary(before, after)`: a new monitor, or the revision
+  moved. The Monitor pushes after `configure` (new only), `update` and a
+  committed check only then. A failed push sets an in-memory owed
+  flag and the next check retries it; after an eviction the watchdog
+  converges it. The flag is the owed revision (`owedRevision`, via
+  `owePush`/`settlePush`): pushes can overlap (an edit's and a check's),
+  and only a successful push of that revision or a newer one clears it, so
+  an older push finishing after a newer failed one does not.
+- Other Registry calls from a monitor are unchanged and happen only for
+  alerts (`recipients` when a `down` notification is resolved,
+  `channelTarget` per delivery). The dev flip target reads the Registry
+  (`getFlip`) per check, dev only.
+
+### Reading the last check live
+
+- New Monitor RPC `overview(windowMs, buckets)`: `recent` plus the live
+  `lastCheckedAt`, summary and `stale` (`isStale`, the watchdog's rule).
+  `GET /api/overview` makes that one call per monitor (as it did with
+  `recent`): its rows use the live summary (the counts too) and
+  `lastCheckedAt`, and fall back to the Registry's row with
+  `lastCheckedAt: null, recent: null` when the monitor cannot be read (the
+  dashboard then shows "unavailable").
+- **Decision:** `GET /api/monitors` returns only what the Registry knows,
+  so `MonitorListItem` has **no `lastCheckedAt`** (a cached value would be
+  up to an hour old). `kanshi sync` did not use it. `/api/public/status`
+  monitors lose `lastCheckedAt` too (the page never showed it, and a live
+  read per public monitor per view would add requests); their status is
+  the pushed summary, which follows every status change.
+- `notChecked` on `/api/overview` rows and on `MonitorResponse` (get,
+  update, check) is an open watchdog episode **or** the live snapshot is
+  stale, so it shows before the next hourly run. On `GET /api/monitors`
+  it is only the episode.
+
+### Watchdog
+
+- Cron `17 * * * *`. A run: `registry.list()`; per row as before, but an
+  active monitor gets exactly one call, `Monitor.reconcile()` (re-arm,
+  then the status view; replaces `status()` + `ensureAlarm()` for the
+  watchdog, and is also what a stuck `creating` row is decided on); then
+  one `Registry.reconcile(items, now)` with every active monitor's
+  summary, revision and observation. It upserts (revision rule) and
+  observes per item, each in its own transaction (a failing item is
+  reported, the others still apply), prunes episodes resolved over 30 days
+  ago and re-arms the Registry alarm (armed only while watchdog alerts are
+  due). The batch is made even with no active monitors, for pruning and
+  the alarm. Requests per run: `2 + active monitors` (plus repairs) in the
+  steady state; with suspects (below) `+ suspects` re-reads `+ 1`
+  confirming write.
+- Removed RPCs: `Monitor.ensureAlarm`, `Registry.observe`,
+  `Registry.ensureAlarm`, `Registry.pruneWatchdog`. `Monitor.status()`
+  stays for the dev inspector (and the confirming re-read, below).
+- **Stale** is now `max(2 × interval + 2 min, 10 min)` (`staleFloorMs`)
+  since the last sign of life, and **one** stale observation opens the
+  episode (the consecutive-runs counter is gone; migration
+  `6_watchdog_single_observation` drops `stale_runs`,
+  `RegistryEntry.watch` is `{ episodeId }`). With runs an hour apart a
+  second observation would only delay the alert by an hour. Dedup, the
+  recovery notice and the silent close on disable are unchanged.
+- **Decision (review round 1):** a stale monitor whose lost alarm this
+  run restored is **not** alerted in that run. `Monitor.reconcile()`
+  reports `alarmRestored` (`alarmRestored(previous, at, alarmRunning)`:
+  an alarm was due but none was set, or the one set was later; the alarm
+  handler's own missing alarm while it runs does not count), carried in
+  the observation; `watchTransition` returns `none` for a stale, restored
+  observation (no open, no resolve). The restored alarm is due at once, so
+  the monitor is usually checked again before the batch is applied, and
+  alerting would send a false "not being checked" and a recovery an hour
+  later. If the restored alarm does not bring checks back, the next run
+  finds it stale with its alarm in place and opens the episode, so a lost
+  alarm alerts about an hour later than a wedged monitor.
+- **Out-of-date observations are ignored** (`watchOutcome`): the batch is
+  applied after the reads, so `observeMonitor` records nothing
+  (`applied: false`) if the row is gone or not active, or its stored
+  summary revision is newer than the item's (a disable, edit or status
+  change pushed in between). The next run decides on a fresh one. A
+  disable whose push was lost is not caught (the Registry cannot know);
+  the next run closes the episode.
+- The old open issue (a real cron run between the two `now = +1h` test
+  runs) is gone with the counter.
+- **Decision (review round 2):** a check that completes between
+  `Monitor.reconcile()` and the batch **without changing the status** left
+  the revision alone, so `watchOutcome` could not see it and a stale read
+  opened a false episode (recovery an hour later). Rule: **a change that
+  ends a stale period bumps the summary revision** (`revives(before,
+after, now)`: stale before, not after; passed to `reviseSummary` by
+  `completeCheck` and `applyConfigChange`), so it is pushed and the batch
+  finds the Registry's revision newer than its read and ignores it. It
+  covers the first check after a gap and a probe-affecting edit (timeout,
+  method...) that restarts a stale monitor's schedule without touching the
+  summary. Staleness only grows until such a change, so any monitor read
+  stale is revived by its next completed check. Cost: one push per
+  recovery from a gap of at least 10 minutes. A monitor that stays stuck
+  completes no check, keeps its revision, and alerts on its first stale
+  run as before.
+- Rejected: "not stuck if its alarm is armed and due within a grace
+  window" (or a check is in flight). The next check time only moves when a
+  check completes, and an in-flight check's alarm is its deadline, so
+  every stale monitor whose alarm is in place is already due or in flight,
+  a wedged one included: it would never alert.
+- ~~Left open~~ (closed by the PR review decision below): the check's push
+  is sent after its commit, so a batch applied in the milliseconds between
+  them still opened the episode (the same window as a disable's push).
+  `alarmRestored` stays: a restored alarm's check usually finishes after
+  the batch.
+- **Decision (PR review round 1): confirm before opening.** The batch
+  (`Registry.reconcile`) no longer opens an episode: an observation that
+  would (`watchOutcome(row, item, confirmed = false)` gives `open`) comes
+  back as `suspect`, with nothing recorded. The runner then re-reads each
+  suspect with `Monitor.status()` (after the batch returned, no re-arm)
+  and `confirmSuspect(item, status, now)` keeps only those still stale
+  (so enabled) and not deleted, carrying the fresh read (its revision and
+  summary). One `Registry.confirmStale(items, now)` (new RPC, only when
+  some are left) opens them: each item in its own transaction, re-checked
+  with `confirmed = true` (row still active, no revision newer than the
+  fresh read's stored, no episode open), then the alarm is re-armed.
+  (Round 1 also required the fresh revision to equal the batch's read;
+  dropped in round 2, below.) Why it closes the gap: the
+  re-read reads the Monitor's own storage, so any check, disable or edit
+  it committed before the re-read is seen whether or not its push has
+  arrived (a reviving check moves the revision and ends staleness, a
+  disable is never stale). A change committing after the re-read happens
+  after the monitor was seen stale twice, the second time after the batch,
+  so the episode is not opened on an out-of-date observation; such a
+  change is at most milliseconds after the confirming read, and the
+  confirming write still loses to its push if the push lands first
+  (newer revision). The next run sends the recovery as before.
+  Resolves and closes stay in the batch (a stale read cannot make them
+  wrong, only an hour late). Opening is rare, so the steady state stays
+  `2 + active monitors`; a run with suspects makes `3 + active monitors +
+suspects` (`2 + ... + suspects` when no re-read confirms any). A failed
+  re-read opens nothing that run (reported as `confirm: ...`; the next run
+  decides again). The run report marks such rows `suspect: true` with the
+  confirming write's `watch` (or `applied: false` when dismissed).
+- Rejected alternatives: letting the Monitor open its own episode under a
+  lock shared with check commits and edits (strictly ordered, but it holds
+  checks while a Registry call is in flight and moves watchdog logic into
+  every monitor); treating a check in flight at the re-read as healthy
+  (the rejected in-flight rule above: a wedged monitor alerts late).
+
+### Dev and tests
+
+- `GET /_dev/registry/calls`: `{ counts, instanceId, startedAt }`, Registry
+  calls per method (every RPC, and `alarm` runs) since the object started,
+  counted in memory (the counter itself is not counted). Tests compare two
+  readings and check the `instanceId` did not change.
+- Unit: `shouldPushSummary` (a new monitor, no push for checks without a
+  change or an unconfirmed failure, one for the confirmed transition and
+  for unknown → up, edits of name/URL/interval/enabled push, channels,
+  managed, timeout, thresholds do not, enable pushes); staleness with the
+  floor; single-observation episodes and dedup; `runWatchdog` over fakes
+  (exactly one call per active monitor, one `list`, one batched
+  `reconcile` with the right items, results merged into the report, a
+  failed batch reported per row, the batch made with no monitors); the
+  overview's live summary, `lastCheckedAt` and staleness.
+- Integration: `core.test.ts` "checks that change nothing make no Registry
+  call..." (after the first result, four checks leave every
+  check-reachable Registry counter unchanged; a URL edit and the down
+  transition push once each; the overview shows a fresh `lastCheckedAt`;
+  the list has none). `watchdog.test.ts`: the re-arm test also checks a
+  run makes one `list`, one `reconcile` and no `upsertSummary`; a new
+  "converges a lost status push that later checks do not repeat"; the
+  not-being-checked test opens on the first stale run.
+
+Commands: `pnpm typecheck`, `pnpm check` pass; `pnpm test` 311 pass;
+`pnpm test:integ` 34 pass (about 4.4 minutes). Round 2 (`revives`): unit
+tests in `watchdog.test.ts` "checks between the watchdog's read and its
+batch"; `pnpm test` 328 pass; `pnpm test:integ` 34 pass (about 4.4 minutes).
+
+PR review round 1:
+
+- Confirm before opening (above). Unit: `watchOutcome` reports a batch
+  open as `suspect` (resolves and closes apply); "confirming a suspect
+  with a read after the batch" (a check committed but not pushed, a
+  disable, a deleted or unreadable monitor open nothing; still stale at
+  the same revision opens, unless a newer revision is stored by then);
+  `runWatchdog` over fakes (`list`, one `reconcile()` per monitor, the
+  batch, one `status()` per suspect, one `confirmStale`; a monitor checked
+  or disabled before the re-read makes no `confirmStale`; no suspect, no
+  extra call). Integration (`watchdog.test.ts`): the first stale run of
+  the lost-alarm test and the not-being-checked test are suspects,
+  confirmed, with one `list`, one `reconcile` and one `confirmStale`; runs
+  without suspects make no `confirmStale`.
+- Registry migrations have an upgrade test
+  (`test/unit/registry-migrations.test.ts`): the list moved to
+  `src/registry/migrations.ts` (no Alchemy import) and runs with the real
+  `@effect/sql-sqlite-do` client and migrator over `node:sqlite` (a small
+  storage double: `sql.exec` and `transaction`). It migrates to version 4,
+  inserts monitors (one with an open episode), a channel, episodes and an
+  outbox row, runs the full list (only 5 and 6 apply), and checks the
+  `monitors` columns, every row kept (minus the dropped columns), the
+  unique key, and that a second run applies nothing.
+- The plan's revision rule documents the revival bump (and
+  `reviseSummary`'s comment).
+
+PR review round 2:
+
+- **Decision: confirm on the fresh read's own staleness.** Round 1 also
+  dismissed a suspect whose summary revision moved since the batch's
+  read. A cosmetic edit (a rename) committing between the batch and the
+  re-read bumps the revision without restarting checks, so a stuck
+  monitor was dismissed and alerted an hour late. Every change that
+  should suppress the episode ends staleness in the Monitor's storage
+  itself (a completed check sets `lastCheckedAt`; an enable or a
+  probe-affecting edit, a URL one included, stamps `scheduleResetAt`; a
+  disable is never stale), so the revision comparison added nothing but
+  this false dismissal. `confirmSuspect` now checks stale (enabled), not
+  deleted, readable; the confirming item carries the fresh read's
+  revision, so `confirmStale` opens only while the Registry stores
+  nothing newer than that read. Unit: a rename between the batch and the
+  re-read still opens (whether its push landed or not; not once a newer
+  revision is stored), a check, disable, probe-affecting edit or URL
+  edit still dismisses, and `runWatchdog` sends the renamed monitor's
+  fresh revision and name to `confirmStale`.
+- **Drain bounded by time** (`drainMaxMs`, above) and **kept chunks
+  appended in place**. Unit (`body-limit.test.ts`, test clock): a
+  never-ending body is given up on after exactly `drainMaxMs` and
+  cancelled (`discardBody`, a chunked body over the limit, and a
+  cross-origin `guardBody` answering 403); a slow chunked body within the
+  limit is still waited for; 4096 one-byte chunks buffer intact.
+
+Commands (round 2): `pnpm typecheck`, `pnpm check` pass; `pnpm test` 350
+pass; `pnpm test:integ` 34 pass (about 4.4 minutes).
 
 ## Lint conventions
 

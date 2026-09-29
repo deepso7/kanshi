@@ -8,22 +8,27 @@ import type {
   MonitorListItem,
   MonitorResponse,
   Overview,
+  OverviewMonitor,
   StatusCounts,
 } from "../api/spec.ts";
-import type { RecentActivity } from "../domain/history.ts";
 import type {
   MonitorCreateInput,
   MonitorPatchInput,
 } from "../domain/monitor-input.ts";
 import { buildConfig, patchConfig } from "../domain/monitor-input.ts";
-import type { ChannelSelection, MonitorSnapshot } from "../domain/monitor.ts";
+import type {
+  ChannelSelection,
+  MonitorSnapshot,
+  MonitorSummary,
+} from "../domain/monitor.ts";
 import { displayStatus, summaryOf } from "../domain/monitor.ts";
 import { initialState } from "../monitor/cycle.ts";
 import { Monitor } from "../monitor/monitor.ts";
-import type { ChecksQuery } from "../monitor/monitor.ts";
+import type { ChecksQuery, MonitorOverview } from "../monitor/monitor.ts";
 import type { RegistryEntry } from "../registry/registry.ts";
 import { Registry, registryName } from "../registry/registry.ts";
 import { KanshiSettings } from "../settings.ts";
+import { isStale } from "../watchdog/rules.ts";
 
 export interface MonitorServiceDeps {
   readonly devMode: boolean;
@@ -69,12 +74,17 @@ const flagsOf = (entry: RegistryEntry): ResponseFlags => ({
   public: entry.public,
 });
 
+/**
+ * `notChecked` is the Registry's open episode, or the live snapshot's own
+ * staleness (so the flag shows before the next hourly watchdog run).
+ */
 const toResponse = (
   flags: ResponseFlags,
-  snapshot: MonitorSnapshot
+  snapshot: MonitorSnapshot,
+  now: number
 ): MonitorResponse => ({
   ...snapshot.config,
-  notChecked: flags.notChecked,
+  notChecked: flags.notChecked || isStale(snapshot, now),
   public: flags.public,
   state: snapshot.state,
 });
@@ -90,33 +100,47 @@ const toListItem = (entry: RegistryEntry): MonitorListItem => ({
 
 /** Count monitors by displayed status. */
 export const statusCounts = (
-  entries: readonly Pick<RegistryEntry, "summary">[]
+  summaries: readonly Pick<MonitorSummary, "enabled" | "status">[]
 ): StatusCounts => {
   const counts = { down: 0, paused: 0, unknown: 0, up: 0 };
-  for (const entry of entries) {
-    counts[displayStatus(entry.summary)] += 1;
+  for (const summary of summaries) {
+    counts[displayStatus(summary)] += 1;
   }
   return counts;
 };
 
-/** A monitor's Registry row and its recent activity (null if unreadable). */
-export interface MonitorWithRecent {
+/** A monitor's Registry row and its live overview (null if unreadable). */
+export interface MonitorWithLive {
   readonly entry: RegistryEntry;
-  readonly recent: RecentActivity | null;
+  readonly live: MonitorOverview | null;
 }
+
+/**
+ * One dashboard row: the live summary, last check time and staleness when
+ * the monitor could be read, otherwise the Registry's cached summary.
+ */
+const toOverviewMonitor = (row: MonitorWithLive): OverviewMonitor => {
+  const listed = toListItem(row.entry);
+  if (row.live === null) {
+    return { ...listed, lastCheckedAt: null, recent: null };
+  }
+  return {
+    ...listed,
+    ...row.live.summary,
+    lastCheckedAt: row.live.lastCheckedAt,
+    notChecked: listed.notChecked || row.live.stale,
+    recent: row.live.recent,
+  };
+};
 
 /** The overview's shape from the rows, as of `now`. */
 export const toOverview = (
-  rows: readonly MonitorWithRecent[],
+  rows: readonly MonitorWithLive[],
   now: number
-): Overview => ({
-  counts: statusCounts(rows.map((row) => row.entry)),
-  generatedAt: now,
-  monitors: rows.map((row) => ({
-    ...toListItem(row.entry),
-    recent: row.recent,
-  })),
-});
+): Overview => {
+  const monitors = rows.map(toOverviewMonitor);
+  return { counts: statusCounts(monitors), generatedAt: now, monitors };
+};
 
 /** The patch's fields other than `public`, if any. */
 const withoutPublic = (patch: MonitorPatchInput): MonitorPatchInput | null => {
@@ -258,7 +282,11 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
         );
 
       if (deps.devMode && options.skipActivate === true) {
-        return toResponse({ notChecked: false, public: isPublic }, snapshot);
+        return toResponse(
+          { notChecked: false, public: isPublic },
+          snapshot,
+          Date.now()
+        );
       }
       const activated = yield* registry().activate(id, opId);
       if (!activated) {
@@ -266,7 +294,11 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
           message: `monitor ${id} was deleted while being created`,
         });
       }
-      return toResponse({ notChecked: false, public: isPublic }, snapshot);
+      return toResponse(
+        { notChecked: false, public: isPublic },
+        snapshot,
+        Date.now()
+      );
     });
 
   const get = (id: string) =>
@@ -275,7 +307,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
       const snapshot = yield* monitor(id)
         .snapshot()
         .pipe(Effect.mapError(() => notFound(id)));
-      return toResponse(flagsOf(entry), snapshot);
+      return toResponse(flagsOf(entry), snapshot, Date.now());
     });
 
   /**
@@ -375,7 +407,8 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
           notChecked: isNotChecked(entry),
           public: patch.public ?? entry.public,
         },
-        snapshot
+        snapshot,
+        Date.now()
       );
     });
 
@@ -402,7 +435,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
             MonitorTombstoned: () => Effect.fail(notFound(id)),
           })
         );
-      return toResponse(flagsOf(entry), snapshot);
+      return toResponse(flagsOf(entry), snapshot, Date.now());
     });
 
   const checks = (id: string, query: ChecksQuery) =>
@@ -420,37 +453,35 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
   const incidents = (id: string, limit: number) =>
     activeEntry(id).pipe(Effect.andThen(monitor(id).incidents(limit)));
 
-  /** Counted samples and latency buckets, without the Registry check. */
-  const recentOf = (id: string, window: RecentWindow) =>
-    monitor(id).recent(window.hours * hourMs, window.buckets);
-
   /** A monitor's recent activity: counted samples and latency buckets. */
   const recent = (id: string, window: RecentWindow) =>
-    activeEntry(id).pipe(Effect.andThen(recentOf(id, window)));
+    activeEntry(id).pipe(
+      Effect.andThen(monitor(id).recent(window.hours * hourMs, window.buckets))
+    );
 
   /**
-   * Every listed monitor with its recent activity, read from the Monitor
-   * objects with bounded concurrency. A monitor that cannot be read has
-   * `recent: null` rather than failing the whole list.
+   * Every listed monitor with its live overview (recent activity, last
+   * check, summary, staleness): one Registry list, then one call per
+   * monitor with bounded concurrency. A monitor that cannot be read has
+   * `live: null` rather than failing the whole list.
    */
-  const listWithRecent = (window: RecentWindow) =>
+  const listWithLive = (window: RecentWindow) =>
     list().pipe(
       Effect.flatMap((entries) =>
         Effect.forEach(
           entries,
           (entry) =>
-            recentOf(entry.id, window).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning(
-                  `recent activity of ${entry.id} failed`,
-                  cause
-                ).pipe(Effect.as(null))
+            monitor(entry.id)
+              .overview(window.hours * hourMs, window.buckets)
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning(
+                    `overview of ${entry.id} failed`,
+                    cause
+                  ).pipe(Effect.as(null))
+                ),
+                Effect.map((live): MonitorWithLive => ({ entry, live }))
               ),
-              Effect.map((activity): MonitorWithRecent => ({
-                entry,
-                recent: activity,
-              }))
-            ),
           { concurrency: overviewConcurrency }
         )
       )
@@ -458,7 +489,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
 
   /** The dashboard's data in one call. */
   const overview = (window: RecentWindow) =>
-    listWithRecent(window).pipe(
+    listWithLive(window).pipe(
       Effect.map((rows) => toOverview(rows, Date.now()))
     );
 

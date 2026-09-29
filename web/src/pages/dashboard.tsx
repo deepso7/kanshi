@@ -388,8 +388,8 @@ const NotCheckedBanner = ({
           : `${episodes.length} monitors are not being checked`}
       </h2>
       <p {...stylex.props(watchStyles.text)}>
-        Their checks are overdue, so the status shown may be stale. Checks
-        resume on their own; this clears when they do.
+        Their checks are overdue, so the status shown may be stale. The hourly
+        watchdog restarts them; this clears on its first run after they resume.
       </p>
       <ul {...stylex.props(watchStyles.list)}>
         {episodes.map((episode) => (
@@ -615,7 +615,12 @@ const MonitorRow = ({
       </td>
       <td {...stylex.props(tableStyles.cell, tableStyles.cellLast)}>
         <span {...stylex.props(tableStyles.mobileOnly)}>Checked </span>
-        <RelativeTime at={monitor.lastCheckedAt} now={now} />
+        {/* Read live with the row's activity; unknown if that failed. */}
+        {recent === null ? (
+          "unavailable"
+        ) : (
+          <RelativeTime at={monitor.lastCheckedAt} now={now} />
+        )}
       </td>
       <td
         {...stylex.props(

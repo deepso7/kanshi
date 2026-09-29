@@ -44,7 +44,7 @@ const entry = (id: string, isPublic: boolean): RegistryEntry => ({
   summary: summaryOf(config(id), initialState(t0)),
   summaryRevision: 0,
   updatedAt: t0,
-  watch: { episodeId: null, staleRuns: 0 },
+  watch: { episodeId: null },
 });
 
 const report: UptimeReport = {

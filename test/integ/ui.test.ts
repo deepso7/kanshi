@@ -380,7 +380,6 @@ test(
       expect(Object.keys(item).toSorted()).toEqual([
         "days",
         "downSince",
-        "lastCheckedAt",
         "name",
         "ref",
         "status",

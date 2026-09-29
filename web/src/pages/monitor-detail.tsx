@@ -968,8 +968,8 @@ const PageBanners = ({ monitor }: { readonly monitor: MonitorResponse }) => (
   <>
     {monitor.notChecked ? (
       <Callout role="alert" title="Not being checked" tone="danger">
-        The watchdog has seen no check for longer than the interval allows.
-        Kanshi repairs the schedule on its own; if this stays, look at the
+        There has been no check for longer than the interval allows. The hourly
+        watchdog repairs the schedule on its own; if this stays, look at the
         Worker’s logs.
       </Callout>
     ) : null}

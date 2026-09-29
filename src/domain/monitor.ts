@@ -122,11 +122,15 @@ export const MonitorState = Schema.Struct({
 });
 export type MonitorState = typeof MonitorState.Type;
 
-/** The per-monitor status cached by the Registry. */
+/**
+ * The per-monitor status cached by the Registry: only fields that change
+ * with a status transition or an edit, never per check (`lastCheckedAt` is
+ * read live from the monitor), so a check that changes nothing needs no
+ * push.
+ */
 export const MonitorSummary = Schema.Struct({
   enabled: Schema.Boolean,
   intervalSeconds: NonNegativeInt,
-  lastCheckedAt: Schema.NullOr(NonNegativeInt),
   name: Schema.String,
   status: MonitorStatus,
   /** The target URL (empty on a row not refreshed since migration 4). */
@@ -153,10 +157,51 @@ export const summaryOf = (
 ): MonitorSummary => ({
   enabled: config.enabled,
   intervalSeconds: config.intervalSeconds,
-  lastCheckedAt: state.lastCheckedAt,
   name: config.name,
   status: state.status,
   url: config.url,
+});
+
+/** Whether two summaries differ in any field the Registry stores. */
+export const summaryChanged = (
+  before: MonitorSummary,
+  after: MonitorSummary
+): boolean =>
+  before.enabled !== after.enabled ||
+  before.intervalSeconds !== after.intervalSeconds ||
+  before.name !== after.name ||
+  before.status !== after.status ||
+  before.url !== after.url;
+
+/**
+ * `after` with its `summaryRevision` bumped by one when the summary changed
+ * from `before` (a status transition, enable/disable, or an edit of the
+ * name, URL or interval), and kept otherwise. The revision is what the
+ * Registry orders pushes and watchdog observations by, so it only moves
+ * when there is something new to push.
+ *
+ * The one exception: a change that `revived` a monitor the watchdog would
+ * call stale (the first check or schedule restart after a long gap; see
+ * `revives`) bumps it once even though no summary field moved. It is then
+ * pushed, and the watchdog rejects an observation read before it (older
+ * revision) instead of alerting a monitor that is checked again. The next
+ * check finds the monitor fresh, so it does not bump again.
+ */
+export const reviseSummary = (
+  before: { readonly config: MonitorConfig; readonly state: MonitorState },
+  after: { readonly config: MonitorConfig; readonly state: MonitorState },
+  revived: boolean
+): MonitorState => ({
+  ...after.state,
+  summaryRevision:
+    before.state.summaryRevision +
+    (revived ||
+    summaryChanged(
+      summaryOf(before.config, before.state),
+      summaryOf(after.config, after.state)
+    )
+      ? 1
+      : 0),
 });
 
 /** A monitor's full view: its configuration and its current state. */
@@ -165,3 +210,35 @@ export const MonitorSnapshot = Schema.Struct({
   state: MonitorState,
 });
 export type MonitorSnapshot = typeof MonitorSnapshot.Type;
+
+/**
+ * Whether the Monitor pushes its summary to the Registry after a change
+ * from `before` (null: the monitor was just configured) to `after`: only
+ * when the summary revision moved, i.e. a Registry-visible field changed or
+ * a stale monitor was revived. A check that leaves the status alone does
+ * not push (unless it ends a stale gap); a status transition,
+ * enable/disable or an edit of the name, URL or interval does.
+ */
+export const shouldPushSummary = (
+  before: MonitorSnapshot | null,
+  after: MonitorSnapshot
+): boolean =>
+  before === null || after.state.summaryRevision > before.state.summaryRevision;
+
+/**
+ * The summary revision a Monitor still owes the Registry after a push of
+ * `revision` failed (`owed`: what it already owed, or null). Pushes can run
+ * concurrently (an edit's and a check's), so the newest failed one counts.
+ */
+export const owePush = (owed: number | null, revision: number): number =>
+  owed === null ? revision : Math.max(owed, revision);
+
+/**
+ * What is still owed after a push of `revision` succeeded: nothing if it
+ * covers the owed revision, otherwise the owed one (a newer push failed
+ * and this older one finished after it).
+ */
+export const settlePush = (
+  owed: number | null,
+  revision: number
+): number | null => (owed !== null && owed > revision ? owed : null);

@@ -6,11 +6,11 @@ import type { AlertEvent } from "../domain/alert.ts";
 import { OutboxEntry } from "../domain/alert.ts";
 import type { IncidentResolution } from "../domain/monitor.ts";
 import { Episode } from "../domain/watchdog.ts";
-import type { WatchChange, WatchObservation } from "../watchdog/rules.ts";
-import { watchTransition } from "../watchdog/rules.ts";
+import type { ReconcileItem, WatchChange } from "../watchdog/rules.ts";
+import { watchOutcome } from "../watchdog/rules.ts";
 
 /**
- * Registry storage for the watchdog: the per-monitor stale counter (columns
+ * Registry storage for the watchdog: the per-monitor open episode (a column
  * on `monitors`), "not being checked" episodes and their alert outbox. The
  * outbox has the Monitor's outbox shape (`incident_id` holds the episode
  * id), so the same pure ordering and retry rules apply.
@@ -21,12 +21,22 @@ const OutboxRow = Schema.Struct({
   combined: Schema.BooleanFromBit,
 });
 
+/** The `monitors` columns an observation is checked against. */
+const WatchedRows = Schema.Array(
+  Schema.Struct({
+    lifecycle: Schema.Literals(["creating", "active", "deleting"]),
+    staleEpisodeId: Schema.NullOr(Schema.String),
+    summaryRevision: Schema.Number,
+  })
+);
+
 const decodeOutbox = (rows: readonly unknown[]) =>
   Schema.decodeUnknownEffect(Schema.Array(OutboxRow))(rows).pipe(Effect.orDie);
 
 const decodeEpisodes = (rows: readonly unknown[]) =>
   Schema.decodeUnknownEffect(Schema.Array(Episode))(rows).pipe(Effect.orDie);
 
+/** Migration `3_watchdog` (applied; `stale_runs` is dropped by `6_...`). */
 export const watchdogMigration = Effect.gen(function* watchdogMigration() {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`ALTER TABLE monitors ADD COLUMN stale_runs INTEGER NOT NULL DEFAULT 0`;
@@ -93,48 +103,58 @@ const closeEpisode = Effect.fn("WatchdogStore.closeEpisode")(
 );
 
 export interface ObserveResult {
-  /** False when the row is missing or not active (nothing recorded). */
+  /**
+   * False when the observation is out of date: the row is missing, not
+   * active, or has a newer summary revision (nothing recorded).
+   */
   readonly applied: boolean;
   readonly change: WatchChange;
   readonly episodeId: string | null;
-  readonly staleRuns: number;
 }
 
 /**
  * Record one watchdog observation of an active monitor, in one transaction
- * (the caller's): advance the stale counter and open, resolve or close its
- * episode. Opening queues a `down` row for every channel; resolving queues
- * an `up` row for every channel that got a `down` row. `at` is the
- * watchdog run's clock; queued rows are due at `queuedAt`.
+ * (the caller's), if it is still current (`watchOutcome`): open, resolve
+ * or close its episode. Only a `confirmed` observation opens one; the
+ * batch's would-be opens are returned as `suspect` with nothing recorded.
+ * Opening queues a `down` row for every channel; resolving queues an `up`
+ * row for every channel that got a `down` row. `at` is the watchdog run's
+ * clock; queued rows are due at `queuedAt`.
  */
 export const observeMonitor = Effect.fn("WatchdogStore.observeMonitor")(
   function* observeMonitorEffect(
     monitorId: string,
-    observation: WatchObservation,
+    item: Pick<ReconcileItem, "observation" | "revision">,
     at: number,
-    queuedAt: number
+    queuedAt: number,
+    confirmed: boolean
   ) {
     const sql = yield* SqlClient.SqlClient;
-    const [row] = yield* sql<{
-      lifecycle: string;
-      staleEpisodeId: string | null;
-      staleRuns: number;
-    }>`SELECT lifecycle, stale_runs, stale_episode_id FROM monitors
-      WHERE id = ${monitorId}`;
-    if (row === undefined || row.lifecycle !== "active") {
+    const { observation } = item;
+    const [stored] =
+      yield* sql`SELECT lifecycle, stale_episode_id, summary_revision
+      FROM monitors WHERE id = ${monitorId}`.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(WatchedRows)),
+        Effect.orDie
+      );
+    const row =
+      stored === undefined
+        ? null
+        : {
+            episodeId: stored.staleEpisodeId,
+            lifecycle: stored.lifecycle,
+            summaryRevision: stored.summaryRevision,
+          };
+    const { applied, change } = watchOutcome(row, item, confirmed);
+    if (!applied || row === null) {
       return {
         applied: false,
         change: "none",
         episodeId: null,
-        staleRuns: 0,
       } satisfies ObserveResult;
     }
-    const next = watchTransition(
-      { episodeId: row.staleEpisodeId, staleRuns: row.staleRuns },
-      observation
-    );
-    let episodeId = row.staleEpisodeId;
-    switch (next.change) {
+    let { episodeId } = row;
+    switch (change) {
       case "open": {
         episodeId = `watchdog-${crypto.randomUUID()}`;
         yield* sql`INSERT INTO watchdog_episodes ${sql.insert({
@@ -181,22 +201,19 @@ export const observeMonitor = Effect.fn("WatchdogStore.observeMonitor")(
         episodeId = null;
         break;
       }
-      case "none": {
+      case "none":
+      case "suspect": {
         break;
       }
       default: {
-        return next.change satisfies never;
+        return change satisfies never;
       }
     }
-    yield* sql`UPDATE monitors
-      SET stale_runs = ${next.staleRuns}, stale_episode_id = ${episodeId}
-      WHERE id = ${monitorId}`;
-    return {
-      applied: true,
-      change: next.change,
-      episodeId,
-      staleRuns: next.staleRuns,
-    } satisfies ObserveResult;
+    if (change !== "none" && change !== "suspect") {
+      yield* sql`UPDATE monitors SET stale_episode_id = ${episodeId}
+        WHERE id = ${monitorId}`;
+    }
+    return { applied: true, change, episodeId } satisfies ObserveResult;
   }
 );
 

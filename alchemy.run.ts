@@ -1,5 +1,5 @@
 // The Kanshi stack: one Worker (the SPA as static assets, API, watchdog
-// cron every 5 minutes) hosting the Monitor and Registry Durable Objects.
+// cron hourly) hosting the Monitor and Registry Durable Objects.
 // `KANSHI_API_TOKEN` (from .env or the environment) is deployed as a secret.
 // - `pnpm dev`: stage `dev`, run locally by `alchemy dev` (dev mode on),
 //   plus the SPA's Vite dev server (HMR) proxying the API to the Worker.

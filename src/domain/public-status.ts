@@ -35,7 +35,6 @@ export const PublicMonitor = Schema.Struct({
   days: Schema.Array(PublicDay),
   /** Start of the open incident, if the monitor is down. */
   downSince: Schema.NullOr(Schema.Number),
-  lastCheckedAt: Schema.NullOr(Schema.Number),
   name: Schema.String,
   /**
    * Stable and unique per monitor, but opaque: a truncated hash of the

@@ -8,19 +8,33 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 
-import { MonitorListItem, MonitorResponse } from "../../src/api/spec.ts";
+import {
+  MonitorListItem,
+  MonitorResponse,
+  Overview,
+} from "../../src/api/spec.ts";
 import { monitorQuota } from "./alchemy.run.ts";
+import type { RegistryCalls } from "./harness.ts";
 import {
   ErrorBody,
   bodyOf,
+  callsSince,
   checksOf,
   setup,
   statusOf,
   waitFor,
 } from "./harness.ts";
 
-const { create, detail, devUrl, registryRows, send, setFlip, test } =
-  setup("integ");
+const {
+  create,
+  detail,
+  devUrl,
+  registryCalls,
+  registryRows,
+  send,
+  setFlip,
+  test,
+} = setup("integ");
 
 test(
   "requires the bearer token and validates input",
@@ -348,4 +362,104 @@ test(
     yield* send("DELETE", `/api/monitors/${again.id}`);
   }),
   { timeout: 60_000 }
+);
+
+/** Registry methods only the dev fixtures or the cron call. */
+const notFromChecks = new Set([
+  "bumpDevCounter",
+  "devEvents",
+  "getFlip",
+  "list",
+  "reconcile",
+  "recordDevEvent",
+  "setFlip",
+]);
+
+/** Registry calls that a monitor's checks could have made, by method. */
+const checkCalls = (calls: RegistryCalls) =>
+  Object.fromEntries(
+    Object.entries(calls.counts).filter(([name]) => !notFromChecks.has(name))
+  );
+
+test(
+  "checks that change nothing make no Registry call; a status change is pushed; the overview reads the last check live",
+  Effect.gen(function* leanUsageTest() {
+    const target = yield* devUrl("/target");
+    const monitor = yield* create({
+      intervalSeconds: 5,
+      name: `lean-${crypto.randomUUID()}`,
+      url: target,
+    });
+    const listed = send("GET", "/api/monitors").pipe(
+      Effect.flatMap(bodyOf(Schema.Array(MonitorListItem))),
+      Effect.map((items) => items.find((item) => item.id === monitor.id))
+    );
+    // The first result (unknown -> up) is a status change: pushed.
+    yield* waitFor(
+      "up in the Registry",
+      listed,
+      (item) => item?.status === "up"
+    );
+    const checksNow = detail(monitor.id).pipe(
+      Effect.map((value) => value.checks.length)
+    );
+    const before = yield* registryCalls;
+    const startChecks = yield* checksNow;
+
+    // Four more checks, polling the Registry's counter meanwhile (which
+    // also keeps the same Registry instance running).
+    yield* waitFor(
+      "four more checks",
+      Effect.zip(checksNow, registryCalls),
+      ([count]) => count >= startChecks + 4,
+      40_000
+    );
+    const after = yield* registryCalls;
+    expect(callsSince(before, after, "upsertSummary")).toBe(0);
+    expect(after.instanceId).toBe(before.instanceId);
+    expect(checkCalls(after)).toEqual(checkCalls(before));
+
+    // The overview shows the last check, read live from the monitor.
+    const live = yield* detail(monitor.id);
+    const overview = yield* send("GET", "/api/overview").pipe(
+      Effect.flatMap(bodyOf(Overview))
+    );
+    const row = overview.monitors.find((item) => item.id === monitor.id);
+    const lastCheckedAt = live.status.snapshot?.state.lastCheckedAt ?? 0;
+    expect(row?.lastCheckedAt).toBeGreaterThanOrEqual(lastCheckedAt);
+    expect(Date.now() - (row?.lastCheckedAt ?? 0)).toBeLessThan(15_000);
+    expect(row?.status).toBe("up");
+    // The plain list carries only what the Registry knows.
+    expect(Object.keys((yield* listed) ?? {})).not.toContain("lastCheckedAt");
+
+    // An edit of the URL is a Registry-visible change: pushed once.
+    const failing = `${target}?status=500`;
+    const edited = yield* send("PATCH", `/api/monitors/${monitor.id}`, {
+      body: { url: failing },
+    });
+    expect(edited.status).toBe(200);
+    const afterEdit = yield* registryCalls;
+    expect(callsSince(after, afterEdit, "upsertSummary")).toBe(1);
+    expect((yield* listed)?.url).toBe(failing);
+
+    // The confirmed failure is a status change: pushed once. Further
+    // failures while down change nothing.
+    yield* waitFor(
+      "down in the Registry",
+      Effect.zip(listed, registryCalls),
+      ([item]) => item?.status === "down"
+    );
+    const down = yield* checksNow;
+    yield* waitFor(
+      "two more failed checks",
+      Effect.zip(checksNow, registryCalls),
+      ([count]) => count >= down + 2,
+      30_000
+    );
+    expect(callsSince(afterEdit, yield* registryCalls, "upsertSummary")).toBe(
+      1
+    );
+    yield* send("DELETE", `/api/monitors/${monitor.id}`);
+  }),
+  { timeout: 120_000 }
 );

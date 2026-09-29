@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -457,10 +458,22 @@ describe("config diff", () => {
   });
 });
 
+/** Resolve with `environment` as the environment (a test `ConfigProvider`). */
+const resolveWith = (
+  config: Parameters<typeof resolveDesired>[0],
+  environment: Record<string, string>
+) =>
+  resolveDesired(config).pipe(
+    Effect.provideService(
+      ConfigProvider.ConfigProvider,
+      ConfigProvider.fromUnknown(environment)
+    )
+  );
+
 describe("config resolution", () => {
   it.effect("reads env vars, normalises and hashes like the Worker", () =>
     Effect.gen(function* resolveTest() {
-      const { desired, errors } = yield* resolveDesired(
+      const { desired, errors } = yield* resolveWith(
         {
           channels: [
             {
@@ -509,7 +522,7 @@ describe("config resolution", () => {
 
   it.effect("reports every problem", () =>
     Effect.gen(function* errorsTest() {
-      const { errors } = yield* resolveDesired(
+      const { errors } = yield* resolveWith(
         {
           channels: [
             { key: "a", kind: "slack", name: "A", url: env("MISSING") },

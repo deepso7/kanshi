@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Etag from "effect/unstable/http/Etag";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -41,8 +42,12 @@ import { runWatchdog } from "./watchdog/run.ts";
  */
 export const webAssetsDirectory = "web/dist";
 
-/** The watchdog's Cron Trigger. */
-export const watchdogCron = "*/5 * * * *";
+/**
+ * The watchdog's Cron Trigger: hourly, off the hour. It re-arms lost
+ * alarms, converges lost summary pushes and finds monitors that stopped
+ * being checked, so a silently stuck monitor is noticed within 1-2 hours.
+ */
+export const watchdogCron = "17 * * * *";
 
 // Workers have no file system; the API never serves files.
 const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
@@ -174,6 +179,9 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
   }).pipe(
     Effect.provide(ServicesLive),
     Effect.provide(Cloudflare.Workers.CronEventSourceLive),
-    Effect.provide(MonitorLive.pipe(Layer.provideMerge(RegistryLive)))
+    Effect.provide(MonitorLive.pipe(Layer.provideMerge(RegistryLive))),
+    // Probes, alert deliveries and channel tests: the Durable Objects
+    // capture it when their layers are built.
+    Effect.provide(FetchHttpClient.layer)
   )
 ) {}

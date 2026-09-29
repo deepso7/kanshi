@@ -1,9 +1,10 @@
-import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator";
 import type { RuntimeContext } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { DeliveryResult, deliver } from "../alerts/delivery.ts";
@@ -29,8 +30,10 @@ import {
   skipped,
 } from "../monitor/outbox.ts";
 import { openDurableSql } from "../storage/sqlite.ts";
-import type { WatchObservation } from "../watchdog/rules.ts";
+import type { ReconcileItem } from "../watchdog/rules.ts";
+import { episodeRetentionMs } from "../watchdog/rules.ts";
 import { KeyTaken, QuotaExceeded, registryErrors } from "./errors.ts";
+import { registryMigrations } from "./migrations.ts";
 import type { ObserveResult } from "./watchdog-store.ts";
 import {
   closeMonitorEpisode,
@@ -41,7 +44,6 @@ import {
   readWatchdogPair,
   readWatchdogWork,
   recentWatchdogAlerts,
-  watchdogMigration,
   writeWatchdogOutbox,
 } from "./watchdog-store.ts";
 
@@ -57,14 +59,12 @@ const EntryRow = Schema.Struct({
   id: Schema.String,
   intervalSeconds: Schema.Number,
   key: Schema.String,
-  lastCheckedAt: Schema.NullOr(Schema.Number),
   lifecycle: Lifecycle,
   managed: Schema.BooleanFromBit,
   name: Schema.String,
   opId: Schema.String,
   public: Schema.BooleanFromBit,
   staleEpisodeId: Schema.NullOr(Schema.String),
-  staleRuns: Schema.Number,
   status: MonitorStatus,
   summaryRevision: Schema.Number,
   updatedAt: Schema.Number,
@@ -82,11 +82,43 @@ export interface RegistryEntry {
   readonly summary: MonitorSummary;
   readonly summaryRevision: number;
   readonly updatedAt: number;
-  /** The watchdog's stale counter and open "not being checked" episode. */
+  /** The watchdog's open "not being checked" episode. */
   readonly watch: {
     readonly episodeId: string | null;
-    readonly staleRuns: number;
   };
+}
+
+/** What the watchdog's batched `reconcile` did with one monitor. */
+export interface ReconcileResult {
+  /** Why the item failed (its transaction rolled back), or null. */
+  readonly error: string | null;
+  readonly id: string;
+  readonly summaryUpdated: boolean;
+  readonly watch: ObserveResult | null;
+}
+
+/** The watchdog's one Registry write per run. */
+export interface ReconcileReport {
+  /** The Registry alarm after the run: set only when alerts are due. */
+  readonly alarmAt: number | null;
+  /** Resolved episodes pruned, or null if pruning failed. */
+  readonly pruned: number | null;
+  readonly results: readonly ReconcileResult[];
+}
+
+/** The watchdog's confirming write, made only when a batch had suspects. */
+export interface ConfirmReport {
+  /** The Registry alarm after the write: set only when alerts are due. */
+  readonly alarmAt: number | null;
+  readonly results: readonly ReconcileResult[];
+}
+
+/** Dev stage: Registry calls per method since this instance started. */
+export interface RegistryCalls {
+  readonly counts: Readonly<Record<string, number>>;
+  /** Changes when the object is evicted and started again. */
+  readonly instanceId: string;
+  readonly startedAt: number;
 }
 
 /** Watchdog episodes and their alert rows, for the dev inspector. */
@@ -276,21 +308,33 @@ export class Registry extends Cloudflare.DurableObject<
       ids: readonly string[]
     ) => Effect.Effect<readonly string[], never, RuntimeContext>;
     /**
-     * Record a watchdog observation of an active monitor: advance its stale
-     * counter and open (alerting every channel), resolve or close its
-     * "not being checked" episode. `at` is the watchdog run's clock.
+     * The watchdog's one write per run, for every active monitor it read:
+     * store the summary (same revision rule as `upsertSummary`, so a lost
+     * push converges and a newer one is never overwritten) and record the
+     * observation, resolving or closing its "not being checked" episode,
+     * unless the observation is out of date (the row has a newer summary
+     * revision, or is no longer active). An observation that would open an
+     * episode is only reported (`suspect`): the runner confirms it with a
+     * fresh read of the monitor (`confirmStale`). Then prune old episodes
+     * and re-arm the alarm, which is set only while watchdog alerts are
+     * due. `at` is the run's clock. Each item is its own transaction.
      */
-    observe: (
-      id: string,
-      observation: WatchObservation,
+    reconcile: (
+      items: readonly ReconcileItem[],
       at: number
-    ) => Effect.Effect<ObserveResult, never, RuntimeContext>;
-    /** Recompute and set the alarm from the watchdog outbox. */
-    ensureAlarm: () => Effect.Effect<number | null, never, RuntimeContext>;
-    /** Drop episodes resolved before `before` with nothing left to send. */
-    pruneWatchdog: (
-      before: number
-    ) => Effect.Effect<number, never, RuntimeContext>;
+    ) => Effect.Effect<ReconcileReport, never, RuntimeContext>;
+    /**
+     * Open the episodes of the batch's suspects that a fresh read of the
+     * monitor, made after the batch, found still stale (`confirmSuspect`).
+     * Each carries that read's revision and is re-checked like a batch
+     * item (still active, no revision newer than the fresh read's stored,
+     * no episode open), opened alerting every channel, in its own
+     * transaction; then the alarm is re-armed. `at` is the run's clock.
+     */
+    confirmStale: (
+      items: readonly ReconcileItem[],
+      at: number
+    ) => Effect.Effect<ConfirmReport, never, RuntimeContext>;
     /** The open "not being checked" episodes, oldest first. */
     openEpisodes: () => Effect.Effect<
       readonly Episode[],
@@ -300,6 +344,11 @@ export class Registry extends Cloudflare.DurableObject<
     watchdogAlerts: (
       limit: number
     ) => Effect.Effect<WatchdogAlertsView, never, RuntimeContext>;
+    /**
+     * Dev inspection: calls per method (every RPC and the alarm) since
+     * this instance started, counted in memory. Not counted itself.
+     */
+    devCalls: () => Effect.Effect<RegistryCalls, never, RuntimeContext>;
     /**
      * Dev stage: forget a monitor's summary (name "(stale)", status
      * unknown, no URL, revision 0), as if every push had been lost (or the
@@ -315,66 +364,6 @@ export class Registry extends Cloudflare.DurableObject<
   }
 >()("Registry", { errors: registryErrors }) {}
 
-const migrations = SqliteMigrator.fromRecord({
-  "1_core": Effect.gen(function* coreMigration() {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`CREATE TABLE monitors (
-      id TEXT PRIMARY KEY,
-      key TEXT NOT NULL UNIQUE,
-      managed INTEGER NOT NULL,
-      lifecycle TEXT NOT NULL,
-      op_id TEXT NOT NULL,
-      public INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      status TEXT NOT NULL,
-      enabled INTEGER NOT NULL,
-      last_checked_at INTEGER,
-      interval_seconds INTEGER NOT NULL,
-      summary_revision INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`;
-    // Dev stage only: webhook sink events and flip targets.
-    yield* sql`CREATE TABLE dev_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      at INTEGER NOT NULL,
-      kind TEXT NOT NULL,
-      detail TEXT NOT NULL
-    )`;
-    yield* sql`CREATE TABLE dev_flips (
-      name TEXT PRIMARY KEY,
-      up INTEGER NOT NULL
-    )`;
-  }),
-  "2_channels": Effect.gen(function* channelsMigration() {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`CREATE TABLE channels (
-      id TEXT PRIMARY KEY,
-      key TEXT NOT NULL UNIQUE,
-      managed INTEGER NOT NULL,
-      kind TEXT NOT NULL,
-      url TEXT NOT NULL,
-      url_hash TEXT NOT NULL,
-      name TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`;
-    // Dev stage only: counters for the webhook sink's `failTimes`.
-    yield* sql`CREATE TABLE dev_counters (
-      name TEXT PRIMARY KEY,
-      value INTEGER NOT NULL
-    )`;
-  }),
-  "3_watchdog": watchdogMigration,
-  // The summary gains the target URL. Revision 0 lets the next summary
-  // push (a check, an edit or the watchdog's refresh) fill it in.
-  "4_monitor_url": Effect.gen(function* monitorUrlMigration() {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`ALTER TABLE monitors ADD COLUMN url TEXT NOT NULL DEFAULT ''`;
-    yield* sql`UPDATE monitors SET summary_revision = 0`;
-  }),
-});
-
 const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
   createdAt: row.createdAt,
   id: row.id,
@@ -386,14 +375,13 @@ const toEntry = (row: typeof EntryRow.Type): RegistryEntry => ({
   summary: {
     enabled: row.enabled,
     intervalSeconds: row.intervalSeconds,
-    lastCheckedAt: row.lastCheckedAt,
     name: row.name,
     status: row.status,
     url: row.url,
   },
   summaryRevision: row.summaryRevision,
   updatedAt: row.updatedAt,
-  watch: { episodeId: row.staleEpisodeId, staleRuns: row.staleRuns },
+  watch: { episodeId: row.staleEpisodeId },
 });
 
 const decodeEntries = (rows: readonly unknown[]) =>
@@ -404,9 +392,12 @@ const decodeEntries = (rows: readonly unknown[]) =>
 export const RegistryLive = Registry.make(
   Effect.gen(function* RegistryInit() {
     const state = yield* Cloudflare.DurableObjectState;
+    const http = yield* HttpClient.HttpClient;
+    /** Watchdog alert deliveries use the Worker's `HttpClient`. */
+    const withHttp = Effect.provideService(HttpClient.HttpClient, http);
 
     return Effect.gen(function* RegistryInstance() {
-      const sql = yield* openDurableSql(state, migrations);
+      const sql = yield* openDurableSql(state, registryMigrations);
       // Serialises alarm updates so the last one written is computed from
       // the latest committed state.
       const alarmLock = yield* Semaphore.make(1);
@@ -472,7 +463,6 @@ export const RegistryLive = Registry.make(
                 id: input.id,
                 intervalSeconds: input.summary.intervalSeconds,
                 key: input.key,
-                lastCheckedAt: input.summary.lastCheckedAt,
                 lifecycle: "creating",
                 managed: input.managed ? 1 : 0,
                 name: input.summary.name,
@@ -525,7 +515,6 @@ export const RegistryLive = Registry.make(
           SET name = ${summary.name},
               status = ${summary.status},
               enabled = ${summary.enabled ? 1 : 0},
-              last_checked_at = ${summary.lastCheckedAt},
               interval_seconds = ${summary.intervalSeconds},
               url = ${summary.url},
               summary_revision = ${revision},
@@ -660,30 +649,32 @@ export const RegistryLive = Registry.make(
             );
             return;
           }
-          const result = yield* deliver(
-            alertRequest(
-              target.kind,
-              target.url,
-              watchdogMessage(watchdogTag[decision.message], {
-                episode: {
-                  id: episode.id,
-                  intervalSeconds: episode.intervalSeconds,
-                  lastCheckedAt: episode.lastCheckedAt,
-                  resolvedAt: episode.resolvedAt,
-                  startedAt: episode.startedAt,
-                },
-                idempotencyKey: idempotencyKey(
-                  entry.incidentId,
-                  entry.event,
-                  entry.channelId
-                ),
-                monitor: {
-                  id: episode.monitorId,
-                  name: episode.monitorName,
-                  url: episode.monitorUrl,
-                },
-                sentAt: Date.now(),
-              })
+          const result = yield* withHttp(
+            deliver(
+              alertRequest(
+                target.kind,
+                target.url,
+                watchdogMessage(watchdogTag[decision.message], {
+                  episode: {
+                    id: episode.id,
+                    intervalSeconds: episode.intervalSeconds,
+                    lastCheckedAt: episode.lastCheckedAt,
+                    resolvedAt: episode.resolvedAt,
+                    startedAt: episode.startedAt,
+                  },
+                  idempotencyKey: idempotencyKey(
+                    entry.incidentId,
+                    entry.event,
+                    entry.channelId
+                  ),
+                  monitor: {
+                    id: episode.monitorId,
+                    name: episode.monitorName,
+                    url: episode.monitorUrl,
+                  },
+                  sentAt: Date.now(),
+                })
+              )
             )
           );
           if (DeliveryResult.$is("Failed")(result)) {
@@ -727,35 +718,125 @@ export const RegistryLive = Registry.make(
           yield* rearm;
         }).pipe(Effect.withSpan("Registry.alarm"));
 
-      const observe = (id: string, observation: WatchObservation, at: number) =>
-        Effect.gen(function* observeEffect() {
-          const result = yield* transact(
-            observeMonitor(id, observation, at, Date.now())
-          );
-          if (result.change !== "none") {
-            yield* rearm;
-          }
-          if (result.change === "open") {
-            yield* Effect.logWarning(
-              `monitor ${observation.name} (${id}) is not being checked`
+      /**
+       * One item of `reconcile` (summary, then observation) or of
+       * `confirmStale` (`confirmed`: the observation only, which may open
+       * an episode), in one transaction.
+       */
+      const reconcileOne = (
+        item: ReconcileItem,
+        at: number,
+        confirmed: boolean
+      ) =>
+        transact(
+          Effect.gen(function* reconcileOneTx() {
+            // A confirming item records the observation only: its summary
+            // is the fresh read's, which the monitor pushes itself (or the
+            // next run's batch stores), and its revision is only compared.
+            const summaryUpdated = confirmed
+              ? false
+              : yield* upsertSummary(item.id, item.summary, item.revision);
+            // Skipped if a newer summary was pushed since the watchdog read
+            // the monitor (a disable, say), or the row is being deleted.
+            const watch = yield* observeMonitor(
+              item.id,
+              item,
+              at,
+              Date.now(),
+              confirmed
             );
-          }
-          return result;
-        });
+            return { summaryUpdated, watch };
+          })
+        ).pipe(
+          Effect.tap(({ watch }) =>
+            watch.change === "open"
+              ? Effect.logWarning(
+                  `monitor ${item.observation.name} (${item.id}) is not being checked`
+                )
+              : Effect.void
+          ),
+          Effect.map(({ summaryUpdated, watch }): ReconcileResult => ({
+            error: null,
+            id: item.id,
+            summaryUpdated,
+            watch,
+          })),
+          Effect.catchCause((cause) =>
+            Effect.logError(
+              `watchdog reconcile of ${item.id} failed`,
+              cause
+            ).pipe(
+              Effect.as({
+                error: Cause.pretty(cause).split("\n", 1)[0] ?? "failed",
+                id: item.id,
+                summaryUpdated: false,
+                watch: null,
+              } satisfies ReconcileResult)
+            )
+          )
+        );
+
+      const reconcile = (items: readonly ReconcileItem[], at: number) =>
+        Effect.gen(function* reconcileEffect() {
+          // One item after another: each is a storage transaction.
+          const results = yield* Effect.forEach(
+            items,
+            (item) => reconcileOne(item, at, false),
+            { concurrency: 1 }
+          );
+          const pruned = yield* transact(
+            pruneEpisodes(at - episodeRetentionMs)
+          ).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logError("pruning watchdog episodes failed", cause).pipe(
+                Effect.as(null)
+              )
+            )
+          );
+          const alarmAt = yield* rearm;
+          return { alarmAt, pruned, results } satisfies ReconcileReport;
+        }).pipe(Effect.withSpan("Registry.reconcile"));
+
+      const confirmStale = (items: readonly ReconcileItem[], at: number) =>
+        Effect.gen(function* confirmStaleEffect() {
+          const results = yield* Effect.forEach(
+            items,
+            (item) => reconcileOne(item, at, true),
+            { concurrency: 1 }
+          );
+          const alarmAt = yield* rearm;
+          return { alarmAt, results } satisfies ConfirmReport;
+        }).pipe(Effect.withSpan("Registry.confirmStale"));
+
+      // Dev inspection: calls per method, in memory (see `devCalls`).
+      const instanceId = crypto.randomUUID();
+      const startedAt = Date.now();
+      const calls = new Map<string, number>();
+      /** `method`, counting each call under `name`. */
+      const counted =
+        <Args extends readonly unknown[], A, E, R>(
+          name: string,
+          method: (...args: Args) => Effect.Effect<A, E, R>
+        ) =>
+        (...args: Args) => {
+          calls.set(name, (calls.get(name) ?? 0) + 1);
+          return method(...args);
+        };
 
       return {
-        activate,
-        alarm,
-        begin,
-        bumpDevCounter: (name: string) =>
+        activate: counted("activate", activate),
+        alarm: counted("alarm", alarm),
+        begin: counted("begin", begin),
+        bumpDevCounter: counted("bumpDevCounter", (name: string) =>
           sql<{ value: number }>`INSERT INTO dev_counters (name, value)
             VALUES (${name}, 1)
             ON CONFLICT (name) DO UPDATE SET value = value + 1
             RETURNING value`.pipe(
             Effect.map((rows) => rows[0]?.value ?? 0),
             Effect.orDie
-          ),
-        channelTarget: (id: string) =>
+          )
+        ),
+        channelTarget: counted("channelTarget", (id: string) =>
           getChannel(id).pipe(
             Effect.map((row) =>
               row === null
@@ -767,95 +848,117 @@ export const RegistryLive = Registry.make(
                     url: row.url,
                   } satisfies ChannelTarget)
             )
-          ),
-        createChannel,
-        deleteChannel: (id: string) =>
+          )
+        ),
+        confirmStale: counted("confirmStale", confirmStale),
+        createChannel: counted("createChannel", createChannel),
+        deleteChannel: counted("deleteChannel", (id: string) =>
           sql<{
             id: string;
           }>`DELETE FROM channels WHERE id = ${id} RETURNING id`.pipe(
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
-          ),
-        devEvents: () =>
+          )
+        ),
+        devCalls: () =>
+          Effect.sync((): RegistryCalls => ({
+            counts: Object.fromEntries(calls),
+            instanceId,
+            startedAt,
+          })),
+        devEvents: counted("devEvents", () =>
           sql`SELECT * FROM dev_events ORDER BY id`.pipe(
             Effect.flatMap(Schema.decodeUnknownEffect(DevEventRows)),
             Effect.orDie
-          ),
-        devRewindSummary: (id: string) =>
+          )
+        ),
+        devRewindSummary: counted("devRewindSummary", (id: string) =>
           sql<{ id: string }>`UPDATE monitors
-            SET name = '(stale)', status = 'unknown', last_checked_at = NULL,
-                url = '', summary_revision = 0, updated_at = ${Date.now()}
+            SET name = '(stale)', status = 'unknown', url = '',
+                summary_revision = 0, updated_at = ${Date.now()}
             WHERE id = ${id}
             RETURNING id`.pipe(
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
-          ),
-        ensureAlarm: () => rearm,
-        get,
-        getFlip: (name: string) =>
+          )
+        ),
+        get: counted("get", get),
+        getFlip: counted("getFlip", (name: string) =>
           sql<{
             up: number;
           }>`SELECT up FROM dev_flips WHERE name = ${name}`.pipe(
             // Flip targets start up.
             Effect.map((rows) => (rows[0]?.up ?? 1) === 1),
             Effect.orDie
-          ),
-        list: () =>
+          )
+        ),
+        list: counted("list", () =>
           sql`SELECT * FROM monitors ORDER BY created_at, id`.pipe(
             Effect.flatMap(decodeEntries),
             Effect.orDie
-          ),
-        listChannels: () =>
+          )
+        ),
+        listChannels: counted("listChannels", () =>
           channelRows(sql`SELECT * FROM channels ORDER BY created_at, id`).pipe(
             Effect.map((rows) => rows.map(toChannelView))
-          ),
-        markDeleting,
-        missingChannels: (ids: readonly string[]) =>
+          )
+        ),
+        markDeleting: counted("markDeleting", markDeleting),
+        missingChannels: counted("missingChannels", (ids: readonly string[]) =>
           recipients(ids).pipe(
             Effect.map((found) => {
               const existing = new Set(found);
               return [...new Set(ids)].filter((id) => !existing.has(id));
             })
-          ),
-        observe,
-        openEpisodes: () => withSql(readOpenEpisodes).pipe(Effect.orDie),
-        pruneWatchdog: (before: number) => transact(pruneEpisodes(before)),
-        recipients,
-        recordDevEvent: (kind: string, detail: Schema.Json) =>
-          sql<{ id: number }>`INSERT INTO dev_events (at, kind, detail)
+          )
+        ),
+        openEpisodes: counted("openEpisodes", () =>
+          withSql(readOpenEpisodes).pipe(Effect.orDie)
+        ),
+        recipients: counted("recipients", recipients),
+        reconcile: counted("reconcile", reconcile),
+        recordDevEvent: counted(
+          "recordDevEvent",
+          (kind: string, detail: Schema.Json) =>
+            sql<{ id: number }>`INSERT INTO dev_events (at, kind, detail)
             VALUES (${Date.now()}, ${kind}, ${JSON.stringify(detail)})
             RETURNING id`.pipe(
-            Effect.map((rows) => rows[0]?.id ?? 0),
-            Effect.orDie
-          ),
-        remove: (id: string) =>
+              Effect.map((rows) => rows[0]?.id ?? 0),
+              Effect.orDie
+            )
+        ),
+        remove: counted("remove", (id: string) =>
           transact(
             Effect.gen(function* removeTx() {
               yield* closeMonitorEpisode(id, Date.now());
               yield* sql`DELETE FROM monitors WHERE id = ${id}`;
             })
-          ).pipe(Effect.andThen(rearm), Effect.asVoid),
-        setFlip,
-        setManaged: (id: string, managed: boolean) =>
+          ).pipe(Effect.andThen(rearm), Effect.asVoid)
+        ),
+        setFlip: counted("setFlip", setFlip),
+        setManaged: counted("setManaged", (id: string, managed: boolean) =>
           sql<{ id: string }>`UPDATE monitors
             SET managed = ${managed ? 1 : 0}, updated_at = ${Date.now()}
             WHERE id = ${id} AND lifecycle != 'deleting'
             RETURNING id`.pipe(
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
-          ),
-        setPublic: (id: string, isPublic: boolean) =>
+          )
+        ),
+        setPublic: counted("setPublic", (id: string, isPublic: boolean) =>
           sql<{ id: string }>`UPDATE monitors
             SET public = ${isPublic ? 1 : 0}, updated_at = ${Date.now()}
             WHERE id = ${id} AND lifecycle != 'deleting'
             RETURNING id`.pipe(
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
-          ),
-        updateChannel,
-        upsertSummary,
-        watchdogAlerts: (limit: number) =>
-          withSql(recentWatchdogAlerts(limit)).pipe(Effect.orDie),
+          )
+        ),
+        updateChannel: counted("updateChannel", updateChannel),
+        upsertSummary: counted("upsertSummary", upsertSummary),
+        watchdogAlerts: counted("watchdogAlerts", (limit: number) =>
+          withSql(recentWatchdogAlerts(limit)).pipe(Effect.orDie)
+        ),
       };
     });
   })

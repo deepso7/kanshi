@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Result from "effect/Result";
+import * as TestClock from "effect/testing/TestClock";
 
 import { isLoopbackHost } from "../../src/dev/routes.ts";
 import {
@@ -8,10 +10,20 @@ import {
   parseExpectedStatus,
 } from "../../src/domain/expected-status.ts";
 import { buildConfig, patchConfig } from "../../src/domain/monitor-input.ts";
-import type { FetchLike } from "../../src/domain/probe.ts";
-import { classifyFetchError, probe } from "../../src/domain/probe.ts";
+import {
+  classifyFetchError,
+  maxBodyBytes,
+  probe,
+} from "../../src/domain/probe.ts";
 import { overallStatus } from "../../src/domain/public-status.ts";
 import { checkTargetUrl } from "../../src/domain/url.ts";
+import {
+  answering,
+  endlessBody,
+  hanging,
+  rejecting,
+  testHttpClient,
+} from "./http-client.ts";
 
 const prod = { allowLoopback: false };
 const dev = { allowLoopback: true };
@@ -220,18 +232,6 @@ describe("monitor input", () => {
   });
 });
 
-const respond =
-  (status: number, body = "ok"): FetchLike =>
-  () =>
-    Promise.resolve(new Response(body, { status }));
-
-// Never responds; rejects when the probe's timeout signal aborts.
-const hang: FetchLike = (_url, init) =>
-  // oxlint-disable-next-line promise/avoid-new -- models a hanging fetch
-  new Promise((_resolve, reject) => {
-    init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
-  });
-
 const request = {
   bodyContains: null,
   expectedStatus: "2xx",
@@ -241,104 +241,224 @@ const request = {
 };
 
 describe("probe()", () => {
-  it.live("succeeds on an expected status", () =>
+  it.effect("succeeds on an expected status", () =>
     Effect.gen(function* probeOk() {
-      const outcome = yield* probe(request, respond(200));
+      const client = answering(200, "ok");
+      const outcome = yield* probe(request).pipe(Effect.provide(client.layer));
       assert.isTrue(outcome.ok);
       assert.strictEqual(outcome.status, 200);
-      assert.isNotNull(outcome.latencyMs);
+      assert.strictEqual(outcome.latencyMs, 0);
+      const [sent] = client.sent;
+      assert.strictEqual(sent?.request.method, "GET");
+      assert.strictEqual(sent?.request.url, "https://example.com");
+      assert.strictEqual(
+        sent?.request.headers["user-agent"],
+        "Kanshi uptime monitor"
+      );
+      assert.strictEqual(sent?.redirect, "follow");
+      // The request is released once the probe is done with it.
+      assert.isTrue(sent?.signal.aborted);
     })
   );
 
-  it.live("fails with status on an unexpected status", () =>
+  it.effect("measures latency up to the end of the body", () =>
+    Effect.gen(function* probeLatency() {
+      const client = testHttpClient(() =>
+        Effect.sleep(300).pipe(Effect.as(new Response("ok")))
+      );
+      const fiber = yield* probe(request).pipe(
+        Effect.provide(client.layer),
+        Effect.forkChild
+      );
+      yield* TestClock.adjust(300);
+      const outcome = yield* Fiber.join(fiber);
+      assert.isTrue(outcome.ok);
+      assert.strictEqual(outcome.latencyMs, 300);
+    })
+  );
+
+  it.effect("fails with status on an unexpected status", () =>
     Effect.gen(function* probeStatus() {
-      const outcome = yield* probe(request, respond(503));
+      const outcome = yield* probe(request).pipe(
+        Effect.provide(answering(503).layer)
+      );
       assert.isFalse(outcome.ok);
       assert.strictEqual(outcome.errorKind, "status");
       assert.strictEqual(outcome.status, 503);
+      assert.strictEqual(outcome.message, "expected 2xx, got 503");
     })
   );
 
-  it.live("checks the body for a keyword", () =>
+  it.effect("checks the body for a keyword", () =>
     Effect.gen(function* probeKeyword() {
-      const missing = yield* probe(
-        { ...request, bodyContains: "healthy" },
-        respond(200, "degraded")
+      const keyword = { ...request, bodyContains: "healthy" };
+      const missing = yield* probe(keyword).pipe(
+        Effect.provide(answering(200, "degraded").layer)
       );
       assert.strictEqual(missing.errorKind, "keyword");
-      const found = yield* probe(
-        { ...request, bodyContains: "healthy" },
-        respond(200, "all healthy")
+      const found = yield* probe(keyword).pipe(
+        Effect.provide(answering(200, "all healthy").layer)
       );
       assert.isTrue(found.ok);
+      // A HEAD monitor with a keyword reads the (empty) body too.
+      const head = yield* probe({ ...keyword, method: "HEAD" }).pipe(
+        Effect.provide(answering(200, null).layer)
+      );
+      assert.strictEqual(head.errorKind, "keyword");
     })
   );
 
-  it.live("only reads the first megabyte of the body", () =>
+  it.effect("does not read the body of a HEAD probe without a keyword", () =>
+    Effect.gen(function* probeHead() {
+      const endless = endlessBody(512);
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(endless.body))
+      );
+      const outcome = yield* probe({ ...request, method: "HEAD" }).pipe(
+        Effect.provide(client.layer)
+      );
+      assert.isTrue(outcome.ok);
+      assert.strictEqual(client.sent[0]?.request.method, "HEAD");
+      assert.isTrue(client.sent[0]?.signal.aborted);
+      assert.isAtMost(endless.seen.pulled, 1);
+    })
+  );
+
+  it.effect("only reads the first megabyte of the body", () =>
     Effect.gen(function* probeBounded() {
-      const big = `${"a".repeat(1024 * 1024)}needle`;
-      const outcome = yield* probe(
-        { ...request, bodyContains: "needle" },
-        respond(200, big)
+      const big = `${"a".repeat(maxBodyBytes)}needle`;
+      const outcome = yield* probe({ ...request, bodyContains: "needle" }).pipe(
+        Effect.provide(answering(200, big).layer)
       );
       assert.strictEqual(outcome.errorKind, "keyword");
     })
   );
 
-  it.live("times out", () =>
+  it.effect("stops reading an endless body after the first megabyte", () =>
+    Effect.gen(function* probeEndless() {
+      const chunkBytes = 64 * 1024;
+      const endless = endlessBody(chunkBytes);
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(endless.body))
+      );
+      const outcome = yield* probe({ ...request, bodyContains: "needle" }).pipe(
+        Effect.provide(client.layer)
+      );
+      assert.strictEqual(outcome.errorKind, "keyword");
+      assert.isTrue(endless.seen.cancelled);
+      // The stream may pull ahead a chunk or two, never much more.
+      assert.isAtMost(
+        endless.seen.pulled * chunkBytes,
+        maxBodyBytes + 3 * chunkBytes
+      );
+    })
+  );
+
+  it.effect("times out, and aborts the request", () =>
     Effect.gen(function* probeTimeout() {
-      const outcome = yield* probe({ ...request, timeoutMs: 50 }, hang);
+      const client = hanging();
+      const fiber = yield* probe({ ...request, timeoutMs: 50 }).pipe(
+        Effect.provide(client.layer),
+        Effect.forkChild
+      );
+      yield* TestClock.adjust(49);
+      assert.isUndefined(fiber.pollUnsafe());
+      yield* TestClock.adjust(1);
+      const outcome = yield* Fiber.join(fiber);
       assert.strictEqual(outcome.errorKind, "timeout");
+      assert.strictEqual(outcome.message, "no response within 50ms");
       assert.isNull(outcome.latencyMs);
+      assert.isTrue(client.sent[0]?.signal.aborted);
     })
   );
 
-  it.live("retries once when a pooled connection was lost", () =>
+  it.effect("times out on a body that stalls", () =>
+    Effect.gen(function* probeStalledBody() {
+      // Headers arrive, the body never does.
+      const stalled = new ReadableStream<Uint8Array>();
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(stalled))
+      );
+      const fiber = yield* probe({ ...request, timeoutMs: 50 }).pipe(
+        Effect.provide(client.layer),
+        Effect.forkChild
+      );
+      yield* TestClock.adjust(50);
+      const outcome = yield* Fiber.join(fiber);
+      assert.strictEqual(outcome.errorKind, "timeout");
+      assert.isTrue(client.sent[0]?.signal.aborted);
+    })
+  );
+
+  it.effect("retries once when a pooled connection was lost", () =>
     Effect.gen(function* probeRetry() {
-      let calls = 0;
-      const flaky: FetchLike = () => {
-        calls += 1;
-        return calls === 1
-          ? Promise.reject(new Error("Network connection lost."))
-          : Promise.resolve(new Response("ok"));
-      };
-      const outcome = yield* probe(request, flaky);
+      const flaky = testHttpClient(() =>
+        flaky.sent.length === 1
+          ? Effect.fail(new Error("Network connection lost."))
+          : Effect.succeed(new Response("ok"))
+      );
+      const outcome = yield* probe(request).pipe(Effect.provide(flaky.layer));
       assert.isTrue(outcome.ok);
-      assert.strictEqual(calls, 2);
+      assert.strictEqual(flaky.sent.length, 2);
 
-      let refused = 0;
-      const down: FetchLike = () => {
-        refused += 1;
-        return Promise.reject(new Error("Network connection lost."));
-      };
-      const failed = yield* probe(request, down);
+      const down = rejecting(new Error("Network connection lost."));
+      const failed = yield* probe(request).pipe(Effect.provide(down.layer));
       assert.strictEqual(failed.errorKind, "connection");
-      assert.strictEqual(refused, 2);
+      assert.strictEqual(failed.message, "Network connection lost.");
+      assert.strictEqual(down.sent.length, 2);
+
+      // Other errors are not retried.
+      const refused = rejecting(new Error("connection refused"));
+      yield* probe(request).pipe(Effect.provide(refused.layer));
+      assert.strictEqual(refused.sent.length, 1);
     })
   );
 
-  it.live("classifies transport errors", () =>
+  it.effect("classifies transport errors", () =>
     Effect.gen(function* probeErrors() {
-      const outcome = yield* probe(request, () =>
-        Promise.reject(new TypeError("Network connection lost."))
+      const outcome = yield* probe(request).pipe(
+        Effect.provide(
+          rejecting(new TypeError("Network connection lost.")).layer
+        )
       );
       assert.strictEqual(outcome.errorKind, "connection");
+      // The fetch rejection is classified, not the client's error (whose
+      // message carries the URL).
+      const unknown = yield* probe({
+        ...request,
+        url: "https://tls-dns-timeout.example.com",
+      }).pipe(Effect.provide(rejecting(new Error("boom")).layer));
+      assert.strictEqual(unknown.errorKind, "network");
+      assert.strictEqual(unknown.message, "boom");
       assert.strictEqual(
-        classifyFetchError(new Error("DNS lookup failed"), false),
+        classifyFetchError(new Error("DNS lookup failed")),
         "dns"
       );
       assert.strictEqual(
-        classifyFetchError(new Error("TLS handshake failed"), false),
+        classifyFetchError(new Error("TLS handshake failed")),
         "tls"
       );
       assert.strictEqual(
-        classifyFetchError(new Error("boom"), false),
-        "network"
-      );
-      assert.strictEqual(
-        classifyFetchError(new Error("boom"), true),
+        classifyFetchError(new Error("fetch failed", { cause: "timed out" })),
         "timeout"
       );
+      assert.strictEqual(classifyFetchError(new Error("boom")), "network");
+    })
+  );
+
+  it.effect("classifies an error that ends the body read", () =>
+    Effect.gen(function* probeBodyError() {
+      const broken = new ReadableStream<Uint8Array>({
+        pull: (controller) =>
+          controller.error(new Error("connection reset by peer")),
+      });
+      const outcome = yield* probe(request).pipe(
+        Effect.provide(
+          testHttpClient(() => Effect.succeed(new Response(broken))).layer
+        )
+      );
+      assert.strictEqual(outcome.errorKind, "connection");
+      assert.strictEqual(outcome.message, "connection reset by peer");
     })
   );
 });

@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { deliver, DeliveryResult } from "../alerts/delivery.ts";
@@ -27,11 +28,18 @@ import type {
   MonitorConfig,
   MonitorSnapshot,
   MonitorState,
+  MonitorSummary,
 } from "../domain/monitor.ts";
-import { summaryOf } from "../domain/monitor.ts";
+import {
+  owePush,
+  settlePush,
+  shouldPushSummary,
+  summaryOf,
+} from "../domain/monitor.ts";
 import { probe } from "../domain/probe.ts";
 import { Registry, registryName } from "../registry/registry.ts";
 import { openDurableSql } from "../storage/sqlite.ts";
+import { alarmRestored, isStale } from "../watchdog/rules.ts";
 import {
   Completion,
   completeCheck,
@@ -117,6 +125,12 @@ export interface MonitorStatusView {
   readonly tombstonedAt: number | null;
 }
 
+/** What the watchdog's `reconcile()` returns. */
+export interface MonitorReconcileView extends MonitorStatusView {
+  /** The alarm was lost (or late) and this call restored it. */
+  readonly alarmRestored: boolean;
+}
+
 /** Recent alert rows, for the dev inspector and tests. */
 export interface MonitorAlertsView {
   readonly notifications: readonly Notification[];
@@ -133,6 +147,20 @@ export interface MaintenanceResult {
   readonly pruned: PruneCounts;
   readonly rolledUp: readonly string[];
   readonly rolledUpThrough: string | null;
+}
+
+/**
+ * One monitor as the dashboard shows it, read live in a single call: its
+ * recent activity plus what the Registry does not keep fresh (the last
+ * check time) or may lag on (status, after a lost push).
+ */
+export interface MonitorOverview {
+  readonly lastCheckedAt: number | null;
+  readonly recent: RecentActivity;
+  /** Enabled, and not checked for longer than the watchdog allows. */
+  readonly stale: boolean;
+  /** Null when the monitor is not configured (or deleted). */
+  readonly summary: MonitorSummary | null;
 }
 
 export interface ChecksQuery {
@@ -207,6 +235,14 @@ export class Monitor extends Cloudflare.DurableObject<
       windowMs: number,
       buckets: number
     ) => Effect.Effect<RecentActivity, never, RuntimeContext>;
+    /**
+     * `recent` plus the live last check time, summary and staleness: the
+     * dashboard's one call per monitor.
+     */
+    overview: (
+      windowMs: number,
+      buckets: number
+    ) => Effect.Effect<MonitorOverview, never, RuntimeContext>;
     /** Run maintenance as of `now` whether due or not (dev hook). */
     maintain: (
       now: number
@@ -220,11 +256,16 @@ export class Monitor extends Cloudflare.DurableObject<
     ) => Effect.Effect<MonitorAlertsView, never, RuntimeContext>;
     /** Delete all data and leave a tombstone. Idempotent. */
     destroy: () => Effect.Effect<void, never, RuntimeContext>;
-    /** Recompute and set the alarm from persisted state. */
-    ensureAlarm: () => Effect.Effect<number | null, never, RuntimeContext>;
+    /**
+     * The watchdog's one call per run: recompute and set the alarm from
+     * persisted state (restoring a lost one), then report the status (the
+     * alarm, snapshot and tombstone) it decides on, and whether the alarm
+     * had to be restored.
+     */
+    reconcile: () => Effect.Effect<MonitorReconcileView, never, RuntimeContext>;
     /**
      * Dev stage: delete the alarm without touching state, as if it had been
-     * lost. Only the watchdog's `ensureAlarm()` brings it back.
+     * lost. Only the watchdog's `reconcile()` brings it back.
      */
     devClearAlarm: () => Effect.Effect<void, never, RuntimeContext>;
     alarm: (
@@ -232,6 +273,12 @@ export class Monitor extends Cloudflare.DurableObject<
     ) => Effect.Effect<void, never, RuntimeContext>;
   }
 >()("Monitor", { errors: monitorErrors }) {}
+
+/** A committed change: the snapshot before it (null if new) and after. */
+interface Change {
+  readonly after: MonitorSnapshot;
+  readonly before: MonitorSnapshot | null;
+}
 
 interface Loaded {
   readonly config: MonitorConfig | null;
@@ -279,32 +326,59 @@ export const MonitorLive = Monitor.make(
   Effect.gen(function* MonitorInit() {
     const state = yield* Cloudflare.DurableObjectState;
     const registries = yield* Registry;
+    const http = yield* HttpClient.HttpClient;
 
     const registry = () => registries.getByName(registryName);
-
-    /** Best effort: the watchdog converges summaries that fail here. */
-    const pushSummary = (config: MonitorConfig, current: MonitorState) =>
-      registries
-        .getByName(registryName)
-        .upsertSummary(
-          config.id,
-          summaryOf(config, current),
-          current.summaryRevision
-        )
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("summary push failed", cause).pipe(
-              Effect.as(false)
-            )
-          ),
-          Effect.asVoid
-        );
+    /** Probes and alert deliveries use the Worker's `HttpClient`. */
+    const withHttp = Effect.provideService(HttpClient.HttpClient, http);
 
     return Effect.gen(function* MonitorInstance() {
       const sql = yield* openDurableSql(state, migrations);
       // Serialises alarm updates so the last one written is computed from
       // the latest committed state.
       const alarmLock = yield* Semaphore.make(1);
+      // The newest summary revision whose push failed, or null; the next
+      // check retries it. Kept in memory only: after an eviction the hourly
+      // watchdog converges it.
+      let owedRevision: number | null = null;
+      // Whether the alarm handler is running (its alarm is not lost).
+      let alarmRunning = false;
+
+      /**
+       * Push the summary only when a Registry-visible field changed
+       * (`shouldPushSummary`) or an earlier push failed, so a check that
+       * changes nothing makes no Registry request. Best effort: the
+       * watchdog converges a push that keeps failing (same revision rule).
+       */
+      const pushSummary = (change: Change) => {
+        const revision = change.after.state.summaryRevision;
+        return owedRevision !== null ||
+          shouldPushSummary(change.before, change.after)
+          ? registry()
+              .upsertSummary(
+                change.after.config.id,
+                summaryOf(change.after.config, change.after.state),
+                revision
+              )
+              .pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    owedRevision = settlePush(owedRevision, revision);
+                  })
+                ),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("summary push failed", cause).pipe(
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        owedRevision = owePush(owedRevision, revision);
+                      })
+                    )
+                  )
+                ),
+                Effect.asVoid
+              )
+          : Effect.void;
+      };
 
       const withSql = <A, E>(
         effect: Effect.Effect<A, E, SqlClient.SqlClient>
@@ -317,9 +391,14 @@ export const MonitorLive = Monitor.make(
           Effect.catchTag("SqlError", Effect.die)
         );
 
-      const rearm = alarmLock
+      /**
+       * Set the alarm from persisted state; returns it, and whether this
+       * restored a lost one (`alarmRestored`).
+       */
+      const rearmReport = alarmLock
         .withPermits(1)(
           Effect.gen(function* rearmEffect() {
+            const previous = yield* state.storage.getAlarm();
             const loaded = yield* withSql(load);
             const work = yield* withSql(readAlertWork);
             const at =
@@ -334,22 +413,30 @@ export const MonitorLive = Monitor.make(
             yield* at === null
               ? state.storage.deleteAlarm()
               : state.storage.setAlarm(at);
-            return at;
+            return {
+              at,
+              restored: alarmRestored(previous, at, alarmRunning),
+            };
           })
         )
         .pipe(
           Effect.catchCause((cause) =>
             Effect.logError("failed to set the alarm", cause).pipe(
-              Effect.as(null)
+              Effect.as({ at: null, restored: false })
             )
           )
         );
 
-      /** Every mutation ends by re-arming and pushing the new summary. */
-      const afterChange = (snapshot: MonitorSnapshot) =>
+      const rearm = rearmReport.pipe(Effect.map(({ at }) => at));
+
+      /**
+       * Every mutation ends by re-arming and, if its summary changed,
+       * pushing it.
+       */
+      const afterChange = (change: Change) =>
         rearm.pipe(
-          Effect.andThen(pushSummary(snapshot.config, snapshot.state)),
-          Effect.as(snapshot)
+          Effect.andThen(pushSummary(change)),
+          Effect.as(change.after)
         );
 
       const configure = (config: MonitorConfig) =>
@@ -366,14 +453,18 @@ export const MonitorLive = Monitor.make(
                   received: config.id,
                 });
               }
-              return { config: loaded.config, state: loaded.state };
+              const current = { config: loaded.config, state: loaded.state };
+              return { after: current, before: current } satisfies Change;
             }
             const now = Date.now();
             const initial = initialState(now);
             yield* writeConfig(config);
             yield* writeState(initial);
             yield* recordPeriodChange(periodChange(null, config), now);
-            return { config, state: initial };
+            return {
+              after: { config, state: initial },
+              before: null,
+            } satisfies Change;
           })
         ).pipe(
           Effect.flatMap(afterChange),
@@ -412,7 +503,10 @@ export const MonitorLive = Monitor.make(
                 change.closeIncident.resolution
               );
             }
-            return { config: change.config, state: change.state };
+            return {
+              after: { config: change.config, state: change.state },
+              before: live,
+            } satisfies Change;
           })
         ).pipe(Effect.flatMap(afterChange), Effect.withSpan("Monitor.update"));
 
@@ -548,7 +642,10 @@ export const MonitorLive = Monitor.make(
                 `monitor ${live.config.name} is ${completion.state.status}`
               );
             }
-            return { config: live.config, state: completion.state };
+            return {
+              after: { config: live.config, state: completion.state },
+              before: live,
+            } satisfies Change;
           })
         ).pipe(Effect.orElseSucceed(() => null));
 
@@ -559,16 +656,18 @@ export const MonitorLive = Monitor.make(
         }
         // The in-flight record is committed; arm its deadline before probing.
         yield* rearm;
-        const outcome = yield* probe({
-          bodyContains: started.config.bodyContains,
-          expectedStatus: started.config.expectedStatus,
-          method: started.config.method,
-          timeoutMs: started.config.timeoutMs,
-          url: started.config.url,
-        });
+        const outcome = yield* withHttp(
+          probe({
+            bodyContains: started.config.bodyContains,
+            expectedStatus: started.config.expectedStatus,
+            method: started.config.method,
+            timeoutMs: started.config.timeoutMs,
+            url: started.config.url,
+          })
+        );
         const committed = yield* commitCheck(started.inflight, outcome);
         if (committed !== null) {
-          yield* pushSummary(committed.config, committed.state);
+          yield* pushSummary(committed);
         }
       });
 
@@ -697,26 +796,32 @@ export const MonitorLive = Monitor.make(
             );
             return;
           }
-          const result = yield* deliver(
-            alertRequest(
-              target.value.kind,
-              target.value.url,
-              incidentMessage(decision.message, {
-                idempotencyKey: idempotencyKey(
-                  entry.incidentId,
-                  entry.event,
-                  entry.channelId
-                ),
-                incident: {
-                  cause: incident.cause,
-                  id: incident.id,
-                  lastHttpStatus: incident.lastHttpStatus,
-                  resolvedAt: incident.resolvedAt,
-                  startedAt: incident.startedAt,
-                },
-                monitor: { id: config.id, name: config.name, url: config.url },
-                sentAt: Date.now(),
-              })
+          const result = yield* withHttp(
+            deliver(
+              alertRequest(
+                target.value.kind,
+                target.value.url,
+                incidentMessage(decision.message, {
+                  idempotencyKey: idempotencyKey(
+                    entry.incidentId,
+                    entry.event,
+                    entry.channelId
+                  ),
+                  incident: {
+                    cause: incident.cause,
+                    id: incident.id,
+                    lastHttpStatus: incident.lastHttpStatus,
+                    resolvedAt: incident.resolvedAt,
+                    startedAt: incident.startedAt,
+                  },
+                  monitor: {
+                    id: config.id,
+                    name: config.name,
+                    url: config.url,
+                  },
+                  sentAt: Date.now(),
+                })
+              )
             )
           );
           if (DeliveryResult.$is("Failed")(result)) {
@@ -876,8 +981,19 @@ export const MonitorLive = Monitor.make(
           })
         ).pipe(Effect.orDie);
 
+      const recent = (windowMs: number, buckets: number) => {
+        const count = Math.max(1, Math.floor(buckets));
+        const bucketMs = Math.max(1, Math.ceil(windowMs / count));
+        const since = Date.now() - bucketMs * count;
+        return withSql(readRecent(since, bucketMs)).pipe(
+          Effect.map((rows) => recentActivity(since, bucketMs, count, rows)),
+          Effect.orDie
+        );
+      };
+
       const alarm = (_info?: Cloudflare.AlarmInvocationInfo) =>
         Effect.gen(function* alarmEffect() {
+          alarmRunning = true;
           yield* logged("expire")(expireStep);
           // Checks run before delivery, which is bounded in time, so slow
           // alert channels cannot delay them.
@@ -886,7 +1002,14 @@ export const MonitorLive = Monitor.make(
           yield* logged("deliver")(deliverStep);
           yield* logged("maintain")(maintainStep);
           yield* rearm;
-        }).pipe(Effect.withSpan("Monitor.alarm"));
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              alarmRunning = false;
+            })
+          ),
+          Effect.withSpan("Monitor.alarm")
+        );
 
       return {
         alarm,
@@ -898,7 +1021,6 @@ export const MonitorLive = Monitor.make(
         destroy,
         devClearAlarm: () =>
           alarmLock.withPermits(1)(state.storage.deleteAlarm()),
-        ensureAlarm: () => rearm,
         incidents,
         maintain: (now: number) =>
           maintain(now, true).pipe(
@@ -909,15 +1031,37 @@ export const MonitorLive = Monitor.make(
             ),
             Effect.tap(() => rearm)
           ),
-        recent: (windowMs: number, buckets: number) => {
-          const count = Math.max(1, Math.floor(buckets));
-          const bucketMs = Math.max(1, Math.ceil(windowMs / count));
-          const since = Date.now() - bucketMs * count;
-          return withSql(readRecent(since, bucketMs)).pipe(
-            Effect.map((rows) => recentActivity(since, bucketMs, count, rows)),
-            Effect.orDie
-          );
-        },
+        overview: (windowMs: number, buckets: number) =>
+          Effect.gen(function* overviewEffect() {
+            const activity = yield* recent(windowMs, buckets);
+            const loaded = yield* withSql(load).pipe(Effect.orDie);
+            const live =
+              loaded.tombstonedAt === null &&
+              loaded.config !== null &&
+              loaded.state !== null
+                ? { config: loaded.config, state: loaded.state }
+                : null;
+            return {
+              lastCheckedAt: live?.state.lastCheckedAt ?? null,
+              recent: activity,
+              stale: live !== null && isStale(live, Date.now()),
+              summary:
+                live === null ? null : summaryOf(live.config, live.state),
+            } satisfies MonitorOverview;
+          }),
+        recent,
+        reconcile: () =>
+          rearmReport.pipe(
+            Effect.flatMap(({ restored }) =>
+              status().pipe(
+                Effect.map((view): MonitorReconcileView => ({
+                  ...view,
+                  alarmRestored: restored,
+                }))
+              )
+            ),
+            Effect.withSpan("Monitor.reconcile")
+          ),
         runNow,
         snapshot: () =>
           withSql(loadLive).pipe(Effect.catchTag("SqlError", Effect.die)),

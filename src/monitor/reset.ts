@@ -4,6 +4,8 @@ import type {
   MonitorConfig,
   MonitorState,
 } from "../domain/monitor.ts";
+import { reviseSummary } from "../domain/monitor.ts";
+import { revives } from "../watchdog/rules.ts";
 import type { IncidentClose } from "./cycle.ts";
 
 export interface ConfigChange {
@@ -39,6 +41,50 @@ const restartChecks = (state: MonitorState, now: number): MonitorState => ({
   successStreak: 0,
 });
 
+const resetFor = (
+  before: MonitorConfig,
+  after: MonitorConfig,
+  state: MonitorState,
+  now: number
+): ConfigChange => {
+  const nextGeneration = { ...after, generation: before.generation + 1 };
+
+  if (before.enabled && !after.enabled) {
+    return {
+      closeIncident:
+        state.openIncidentId === null
+          ? null
+          : {
+              id: state.openIncidentId,
+              resolution: "disabled",
+              resolvedAt: now,
+            },
+      config: nextGeneration,
+      state: {
+        ...restartChecks(state, now),
+        manualRequestedAt: null,
+        openIncidentId: null,
+        status: "unknown",
+      },
+    };
+  }
+  if (!before.enabled && after.enabled) {
+    return {
+      closeIncident: null,
+      config: nextGeneration,
+      state: { ...restartChecks(state, now), status: "unknown" },
+    };
+  }
+  if (isProbeAffecting(before, after)) {
+    return {
+      closeIncident: null,
+      config: nextGeneration,
+      state: restartChecks(state, now),
+    };
+  }
+  return { closeIncident: null, config: after, state };
+};
+
 /**
  * Reset rules for a configuration edit (`after` is `before` with the patch
  * applied, same generation):
@@ -58,45 +104,16 @@ export const applyConfigChange = (
   state: MonitorState,
   now: number
 ): ConfigChange => {
-  const changed = !sameValue(before, after);
-  const bumped = {
-    ...state,
-    summaryRevision: state.summaryRevision + (changed ? 1 : 0),
+  const change = resetFor(before, after, state, now);
+  // The summary revision moves only if the Registry-visible summary did,
+  // or the edit restarted the schedule of a stale monitor (`revives`).
+  const changed = { config: change.config, state: change.state };
+  return {
+    ...change,
+    state: reviseSummary(
+      { config: before, state },
+      changed,
+      revives({ config: before, state }, changed, now)
+    ),
   };
-  const nextGeneration = { ...after, generation: before.generation + 1 };
-
-  if (before.enabled && !after.enabled) {
-    return {
-      closeIncident:
-        state.openIncidentId === null
-          ? null
-          : {
-              id: state.openIncidentId,
-              resolution: "disabled",
-              resolvedAt: now,
-            },
-      config: nextGeneration,
-      state: {
-        ...restartChecks(bumped, now),
-        manualRequestedAt: null,
-        openIncidentId: null,
-        status: "unknown",
-      },
-    };
-  }
-  if (!before.enabled && after.enabled) {
-    return {
-      closeIncident: null,
-      config: nextGeneration,
-      state: { ...restartChecks(bumped, now), status: "unknown" },
-    };
-  }
-  if (isProbeAffecting(before, after)) {
-    return {
-      closeIncident: null,
-      config: nextGeneration,
-      state: restartChecks(bumped, now),
-    };
-  }
-  return { closeIncident: null, config: after, state: bumped };
 };

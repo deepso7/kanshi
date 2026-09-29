@@ -11,6 +11,7 @@ import { summaryOf } from "../../src/domain/monitor.ts";
 import type { Episode } from "../../src/domain/watchdog.ts";
 import { initialState } from "../../src/monitor/cycle.ts";
 import { InvalidMonitorInput } from "../../src/monitor/errors.ts";
+import type { MonitorOverview } from "../../src/monitor/monitor.ts";
 import type { RegistryEntry } from "../../src/registry/registry.ts";
 import type { MonitorServiceDeps } from "../../src/service/monitors.ts";
 import {
@@ -55,7 +56,7 @@ const entry: RegistryEntry = {
   summary: summaryOf(config, snapshot.state),
   summaryRevision: 0,
   updatedAt: t0,
-  watch: { episodeId: null, staleRuns: 0 },
+  watch: { episodeId: null },
 };
 
 type RegistryStub = ReturnType<MonitorServiceDeps["registries"]["getByName"]>;
@@ -162,31 +163,48 @@ const entryOf = (
   id,
   key: id,
   summary: { ...entry.summary, ...overrides, name: id },
-  watch: { episodeId, staleRuns: episodeId === null ? 0 : 2 },
+  watch: { episodeId },
 });
 
 describe(statusCounts, () => {
   it("counts a disabled monitor as paused, whatever its status", () => {
     assert.deepStrictEqual(
-      statusCounts([
-        entryOf("a", { status: "up" }),
-        entryOf("b", { status: "up" }),
-        entryOf("c", { status: "down" }),
-        entryOf("d", { enabled: false, status: "down" }),
-        entryOf("e", { status: "unknown" }),
-      ]),
+      statusCounts(
+        [
+          entryOf("a", { status: "up" }),
+          entryOf("b", { status: "up" }),
+          entryOf("c", { status: "down" }),
+          entryOf("d", { enabled: false, status: "down" }),
+          entryOf("e", { status: "unknown" }),
+        ].map((row) => row.summary)
+      ),
       { down: 1, paused: 1, unknown: 1, up: 2 }
     );
   });
 });
 
+/** A monitor's live overview: up, checked at `lastCheckedAt`. */
+const liveOf = (
+  id: string,
+  overrides: Partial<MonitorOverview> = {}
+): MonitorOverview => ({
+  lastCheckedAt: t0 + 5000,
+  recent: activity(1, 1),
+  stale: false,
+  summary: { ...entry.summary, name: id, status: "up" },
+  ...overrides,
+});
+
 describe(toOverview, () => {
-  it("lists each monitor with its flags and recent activity", () => {
+  it("lists each monitor with its flags and live values", () => {
     const recent = activity(9, 10);
     const overview = toOverview(
       [
-        { entry: entryOf("a", { status: "up" }), recent },
-        { entry: entryOf("b", { status: "down" }, "watchdog-1"), recent: null },
+        {
+          entry: entryOf("a", { status: "up" }),
+          live: liveOf("a", { recent }),
+        },
+        { entry: entryOf("b", { status: "down" }, "watchdog-1"), live: null },
       ],
       t0
     );
@@ -198,15 +216,50 @@ describe(toOverview, () => {
       up: 1,
     });
     assert.deepStrictEqual(
-      overview.monitors.map((item) => [item.id, item.notChecked, item.recent]),
+      overview.monitors.map((item) => [
+        item.id,
+        item.notChecked,
+        item.lastCheckedAt,
+        item.recent,
+      ]),
       [
-        ["a", false, recent],
-        ["b", true, null],
+        ["a", false, t0 + 5000, recent],
+        ["b", true, null, null],
       ]
     );
     assert.strictEqual(overview.monitors[0]?.name, "a");
     assert.strictEqual(overview.monitors[0]?.url, "https://example.com/");
     assert.strictEqual(overview.monitors[0]?.managed, false);
+  });
+
+  it("prefers the live summary over a Registry row that lags", () => {
+    // The Registry still says unknown (a lost push); the monitor is down.
+    const overview = toOverview(
+      [
+        {
+          entry: entryOf("a", { status: "unknown" }),
+          live: liveOf("a", {
+            summary: { ...entry.summary, name: "a", status: "down" },
+          }),
+        },
+      ],
+      t0
+    );
+    assert.strictEqual(overview.monitors[0]?.status, "down");
+    assert.deepStrictEqual(overview.counts, {
+      down: 1,
+      paused: 0,
+      unknown: 0,
+      up: 0,
+    });
+  });
+
+  it("flags a live-stale monitor before the watchdog opens an episode", () => {
+    const overview = toOverview(
+      [{ entry: entryOf("a"), live: liveOf("a", { stale: true }) }],
+      t0
+    );
+    assert.isTrue(overview.monitors[0]?.notChecked);
   });
 });
 
@@ -224,7 +277,8 @@ const episode: Episode = {
 
 /**
  * A service over fake objects for the reads: `entries` in the Registry,
- * and each monitor's `recent` from `recentOf` (tracking concurrency).
+ * and each monitor's `recent` (and `overview`, built on it) from
+ * `recentOf` (tracking concurrency).
  */
 const makeReadService = (
   entries: readonly RegistryEntry[],
@@ -239,28 +293,47 @@ const makeReadService = (
     list: () => Effect.succeed(entries),
     openEpisodes: () => Effect.succeed([episode]),
   };
-  const monitorOf = (id: string): Pick<MonitorStub, "recent" | "snapshot"> => ({
-    recent: (windowMs: number, buckets: number) =>
-      Effect.gen(function* recentStub() {
-        calls.push({ buckets, id, windowMs });
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        yield* Effect.yieldNow;
-        return yield* recentOf(id);
-      }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            inFlight -= 1;
-          })
-        )
+  const recentStub = (id: string, windowMs: number, buckets: number) =>
+    Effect.gen(function* recentStubEffect() {
+      calls.push({ buckets, id, windowMs });
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      yield* Effect.yieldNow;
+      return yield* recentOf(id);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          inFlight -= 1;
+        })
+      )
+    );
+  const monitorOf = (
+    id: string
+  ): Pick<MonitorStub, "overview" | "recent" | "snapshot"> => ({
+    overview: (windowMs: number, buckets: number) =>
+      recentStub(id, windowMs, buckets).pipe(
+        Effect.map((recent) => liveOf(id, { recent }))
       ),
+    recent: (windowMs: number, buckets: number) =>
+      recentStub(id, windowMs, buckets),
+    // "old" was created long ago and never checked (stale); the others
+    // were just created.
     snapshot: () =>
-      Effect.succeed({ ...snapshot, config: { ...config, id, key: id } }),
+      Effect.succeed({
+        ...snapshot,
+        config: {
+          ...config,
+          createdAt: id === "old" ? t0 : Date.now(),
+          id,
+          key: id,
+        },
+      }),
   });
   const service = makeMonitorService({
     devMode: false,
     // SAFETY: the reads only call `getByName` on the namespace, then
-    // `recent` and `snapshot` on the stub; this double implements those.
+    // `overview`, `recent` and `snapshot` on the stub; this double
+    // implements those.
     monitors: {
       getByName: (name: string) => monitorOf(name),
     } as MonitorServiceDeps["monitors"],
@@ -295,7 +368,9 @@ describe("monitor reads for the dashboard", () => {
         overview.monitors.find((item) => item.id === "m4")?.recent,
         activity(1, 1)
       );
-      assert.strictEqual(overview.counts.unknown, 20);
+      // Live summaries (up) for the 19 read, the Registry's for m3.
+      assert.strictEqual(overview.counts.up, 19);
+      assert.strictEqual(overview.counts.unknown, 1);
       assert.strictEqual(calls.length, 20);
       assert.deepStrictEqual(calls[0], {
         buckets: 12,
@@ -328,11 +403,13 @@ describe("monitor reads for the dashboard", () => {
   it.effect("get and list report an open watchdog episode", () =>
     Effect.gen(function* notCheckedTest() {
       const { service } = makeReadService(
-        [entryOf("m1", {}, "watchdog-1"), entryOf("m2")],
+        [entryOf("m1", {}, "watchdog-1"), entryOf("m2"), entryOf("old")],
         () => Effect.succeed(activity(1, 1))
       );
       assert.isTrue((yield* service.get("m1")).notChecked);
       assert.isFalse((yield* service.get("m2")).notChecked);
+      // No episode yet, but the live snapshot is stale.
+      assert.isTrue((yield* service.get("old")).notChecked);
       assert.deepStrictEqual(
         (yield* service.list())
           .map(service.toListItem)
@@ -340,6 +417,8 @@ describe("monitor reads for the dashboard", () => {
         [
           ["m1", true],
           ["m2", false],
+          // The list is the Registry's only: no episode, not flagged.
+          ["old", false],
         ]
       );
       assert.deepStrictEqual(yield* service.openEpisodes(), [episode]);
