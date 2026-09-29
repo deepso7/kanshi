@@ -1590,9 +1590,11 @@ page needs per row goes into the API response instead of a fetch per row.
   shares the helper.
 - **Unauthenticated bodies**: `src/http/body-limit.ts` lists the endpoints
   without auth that read a body (only `POST /api/session`, 4 KB). The
-  Worker checks the Origin (403) and the size (413: a declared
-  `content-length` over the limit unread, a chunked body read up to it)
-  before the API decodes anything. Authenticated endpoints decode only
+  Worker checks the Origin (403) and the size (413, for a declared
+  `content-length` or a chunked body) before the API decodes anything.
+  A refused body is still read and dropped (up to 1 MiB, larger ones
+  unread): an unread body closes the connection under the response and
+  the local dev gateway resets it (`ECONNRESET`), as with form posts. Authenticated endpoints decode only
   after the auth middleware. The token schema caps at 1024 characters,
   and `KANSHI_API_TOKEN` must fit.
 - **Uptime next to the bars** is over the days the bars show (90, or 60 on

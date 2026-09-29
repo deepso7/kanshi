@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 
 import {
+  discardBody,
+  drainMaxBytes,
   guardedBodyOf,
   limitBody,
   signInMaxBytes,
@@ -24,6 +26,12 @@ const chunked = (size: number, chunkSize = 512) =>
 const post = (init: RequestInit) =>
   HttpServerRequest.fromWeb(new Request(url, { method: "POST", ...init }));
 
+/** A POST and the web `Request` under it, to see whether its body was read. */
+const postWeb = (init: RequestInit) => {
+  const web = new Request(url, { method: "POST", ...init });
+  return { request: HttpServerRequest.fromWeb(web), web };
+};
+
 describe(guardedBodyOf, () => {
   it("guards the sign-in only, with or without a trailing slash", () => {
     assert.strictEqual(
@@ -38,24 +46,40 @@ describe(guardedBodyOf, () => {
 });
 
 describe(limitBody, () => {
-  it.effect("refuses a declared length over the limit unread", () =>
+  it.effect("refuses a declared length over the limit, body drained", () =>
     Effect.gen(function* declaredTest() {
-      const request = post({
+      const within = post({
         body: "x".repeat(100),
         headers: { "content-length": "100" },
       });
-      assert.isNull(yield* limitBody(request, 99));
-      assert.strictEqual(yield* limitBody(request, 100), request);
+      assert.strictEqual(yield* limitBody(within, 100), within);
+      const over = postWeb({
+        body: "x".repeat(100),
+        headers: { "content-length": "100" },
+      });
+      assert.isNull(yield* limitBody(over.request, 99));
+      assert.isTrue(over.web.bodyUsed);
     })
   );
 
-  it.effect("stops reading a chunked body at the limit", () =>
+  it.effect("refuses a chunked body over the limit, read to its end", () =>
     Effect.gen(function* chunkedTest() {
-      const request = post({
+      const { request, web } = postWeb({
         body: chunked(64 * 1024),
         duplex: "half",
       });
       assert.isUndefined(request.headers["content-length"]);
+      assert.isNull(yield* limitBody(request, signInMaxBytes));
+      assert.isTrue(web.bodyUsed);
+    })
+  );
+
+  it.effect("refuses a chunked body past the drain limit", () =>
+    Effect.gen(function* hugeTest() {
+      const request = post({
+        body: chunked(drainMaxBytes + 1, 64 * 1024),
+        duplex: "half",
+      });
       assert.isNull(yield* limitBody(request, signInMaxBytes));
     })
   );
@@ -74,6 +98,30 @@ describe(limitBody, () => {
       assert.strictEqual(limited?.headers.origin, url);
       assert.strictEqual(limited?.method, "POST");
       assert.strictEqual(limited?.url, "/api/session");
+    })
+  );
+});
+
+describe(discardBody, () => {
+  it.effect("reads a body within the drain limit", () =>
+    Effect.gen(function* drainTest() {
+      const { request, web } = postWeb({
+        body: chunked(8 * 1024),
+        duplex: "half",
+      });
+      yield* discardBody(request);
+      assert.isTrue(web.bodyUsed);
+    })
+  );
+
+  it.effect("leaves a body declared past the drain limit unread", () =>
+    Effect.gen(function* unreadTest() {
+      const { request, web } = postWeb({
+        body: "x",
+        headers: { "content-length": String(drainMaxBytes + 1) },
+      });
+      yield* discardBody(request);
+      assert.isFalse(web.bodyUsed);
     })
   );
 });

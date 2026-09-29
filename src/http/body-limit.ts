@@ -41,6 +41,14 @@ export const guardedBodyOf = (
   );
 };
 
+/**
+ * A refused body up to this size is still read (and dropped) before the
+ * refusal: answering with part of the body unread makes the connection
+ * close under the response, and the local dev gateway then resets it
+ * (`ECONNRESET`). Anything larger is refused unread.
+ */
+export const drainMaxBytes = 1024 * 1024;
+
 interface BodyRead {
   readonly chunks: readonly Uint8Array[];
   readonly size: number;
@@ -59,11 +67,50 @@ const contentLength = (
 };
 
 /**
+ * Read the whole body of `request`, keeping its chunks only while they fit
+ * in `keepBytes`; fails with `TooLarge` past `drainMaxBytes`.
+ */
+const readBody = (
+  request: HttpServerRequest.HttpServerRequest,
+  keepBytes: number
+) =>
+  request.stream.pipe(
+    Stream.runFoldEffect(
+      (): BodyRead => ({ chunks: [], size: 0 }),
+      (read, chunk) => {
+        const size = read.size + chunk.byteLength;
+        if (size > drainMaxBytes) {
+          return Effect.fail(new TooLarge());
+        }
+        return Effect.succeed({
+          chunks: size > keepBytes ? [] : [...read.chunks, chunk],
+          size,
+        });
+      }
+    )
+  );
+
+/**
+ * Read and drop the body of a request about to be refused (see
+ * `drainMaxBytes`); a body declared larger than that is left unread.
+ */
+export const discardBody = (
+  request: HttpServerRequest.HttpServerRequest
+): Effect.Effect<void> => {
+  const declared = contentLength(request);
+  if (declared !== null && declared > drainMaxBytes) {
+    return Effect.void;
+  }
+  return readBody(request, 0).pipe(Effect.ignore);
+};
+
+/**
  * `request` with its body read into memory, or null if the body is larger
  * than `maxBytes`. A declared `content-length` over the limit is refused
- * before anything is read; otherwise (a chunked body) reading stops at
- * the limit. A body that cannot be read passes through as is, for the API
- * to reject.
+ * without keeping anything; otherwise (a chunked body) the body is read
+ * to its end, kept only while within the limit. A refused body is read
+ * and dropped first (see `drainMaxBytes`). A body that cannot be read
+ * passes through as is, for the API to reject.
  */
 export const limitBody = (
   request: HttpServerRequest.HttpServerRequest,
@@ -72,19 +119,15 @@ export const limitBody = (
   const declared = contentLength(request);
   if (declared !== null) {
     // The runtime never delivers more than the declared length.
-    return Effect.succeed(declared > maxBytes ? null : request);
+    return declared > maxBytes
+      ? discardBody(request).pipe(Effect.as(null))
+      : Effect.succeed(request);
   }
-  return request.stream.pipe(
-    Stream.runFoldEffect(
-      (): BodyRead => ({ chunks: [], size: 0 }),
-      (read, chunk) => {
-        const size = read.size + chunk.byteLength;
-        return size > maxBytes
-          ? Effect.fail(new TooLarge())
-          : Effect.succeed({ chunks: [...read.chunks, chunk], size });
-      }
-    ),
+  return readBody(request, maxBytes).pipe(
     Effect.map(({ chunks, size }) => {
+      if (size > maxBytes) {
+        return null;
+      }
       const body = new Uint8Array(size);
       let offset = 0;
       for (const chunk of chunks) {
@@ -106,8 +149,8 @@ export const limitBody = (
 
 /**
  * Run `api` for `request`, first applying the guard of an endpoint that
- * reads a body without auth: 403 for another origin (before the body is
- * read), 413 for a body over its limit.
+ * reads a body without auth: 403 for another origin (the body dropped
+ * unparsed), 413 for a body over its limit.
  */
 export const guardBody = <E, R>(
   request: HttpServerRequest.HttpServerRequest,
@@ -126,6 +169,7 @@ export const guardBody = <E, R>(
       );
     }
     if (!requestIsSameOrigin(request)) {
+      yield* discardBody(request);
       return HttpServerResponse.empty({ status: 403 });
     }
     const limited = yield* limitBody(request, guard.maxBytes);
