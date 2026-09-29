@@ -1,274 +1,199 @@
-import * as Clock from "effect/Clock";
-import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
-import * as Stream from "effect/Stream";
-import type { HttpClientResponse } from "effect/unstable/http";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientError,
-  HttpClientRequest,
-} from "effect/unstable/http";
 
-import type { CheckErrorKind } from "./check-result.ts";
-import { CheckResult } from "./check-result.ts";
-import { ProbeFailed } from "./errors.ts";
-import type { MonitorMethod } from "./monitor.ts";
-import type { ValidatedProbeUrl } from "./url.ts";
-import { validateProbeUrl } from "./url.ts";
+import { matchesExpectedStatus } from "./expected-status.ts";
+import type { CheckErrorKind, MonitorMethod, ProbeOutcome } from "./monitor.ts";
 
-const maxRedirects = 3;
-const maxResponseBodyBytes = 1024 * 1024;
-const urlValidationTimeoutMs = 5000;
+export const maxBodyBytes = 1024 * 1024;
 
-export interface ProbeInput {
-  readonly allowHttp: boolean;
-  readonly checkId: string;
-  readonly expectedStatus: number;
+/** Grace period after the fetch timeout before the probe gives up itself. */
+const hardTimeoutGraceMs = 1000;
+
+export interface ProbeRequest {
+  readonly bodyContains: string | null;
+  readonly expectedStatus: string;
   readonly method: MonitorMethod;
-  readonly monitorId: string;
   readonly timeoutMs: number;
   readonly url: string;
 }
 
-class TargetProbeError extends Data.TaggedError("TargetProbeError")<{
-  readonly kind: CheckErrorKind;
-}> {}
+export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
-interface ProbeSuccess {
-  readonly latencyMs: number;
-  readonly status: number;
-}
-
-const errorMessage = (error: unknown, depth = 0): string => {
+const errorText = (cause: unknown, depth = 0): string => {
   if (depth >= 5) {
     return "";
   }
-  if (error instanceof Error) {
-    return `${error.message} ${errorMessage(error.cause, depth + 1)}`;
+  if (cause instanceof Error) {
+    return `${cause.name} ${cause.message} ${errorText(cause.cause, depth + 1)}`;
   }
-  return typeof error === "string" ? error : "";
+  return Predicate.isString(cause) ? cause : "";
 };
 
-const classifyHttpError = (error: unknown): CheckErrorKind => {
-  const message = errorMessage(error).toLowerCase();
-  if (/dns|enotfound|name not resolved|resolve host/u.test(message)) {
+/** Map a `fetch` rejection to a check error kind. */
+export const classifyFetchError = (
+  cause: unknown,
+  timedOut: boolean
+): CheckErrorKind => {
+  if (timedOut) {
+    return "timeout";
+  }
+  const text = errorText(cause).toLowerCase();
+  if (/timeout|timed out/u.test(text)) {
+    return "timeout";
+  }
+  if (/dns|enotfound|name not resolved|resolve host|getaddrinfo/u.test(text)) {
     return "dns";
   }
-  if (/certificate|handshake|ssl|tls/u.test(message)) {
+  if (/certificate|handshake|ssl|tls/u.test(text)) {
     return "tls";
   }
-  if (/connect|connection|econn|refused|reset/u.test(message)) {
+  if (/connect|connection|econn|refused|reset|unreachable/u.test(text)) {
     return "connection";
   }
   return "network";
 };
 
-const consumeBoundedBody = Effect.fn("Probe.consumeBoundedBody")(
-  function* consumeBoundedBodyEffect(
-    response: HttpClientResponse.HttpClientResponse,
-    method: MonitorMethod
-  ) {
-    if (
-      method === "HEAD" ||
-      response.status === 204 ||
-      response.status === 304
-    ) {
-      return;
-    }
+const firstLine = (cause: unknown): string =>
+  (cause instanceof Error ? cause.message : String(cause))
+    .split("\n", 1)[0]
+    ?.slice(0, 200) ?? "";
 
-    const contentLength = Number(response.headers["content-length"]);
-    if (
-      Number.isFinite(contentLength) &&
-      contentLength > maxResponseBodyBytes
-    ) {
-      return yield* new TargetProbeError({ kind: "response_too_large" });
-    }
-
-    yield* response.stream.pipe(
-      Stream.runFoldEffect(
-        () => 0,
-        (size, chunk) => {
-          const nextSize = size + chunk.byteLength;
-          return nextSize > maxResponseBodyBytes
-            ? Effect.fail(new TargetProbeError({ kind: "response_too_large" }))
-            : Effect.succeed(nextSize);
-        }
-      ),
-      Effect.catchIf(
-        (error) =>
-          HttpClientError.isHttpClientError(error) &&
-          error.reason._tag === "EmptyBodyError",
-        () => Effect.void
-      ),
-      Effect.mapError((error) =>
-        error instanceof TargetProbeError
-          ? error
-          : new TargetProbeError({ kind: classifyHttpError(error) })
-      )
-    );
+/** Read at most `limit` bytes of a body, then cancel the rest. */
+export const readBounded = async (
+  body: ReadableStream<Uint8Array> | null,
+  limit: number
+): Promise<Uint8Array> => {
+  if (body === null) {
+    return new Uint8Array(0);
   }
-);
-
-const validateTargetUrl = Effect.fn("Probe.validateTargetUrl")(
-  function* validateTargetUrlEffect(
-    input: ProbeInput,
-    url: string,
-    redirect: boolean
-  ) {
-    const result = yield* validateProbeUrl(url, {
-      allowHttp: input.allowHttp,
-    }).pipe(Effect.timeoutOption(urlValidationTimeoutMs), Effect.result);
-
-    if (Result.isFailure(result)) {
-      if (result.failure.reason === "dns_resolver_failed") {
-        return yield* new ProbeFailed({
-          cause: result.failure,
-          monitorId: input.monitorId,
-        });
-      }
-
-      const kind: CheckErrorKind =
-        result.failure.reason === "dns_lookup_failed" ||
-        result.failure.reason === "no_public_address"
-          ? "dns"
-          : "blocked";
-
-      if (redirect && kind === "blocked") {
-        yield* Effect.logWarning("Blocked unsafe probe redirect").pipe(
-          Effect.annotateLogs({
-            hostname: result.failure.hostname,
-            reason: result.failure.reason,
-          })
-        );
-      }
-
-      return yield* new TargetProbeError({ kind });
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (size < limit) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- chunks must be read in order
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
     }
-
-    if (Option.isNone(result.success)) {
-      return yield* new ProbeFailed({
-        cause: new Error("URL validation timed out"),
-        monitorId: input.monitorId,
-      });
-    }
-
-    return result.success.value;
+    const take = value.subarray(0, limit - size);
+    chunks.push(take);
+    size += take.byteLength;
   }
-);
-
-const timed = Effect.fn("Probe.timed")(function* timedEffect<A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-  remainingMs: number
-) {
-  const startedAt = yield* Clock.currentTimeMillis;
-  const result = yield* effect.pipe(
-    Effect.timeoutOption(Math.max(0, remainingMs))
-  );
-  const finishedAt = yield* Clock.currentTimeMillis;
-
-  if (Option.isNone(result)) {
-    return yield* new TargetProbeError({ kind: "timeout" });
+  await reader.cancel().catch(() => null);
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
   }
+  return out;
+};
 
-  return {
-    elapsedMs: Math.max(0, finishedAt - startedAt),
-    value: result.value,
-  };
-});
+const failure = (
+  errorKind: CheckErrorKind,
+  message: string,
+  status: number | null = null,
+  latencyMs: number | null = null
+): ProbeOutcome => ({ errorKind, latencyMs, message, ok: false, status });
 
-const request = Effect.fn("Probe.request")(function* requestEffect(
-  input: ProbeInput,
-  url: ValidatedProbeUrl,
-  redirectCount = 0,
-  elapsedMs = 0
-): Effect.fn.Return<
-  ProbeSuccess,
-  ProbeFailed | TargetProbeError,
-  HttpClient.HttpClient
-> {
-  const client = yield* HttpClient.HttpClient;
-  const execution = yield* timed(
-    HttpClientRequest.make(input.method)(url).pipe(
-      client.execute,
-      // Security invariant: the Worker runtime must provide FetchHttpClient.layer;
-      // FetchHttpClient is what honors this manual redirect setting.
-      Effect.provideService(FetchHttpClient.RequestInit, {
-        redirect: "manual",
-      }),
-      // Target URLs can contain sensitive query parameters; do not put the
-      // full URL into the HttpClient span attributes.
-      Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
-      Effect.mapError(
-        (error) => new TargetProbeError({ kind: classifyHttpError(error) })
-      )
-    ),
-    input.timeoutMs - elapsedMs
-  );
-  const totalElapsedMs = elapsedMs + execution.elapsedMs;
-  const response = execution.value;
-  const { location } = response.headers;
-
-  if (response.status >= 300 && response.status < 400 && location) {
-    if (redirectCount >= maxRedirects) {
-      return yield* new TargetProbeError({ kind: "redirect" });
-    }
-
-    const nextUrl = yield* Effect.try({
-      catch: () => new TargetProbeError({ kind: "redirect" }),
-      try: () => new URL(location, url).toString(),
-    });
-    const validatedUrl = yield* validateTargetUrl(input, nextUrl, true);
-
-    return yield* request(
-      input,
-      validatedUrl,
-      redirectCount + 1,
-      totalElapsedMs
-    );
-  }
-
-  const body = yield* timed(
-    consumeBoundedBody(response, input.method),
-    input.timeoutMs - totalElapsedMs
-  );
-  return {
-    latencyMs: totalElapsedMs + body.elapsedMs,
-    status: response.status,
-  };
-});
+/**
+ * Probe a target once. Follows redirects, times out after `timeoutMs`, reads
+ * at most 1 MB of the body (GET, or whenever `bodyContains` is set) and
+ * never fails: every problem becomes a failed {@link ProbeOutcome}.
+ */
+/**
+ * A pooled keep-alive connection closed by the target just as it was
+ * reused. Retried once, immediately: it says nothing about the target.
+ */
+const isStaleConnection = (outcome: ProbeOutcome): boolean =>
+  outcome.errorKind === "connection" &&
+  /network connection lost/iu.test(outcome.message ?? "");
 
 export const probe = Effect.fn("Probe.run")(function* probeEffect(
-  input: ProbeInput
+  request: ProbeRequest,
+  fetchImpl: FetchLike = fetch
 ) {
-  const outcome = yield* validateTargetUrl(input, input.url, false).pipe(
-    Effect.flatMap((url) => request(input, url)),
-    Effect.map((success) => ({ _tag: "Success" as const, success })),
-    Effect.catchTag("TargetProbeError", (failure) =>
-      Effect.succeed({ _tag: "Failure" as const, failure })
-    )
-  );
-  const probedAt = yield* Clock.currentTimeMillis;
+  const signal = AbortSignal.timeout(request.timeoutMs);
+  const readBody = request.method === "GET" || request.bodyContains !== null;
 
-  if (outcome._tag === "Failure") {
-    return new CheckResult({
-      checkId: input.checkId,
-      errorKind: outcome.failure.kind,
-      latencyMs: null,
-      ok: false,
-      probedAt,
-      status: null,
-    });
-  }
-
-  return new CheckResult({
-    checkId: input.checkId,
-    errorKind: null,
-    latencyMs: outcome.success.latencyMs,
-    ok: outcome.success.status === input.expectedStatus,
-    probedAt,
-    status: outcome.success.status,
+  const attempt = Effect.tryPromise({
+    catch: (cause) =>
+      failure(classifyFetchError(cause, signal.aborted), firstLine(cause)),
+    try: async () => {
+      const startedAt = Date.now();
+      const response = await fetchImpl(request.url, {
+        headers: { "user-agent": "Kanshi uptime monitor" },
+        method: request.method,
+        redirect: "follow",
+        signal,
+      });
+      if (!readBody) {
+        await response.body?.cancel().catch(() => null);
+        return {
+          body: null,
+          latencyMs: Date.now() - startedAt,
+          status: response.status,
+        };
+      }
+      const bytes = await readBounded(response.body, maxBodyBytes);
+      return {
+        body: bytes,
+        latencyMs: Date.now() - startedAt,
+        status: response.status,
+      };
+    },
   });
+
+  const result = yield* attempt.pipe(
+    Effect.retry({
+      times: 1,
+      while: (outcome) => isStaleConnection(outcome) && !signal.aborted,
+    }),
+    Effect.timeoutOption(request.timeoutMs + hardTimeoutGraceMs),
+    Effect.map(
+      Option.getOrElse(() => ({
+        body: null,
+        latencyMs: 0,
+        status: -1,
+      }))
+    ),
+    Effect.result
+  );
+
+  if (Result.isFailure(result)) {
+    return result.failure;
+  }
+  const { body, status } = result.success;
+  const latencyMs = Math.max(0, result.success.latencyMs);
+  if (status === -1) {
+    return failure("timeout", `no response within ${request.timeoutMs}ms`);
+  }
+  if (!matchesExpectedStatus(request.expectedStatus, status)) {
+    return failure(
+      "status",
+      `expected ${request.expectedStatus}, got ${status}`,
+      status,
+      latencyMs
+    );
+  }
+  if (request.bodyContains !== null) {
+    const text = new TextDecoder().decode(body ?? new Uint8Array(0));
+    if (!text.includes(request.bodyContains)) {
+      return failure(
+        "keyword",
+        "response body does not contain the expected text",
+        status,
+        latencyMs
+      );
+    }
+  }
+  return {
+    errorKind: null,
+    latencyMs,
+    message: null,
+    ok: true,
+    status,
+  } satisfies ProbeOutcome;
 });

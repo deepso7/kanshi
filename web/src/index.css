@@ -1,0 +1,31 @@
+/*
+ * Global base styles. StyleX appends its generated CSS to this file's
+ * build output (one stylesheet), so it must stay imported from main.tsx.
+ * Component styles belong in `stylex.create`, not here.
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/*
+ * The page background before (and under) the app, keyed on the
+ * `data-theme` that public/theme-init.js sets before first paint. The
+ * values are `colors.background` of the light and dark themes
+ * (src/theme/tokens.stylex.ts, src/theme/themes.ts); StyleX's variables
+ * have hashed names, so they are repeated here.
+ */
+html {
+  background-color: #ccc8b1;
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  background-color: #2f2d26;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+}

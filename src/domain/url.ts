@@ -1,53 +1,24 @@
-import * as Brand from "effect/Brand";
-import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
-import {
-  HttpClient,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/unstable/http";
+import * as Result from "effect/Result";
 
-const DnsAnswer = Schema.Struct({
-  data: Schema.String,
-  type: Schema.Int,
-});
+/**
+ * URL rules applied when a monitor target is saved. There is one trusted
+ * operator and Workers `fetch` cannot reach private networks, so hostnames
+ * are not resolved; this only rejects obviously local targets.
+ */
+export type UrlRejection =
+  | "blocked_hostname"
+  | "credentials_not_allowed"
+  | "invalid_url"
+  | "private_address"
+  | "protocol_not_allowed";
 
-const DnsResponse = Schema.Struct({
-  Answer: Schema.optionalKey(Schema.Array(DnsAnswer)),
-  Status: Schema.Int,
-});
-
-const UrlValidationReason = Schema.Literals([
-  "blocked_hostname",
-  "credentials_not_allowed",
-  "dns_lookup_failed",
-  "dns_resolver_failed",
-  "invalid_url",
-  "invalid_webhook",
-  "no_public_address",
-  "private_address",
-  "protocol_not_allowed",
-]);
-
-export class UrlValidationError extends Schema.TaggedErrorClass<UrlValidationError>()(
-  "UrlValidationError",
-  {
-    hostname: Schema.String,
-    reason: UrlValidationReason,
-  }
-) {}
-
-export interface ProbeUrlOptions {
-  readonly allowHttp?: boolean;
+export interface TargetUrlOptions {
+  /**
+   * Allow loopback targets (`localhost`, `127.0.0.1`, `[::1]`) over http or
+   * https. Only the dev stage sets this, for its `/_dev/*` fixtures.
+   */
+  readonly allowLoopback: boolean;
 }
-
-export type ValidatedProbeUrl = URL & Brand.Brand<"ValidatedProbeUrl">;
-export type ValidatedWebhookUrl = URL & Brand.Brand<"ValidatedWebhookUrl">;
-
-export type WebhookKind = "discord" | "slack";
-
-const makeValidatedProbeUrl = Brand.nominal<ValidatedProbeUrl>();
-const makeValidatedWebhookUrl = Brand.nominal<ValidatedWebhookUrl>();
 
 const localHostnameSuffixes = [
   ".home",
@@ -56,15 +27,6 @@ const localHostnameSuffixes = [
   ".local",
   ".localhost",
 ];
-
-const discordWebhookHosts = new Set([
-  "canary.discord.com",
-  "discord.com",
-  "discordapp.com",
-  "ptb.discord.com",
-]);
-
-const slackWebhookHosts = new Set(["hooks.slack-gov.com", "hooks.slack.com"]);
 
 const parseIpv4 = (hostname: string): readonly number[] | undefined => {
   const parts = hostname.split(".");
@@ -182,165 +144,87 @@ export const isPublicIpAddress = (hostname: string): boolean => {
 const isIpAddress = (hostname: string): boolean =>
   parseIpv4(hostname) !== undefined || parseIpv6(hostname) !== undefined;
 
+/** `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]`. */
+export const isLoopback = (hostname: string): boolean => {
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
+    return true;
+  }
+  const ipv4 = parseIpv4(hostname);
+  if (ipv4) {
+    return ipv4[0] === 127;
+  }
+  const ipv6 = parseIpv6(hostname);
+  return (
+    ipv6 !== undefined &&
+    ipv6.slice(0, 7).every((group) => group === 0) &&
+    ipv6[7] === 1
+  );
+};
+
 const isBlockedHostname = (hostname: string): boolean =>
   hostname === "localhost" ||
+  !hostname.includes(".") ||
   localHostnameSuffixes.some((suffix) => hostname.endsWith(suffix));
 
-const parseUrl = Effect.fn("Url.parse")(function* parseUrlEffect(
-  input: unknown
-) {
-  return yield* Schema.decodeUnknownEffect(Schema.URLFromString)(input).pipe(
-    Effect.mapError(
-      () =>
-        new UrlValidationError({
-          hostname: "",
-          reason: "invalid_url",
-        })
-    )
-  );
-});
+const hasScheme = /^[a-z][\d+.a-z-]*:/iu;
 
-const queryDns = Effect.fn("Url.queryDns")(function* queryDnsEffect(
-  hostname: string,
-  recordType: "A" | "AAAA"
-) {
-  const client = yield* HttpClient.HttpClient;
-  const response = yield* HttpClientRequest.get(
-    "https://cloudflare-dns.com/dns-query"
-  ).pipe(
-    HttpClientRequest.setUrlParams({ name: hostname, type: recordType }),
-    HttpClientRequest.accept("application/dns-json"),
-    client.execute,
-    Effect.flatMap(HttpClientResponse.filterStatusOk),
-    Effect.flatMap(HttpClientResponse.schemaBodyJson(DnsResponse)),
-    Effect.mapError(
-      () =>
-        new UrlValidationError({
-          hostname,
-          reason: "dns_resolver_failed",
-        })
-    )
-  );
-
-  if (response.Status !== 0) {
-    return yield* new UrlValidationError({
-      hostname,
-      reason: "dns_lookup_failed",
-    });
+/**
+ * Validate and normalise a probe target URL. A URL without a scheme gets
+ * `https://`. Returns the normalised URL string.
+ */
+export const checkTargetUrl = (
+  input: string,
+  options: TargetUrlOptions
+): Result.Result<string, UrlRejection> => {
+  const trimmed = input.trim();
+  const candidate = hasScheme.test(trimmed) ? trimmed : `https://${trimmed}`;
+  if (!URL.canParse(candidate)) {
+    return Result.fail("invalid_url");
   }
+  const url = new URL(candidate);
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return Result.fail("protocol_not_allowed");
+  }
+  if (url.username || url.password) {
+    return Result.fail("credentials_not_allowed");
+  }
+  const hostname = url.hostname.toLowerCase().replace(/\.$/u, "");
+  if (hostname.length === 0) {
+    return Result.fail("invalid_url");
+  }
+  if (options.allowLoopback && isLoopback(hostname)) {
+    return Result.succeed(url.toString());
+  }
+  if (isIpAddress(hostname)) {
+    return isPublicIpAddress(hostname)
+      ? Result.succeed(url.toString())
+      : Result.fail("private_address");
+  }
+  if (isBlockedHostname(hostname)) {
+    return Result.fail("blocked_hostname");
+  }
+  return Result.succeed(url.toString());
+};
 
-  const dnsType = recordType === "A" ? 1 : 28;
-  return (response.Answer ?? [])
-    .filter((answer) => answer.type === dnsType)
-    .map((answer) => answer.data);
-});
-
-const validateResolvedHostname = Effect.fn("Url.validateResolvedHostname")(
-  function* validateResolvedHostnameEffect(hostname: string) {
-    // Defense in depth only: Workers fetch re-resolves the hostname and offers no
-    // connect-to-pinned-IP primitive, so DNS rebinding cannot be fully prevented.
-    const [ipv4, ipv6] = yield* Effect.all(
-      [queryDns(hostname, "A"), queryDns(hostname, "AAAA")],
-      { concurrency: 2 }
-    );
-    const addresses = [...ipv4, ...ipv6];
-
-    if (addresses.length === 0) {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "no_public_address",
-      });
+export const describeUrlRejection = (rejection: UrlRejection): string => {
+  switch (rejection) {
+    case "blocked_hostname": {
+      return "local hostnames are not allowed";
     }
-
-    if (addresses.some((address) => !isPublicIpAddress(address))) {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "private_address",
-      });
+    case "credentials_not_allowed": {
+      return "URLs must not contain credentials";
+    }
+    case "invalid_url": {
+      return "invalid URL";
+    }
+    case "private_address": {
+      return "private and reserved IP addresses are not allowed";
+    }
+    case "protocol_not_allowed": {
+      return "only http and https URLs are allowed";
+    }
+    default: {
+      return rejection satisfies never;
     }
   }
-);
-
-export const validateProbeUrl = Effect.fn("Url.validateProbeUrl")(
-  function* validateProbeUrlEffect(
-    input: unknown,
-    options: ProbeUrlOptions = {}
-  ) {
-    const url = yield* parseUrl(input);
-    const hostname = url.hostname.toLowerCase().replace(/\.$/u, "");
-
-    if (url.username || url.password) {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "credentials_not_allowed",
-      });
-    }
-
-    if (
-      url.protocol !== "https:" &&
-      !(options.allowHttp === true && url.protocol === "http:")
-    ) {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "protocol_not_allowed",
-      });
-    }
-
-    if (isBlockedHostname(hostname)) {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "blocked_hostname",
-      });
-    }
-
-    if (isIpAddress(hostname)) {
-      if (!isPublicIpAddress(hostname)) {
-        return yield* new UrlValidationError({
-          hostname,
-          reason: "private_address",
-        });
-      }
-    } else {
-      yield* validateResolvedHostname(hostname);
-    }
-
-    return makeValidatedProbeUrl(url);
-  }
-);
-
-export const validateWebhookUrl = Effect.fn("Url.validateWebhookUrl")(
-  function* validateWebhookUrlEffect(input: unknown, kind: WebhookKind) {
-    const url = yield* parseUrl(input);
-    const hostname = url.hostname.toLowerCase().replace(/\.$/u, "");
-
-    if (url.username || url.password) {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "credentials_not_allowed",
-      });
-    }
-
-    if (url.protocol !== "https:") {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "protocol_not_allowed",
-      });
-    }
-
-    const valid =
-      kind === "slack"
-        ? slackWebhookHosts.has(hostname) &&
-          /^\/services\/[^/]+\/[^/]+\/[^/]+$/u.test(url.pathname)
-        : discordWebhookHosts.has(hostname) &&
-          /^\/api(?:\/v\d+)?\/webhooks\/\d+\/[^/]+$/u.test(url.pathname);
-
-    if (!valid || url.hash) {
-      return yield* new UrlValidationError({
-        hostname,
-        reason: "invalid_webhook",
-      });
-    }
-
-    return makeValidatedWebhookUrl(url);
-  }
-);
+};

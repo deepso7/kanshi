@@ -1,92 +1,67 @@
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
-import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
 
+import { MonitorService } from "../service/monitors.ts";
 import {
-  createChannel,
-  createMonitor,
-  getMonitor,
-  listChannels,
-  listMonitors,
-  removeChannel,
-  removeMonitor,
-  updateMonitor,
-} from "./monitors.ts";
-import { KanshiApi } from "./spec.ts";
+  KanshiApi,
+  defaultChecksLimit,
+  defaultIncidentsLimit,
+  defaultRecentBuckets,
+  defaultRecentHours,
+  defaultUptimeDays,
+} from "./spec.ts";
 
-export const MonitorsApiLive = HttpApiBuilder.group(
+/** Dev stage only: delay between `registry.begin` and `configure`. */
+export const devConfigureDelayHeader = "x-kanshi-dev-configure-delay";
+/**
+ * Dev stage only: stop after `configure`, leaving the row `creating` (a
+ * create that died before `activate`; the watchdog finishes it). The
+ * reply is the usual 201 with the configured monitor.
+ */
+export const devSkipActivateHeader = "x-kanshi-dev-skip-activate";
+
+/** The `monitors` group, over the contextual {@link MonitorService}. */
+export const MonitorsHandlers = HttpApiBuilder.group(
   KanshiApi,
   "monitors",
-  (handlers) =>
-    handlers
-      .handle("list", () => listMonitors().pipe(Effect.orDie))
-      .handle("create", ({ payload }) =>
-        Effect.gen(function* CreateMonitorHandler() {
-          const now = yield* Clock.currentTimeMillis;
-          const monitor = yield* createMonitor(payload, now);
-          return monitor ?? (yield* Effect.fail(new HttpApiError.Conflict()));
-        }).pipe(
-          Effect.catchTag("UrlValidationError", () =>
-            Effect.fail(new HttpApiError.BadRequest())
-          ),
-          Effect.catchTag("DatabaseError", Effect.die)
-        )
+  Effect.fnUntraced(function* monitorsHandlers(handlers) {
+    const service = yield* MonitorService;
+    return handlers
+      .handle("list", () =>
+        service
+          .list()
+          .pipe(Effect.map((entries) => entries.map(service.toListItem)))
       )
-      .handle("get", ({ params }) =>
-        getMonitor(params.id).pipe(
-          Effect.catchTag("MonitorNotFound", () =>
-            Effect.fail(new HttpApiError.NotFound())
-          ),
-          Effect.catchTag("DatabaseError", Effect.die)
-        )
+      .handle("create", ({ payload, request }) =>
+        service.create(payload, {
+          configureDelayMs:
+            Number(request.headers[devConfigureDelayHeader]) || 0,
+          skipActivate: request.headers[devSkipActivateHeader] === "1",
+        })
       )
+      .handle("get", ({ params }) => service.get(params.id))
       .handle("update", ({ params, payload }) =>
-        Clock.currentTimeMillis.pipe(
-          Effect.flatMap((now) => updateMonitor(params.id, payload, now)),
-          Effect.catchTag("MonitorNotFound", () =>
-            Effect.fail(new HttpApiError.NotFound())
-          ),
-          Effect.catchTag("UrlValidationError", () =>
-            Effect.fail(new HttpApiError.BadRequest())
-          ),
-          Effect.catchTag("DatabaseError", Effect.die)
-        )
+        service.update(params.id, payload)
       )
-      .handle("remove", ({ params }) =>
-        Clock.currentTimeMillis.pipe(
-          Effect.flatMap((now) => removeMonitor(params.id, now)),
-          Effect.catchTag("MonitorNotFound", () =>
-            Effect.fail(new HttpApiError.NotFound())
-          ),
-          Effect.catchTag("DatabaseError", Effect.die)
-        )
+      .handle("remove", ({ params }) => service.remove(params.id))
+      .handle("check", ({ params }) => service.check(params.id))
+      .handle("checks", ({ params, query }) =>
+        service.checks(params.id, {
+          limit: query.limit ?? defaultChecksLimit,
+          since: query.since,
+        })
       )
-      .handle("listChannels", ({ params }) =>
-        listChannels(params.id).pipe(
-          Effect.catchTag("MonitorNotFound", () =>
-            Effect.fail(new HttpApiError.NotFound())
-          ),
-          Effect.catchTag("DatabaseError", Effect.die)
-        )
+      .handle("uptime", ({ params, query }) =>
+        service.uptime(params.id, query.days ?? defaultUptimeDays)
       )
-      .handle("createChannel", ({ params, payload }) =>
-        createChannel(params.id, payload).pipe(
-          Effect.catchTag("MonitorNotFound", () =>
-            Effect.fail(new HttpApiError.NotFound())
-          ),
-          Effect.catchTag("UrlValidationError", () =>
-            Effect.fail(new HttpApiError.BadRequest())
-          ),
-          Effect.catchTag("DatabaseError", Effect.die)
-        )
+      .handle("incidents", ({ params, query }) =>
+        service.incidents(params.id, query.limit ?? defaultIncidentsLimit)
       )
-      .handle("removeChannel", ({ params }) =>
-        removeChannel(params.id, params.channelId).pipe(
-          Effect.orDie,
-          Effect.flatMap((removed) =>
-            removed ? Effect.void : Effect.fail(new HttpApiError.NotFound())
-          )
-        )
-      )
+      .handle("recent", ({ params, query }) =>
+        service.recent(params.id, {
+          buckets: query.buckets ?? defaultRecentBuckets,
+          hours: query.hours ?? defaultRecentHours,
+        })
+      );
+  })
 );
