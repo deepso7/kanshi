@@ -74,8 +74,9 @@ export default defineConfig({
 });
 ```
 
-`pnpm kanshi sync [--url <base>] [--config <path>] [--dry-run] [--adopt]`
-(`--url` defaults to `KANSHI_URL`; needs `KANSHI_API_TOKEN`):
+`pnpm kanshi sync [--url <base>] [--config <path>] [--dry-run] [--adopt]
+[--wait <seconds>]` (`--url` defaults to `KANSHI_URL`; needs
+`KANSHI_API_TOKEN`; `pnpm kanshi sync --help` lists the flags):
 
 - Resources are matched by `key`. Sync creates, updates and deletes only the
   resources it created (`managed`); anything added in the dashboard is left

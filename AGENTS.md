@@ -15,7 +15,7 @@ phase in `docs/rework-notes.md`.
 - `src/api/`: the `HttpApi` spec, auth and handlers.
 - `web/`: the SPA (Vite, React 19, StyleX, TanStack Router and Query).
 - `src/watchdog/`: the cron's rules and runner. `src/dev/`: `/_dev/*` (dev stage only).
-- `src/sync/`: `kanshi sync` (CLI in `scripts/kanshi.ts`, config via `src/config.ts`).
+- `src/sync/`: `kanshi sync` (command in `src/sync/cli.ts`, run by `scripts/kanshi.ts`; config via `src/config.ts`).
 - `alchemy.run.ts`: the stack (stage `dev` = dev mode, `prod` for deploys).
 - `test/unit/` (vitest), `test/integ/` (bun + alchemy, own stack); component tests sit next to components.
 

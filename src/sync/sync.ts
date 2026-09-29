@@ -1,6 +1,9 @@
 // `kanshi sync`: load the current resources over the API, diff them with
 // the config and apply the plan, one request at a time.
+import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import type * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -10,7 +13,6 @@ import type * as HttpClientResponse from "effect/unstable/http/HttpClientRespons
 import { MonitorListItem, MonitorResponse } from "../api/spec.ts";
 import type { KanshiConfig } from "../config.ts";
 import { ChannelView } from "../domain/channel.ts";
-import type { Environment } from "./desired.ts";
 import { resolveDesired } from "./desired.ts";
 import type {
   ChannelPatch,
@@ -38,10 +40,8 @@ export interface SyncOptions {
   readonly config: KanshiConfig;
   /** Print the plan, change nothing. */
   readonly dryRun?: boolean;
-  readonly environment: Environment;
-  /** Called with each line of output (the plan, then progress). */
-  readonly log: (line: string) => void;
-  readonly token: string;
+  /** The API token (KANSHI_API_TOKEN). */
+  readonly token: Redacted.Redacted<string> | string;
   /** Retry the first request for this long (the dev stack may be starting). */
   readonly waitSeconds?: number;
 }
@@ -53,6 +53,9 @@ export interface SyncResult {
 }
 
 const ErrorBody = Schema.Struct({ message: Schema.String });
+const decodeErrorBody = Schema.decodeUnknownOption(
+  Schema.fromJsonString(ErrorBody)
+);
 
 const failure = (
   label: string,
@@ -61,12 +64,10 @@ const failure = (
   response.text.pipe(
     Effect.orElseSucceed(() => ""),
     Effect.flatMap((text) => {
-      let detail = text;
-      try {
-        detail = Schema.decodeUnknownSync(ErrorBody)(JSON.parse(text)).message;
-      } catch {
-        // not a JSON error body; show it as is
-      }
+      // A JSON error body gives its message; anything else is shown as is.
+      const detail = decodeErrorBody(text).pipe(
+        Option.match({ onNone: () => text, onSome: ({ message }) => message })
+      );
       const suffix = detail.length > 0 ? `: ${detail}` : "";
       return Effect.fail(
         new SyncError({
@@ -249,12 +250,7 @@ const loadCurrent = (api: Api, desired: Desired, waitSeconds: number) =>
     return { channels, monitors } satisfies Current;
   });
 
-const applyPlan = (
-  api: Api,
-  plan: Plan,
-  current: Current,
-  log: (line: string) => void
-) =>
+const applyPlan = (api: Api, plan: Plan, current: Current) =>
   Effect.gen(function* applyPlanEffect() {
     const channelIds = new Map(
       current.channels.map((channel) => [channel.key, channel.id] as const)
@@ -335,7 +331,7 @@ const applyPlan = (
             })
         )
       );
-      log(`  done: ${describeStep(step)}`);
+      yield* Console.log(`  done: ${describeStep(step)}`);
     }
     return plan.steps.length;
   });
@@ -344,15 +340,16 @@ const configErrors = (errors: readonly string[]) =>
   new SyncError({ message: formatPlan({ errors, steps: [] }) });
 
 /**
- * Sync the config to the Worker at `baseUrl`: print the plan, then apply
- * it (unless `dryRun`). Fails with `SyncError` on config errors (before
- * changing anything) and on the first failed step.
+ * Sync the config to the Worker at `baseUrl`: print the plan (with
+ * `Console`), then apply it (unless `dryRun`). Channel URLs written as
+ * `env("NAME")` are read with `Config` from the current `ConfigProvider`.
+ * Fails with `SyncError` on config errors (before changing anything) and
+ * on the first failed step.
  */
 export const sync = Effect.fn("kanshi.sync")(function* syncEffect(
   options: SyncOptions
 ) {
-  const { log } = options;
-  const resolved = yield* resolveDesired(options.config, options.environment);
+  const resolved = yield* resolveDesired(options.config);
   if (resolved.errors.length > 0) {
     return yield* configErrors(resolved.errors);
   }
@@ -363,11 +360,11 @@ export const sync = Effect.fn("kanshi.sync")(function* syncEffect(
   if (plan.errors.length > 0) {
     return yield* configErrors(plan.errors);
   }
-  log(formatPlan(plan));
+  yield* Console.log(formatPlan(plan));
   if (options.dryRun === true || plan.steps.length === 0) {
     return { applied: 0, plan } satisfies SyncResult;
   }
-  const applied = yield* applyPlan(api, plan, current, log);
-  log(`Applied ${applied} change(s).`);
+  const applied = yield* applyPlan(api, plan, current);
+  yield* Console.log(`Applied ${applied} change(s).`);
   return { applied, plan } satisfies SyncResult;
 });
