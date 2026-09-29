@@ -125,6 +125,23 @@ export const isStale = (snapshot: MonitorSnapshot, now: number): boolean =>
     staleThresholdMs(snapshot.config.intervalSeconds);
 
 /**
+ * Whether a change from `before` to `after` at `now` ends a stale period:
+ * a check completing, or the schedule restarting, on a monitor that was
+ * stale. Such a change bumps the summary revision (`reviseSummary`) even
+ * when no summary field moved, and so is pushed. The watchdog reads each
+ * monitor and applies the observations later in one batch; a stale
+ * observation read before a reviving change carries the older revision,
+ * so the Registry ignores it (`watchOutcome`) instead of opening a false
+ * "not being checked" episode. Staleness only grows until such a change,
+ * so any monitor read stale is revived by its next check or restart.
+ */
+export const revives = (
+  before: MonitorSnapshot,
+  after: MonitorSnapshot,
+  now: number
+): boolean => isStale(before, now) && !isStale(after, now);
+
+/**
  * Whether re-arming restored a lost alarm: one is due (`at`) but none was
  * set, or the one set was later than due. An earlier alarm is not a loss
  * (it fires and re-arms). `alarmRunning`: the alarm handler is running, so
@@ -263,8 +280,9 @@ export interface WatchOutcome {
  * Apply an observation only while it is current. The watchdog reads the
  * monitor, then applies the whole batch later, so by then the row may be
  * gone, `deleting`, or carry a newer summary revision than the observation
- * (a disable, edit or status change pushed in between); such an
- * observation is ignored, and the next run decides on a fresh one. An
+ * (a disable, edit or status change pushed in between, or a check that
+ * revived the stale monitor, see `revives`); such an observation is
+ * ignored, and the next run decides on a fresh one. An
  * equal or older stored revision means the observation is at least as new
  * as anything the Registry knows (the caller stores its summary first).
  */

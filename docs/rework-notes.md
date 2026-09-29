@@ -1713,6 +1713,30 @@ Estimate, 10 monitors at 60s:
   the next run closes the episode.
 - The old open issue (a real cron run between the two `now = +1h` test
   runs) is gone with the counter.
+- **Decision (review round 2):** a check that completes between
+  `Monitor.reconcile()` and the batch **without changing the status** left
+  the revision alone, so `watchOutcome` could not see it and a stale read
+  opened a false episode (recovery an hour later). Rule: **a change that
+  ends a stale period bumps the summary revision** (`revives(before,
+after, now)`: stale before, not after; passed to `reviseSummary` by
+  `completeCheck` and `applyConfigChange`), so it is pushed and the batch
+  finds the Registry's revision newer than its read and ignores it. It
+  covers the first check after a gap and a probe-affecting edit (timeout,
+  method...) that restarts a stale monitor's schedule without touching the
+  summary. Staleness only grows until such a change, so any monitor read
+  stale is revived by its next completed check. Cost: one push per
+  recovery from a gap of at least 10 minutes. A monitor that stays stuck
+  completes no check, keeps its revision, and alerts on its first stale
+  run as before.
+- Rejected: "not stuck if its alarm is armed and due within a grace
+  window" (or a check is in flight). The next check time only moves when a
+  check completes, and an in-flight check's alarm is its deadline, so
+  every stale monitor whose alarm is in place is already due or in flight,
+  a wedged one included: it would never alert.
+- Left open: the check's push is sent after its commit, so a batch applied
+  in the milliseconds between them still opens the episode (the same
+  window as a disable's push; the next run resolves it). `alarmRestored`
+  stays: a restored alarm's check usually finishes after the batch.
 
 ### Dev and tests
 
@@ -1739,7 +1763,9 @@ Estimate, 10 monitors at 60s:
   not-being-checked test opens on the first stale run.
 
 Commands: `pnpm typecheck`, `pnpm check` pass; `pnpm test` 311 pass;
-`pnpm test:integ` 34 pass (about 4.4 minutes).
+`pnpm test:integ` 34 pass (about 4.4 minutes). Round 2 (`revives`): unit
+tests in `watchdog.test.ts` "checks between the watchdog's read and its
+batch"; `pnpm test` 328 pass; `pnpm test:integ` 34 pass (about 4.4 minutes).
 
 ## Lint conventions
 

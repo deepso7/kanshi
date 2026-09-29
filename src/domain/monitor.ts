@@ -176,18 +176,22 @@ export const summaryChanged = (
 /**
  * `after` with its `summaryRevision` bumped by one when the summary changed
  * from `before` (a status transition, enable/disable, or an edit of the
- * name, URL or interval), and kept otherwise. The revision is what the
- * Registry orders pushes by, so it only moves when there is something new
- * to push.
+ * name, URL or interval), or when the change `revived` a monitor the
+ * watchdog would call stale (a check or schedule restart after a long gap;
+ * see `revives`), and kept otherwise. The revision is what the Registry
+ * orders pushes and watchdog observations by, so it only moves when there
+ * is something new to push.
  */
 export const reviseSummary = (
   before: { readonly config: MonitorConfig; readonly state: MonitorState },
-  after: { readonly config: MonitorConfig; readonly state: MonitorState }
+  after: { readonly config: MonitorConfig; readonly state: MonitorState },
+  revived: boolean
 ): MonitorState => ({
   ...after.state,
   summaryRevision:
     before.state.summaryRevision +
-    (summaryChanged(
+    (revived ||
+    summaryChanged(
       summaryOf(before.config, before.state),
       summaryOf(after.config, after.state)
     )
@@ -205,8 +209,9 @@ export type MonitorSnapshot = typeof MonitorSnapshot.Type;
 /**
  * Whether the Monitor pushes its summary to the Registry after a change
  * from `before` (null: the monitor was just configured) to `after`: only
- * when the summary revision moved, i.e. a Registry-visible field changed.
- * A check that leaves the status alone does not push; a status transition,
+ * when the summary revision moved, i.e. a Registry-visible field changed or
+ * a stale monitor was revived. A check that leaves the status alone does
+ * not push (unless it ends a stale gap); a status transition,
  * enable/disable or an edit of the name, URL or interval does.
  */
 export const shouldPushSummary = (

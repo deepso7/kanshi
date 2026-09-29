@@ -5,6 +5,7 @@ import type {
   MonitorState,
 } from "../domain/monitor.ts";
 import { reviseSummary } from "../domain/monitor.ts";
+import { revives } from "../watchdog/rules.ts";
 import type { IncidentClose } from "./cycle.ts";
 
 export interface ConfigChange {
@@ -104,12 +105,15 @@ export const applyConfigChange = (
   now: number
 ): ConfigChange => {
   const change = resetFor(before, after, state, now);
-  // The summary revision moves only if the Registry-visible summary did.
+  // The summary revision moves only if the Registry-visible summary did,
+  // or the edit restarted the schedule of a stale monitor (`revives`).
+  const changed = { config: change.config, state: change.state };
   return {
     ...change,
     state: reviseSummary(
       { config: before, state },
-      { config: change.config, state: change.state }
+      changed,
+      revives({ config: before, state }, changed, now)
     ),
   };
 };

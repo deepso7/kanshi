@@ -13,9 +13,16 @@ import {
 import type {
   MonitorConfig,
   MonitorSnapshot,
+  ProbeOutcome,
 } from "../../src/domain/monitor.ts";
-import { summaryOf } from "../../src/domain/monitor.ts";
-import { initialState } from "../../src/monitor/cycle.ts";
+import { shouldPushSummary, summaryOf } from "../../src/domain/monitor.ts";
+import {
+  Completion,
+  completeCheck,
+  initialState,
+  nextAlarmAt,
+  startCheck,
+} from "../../src/monitor/cycle.ts";
 import { applyConfigChange } from "../../src/monitor/reset.ts";
 import type {
   ReconcileReport,
@@ -35,6 +42,7 @@ import {
   isStale,
   lastSignOfLife,
   needsReconcile,
+  revives,
   staleFloorMs,
   staleThresholdMs,
   WatchdogAction,
@@ -468,6 +476,136 @@ describe(watchOutcome, () => {
       }),
       { applied: true, change: "open" }
     );
+  });
+});
+
+/** A probe-affecting edit that leaves the summary alone: its revision. */
+const editTimeout = (value: MonitorSnapshot, at: number): number =>
+  applyConfigChange(
+    value.config,
+    { ...value.config, timeoutMs: 5000, updatedAt: at },
+    value.state,
+    at
+  ).state.summaryRevision;
+
+describe("checks between the watchdog's read and its batch", () => {
+  const up: ProbeOutcome = {
+    errorKind: null,
+    latencyMs: 12,
+    message: null,
+    ok: true,
+    status: 200,
+  };
+  // Up, last checked at t0, its next check overdue since t0 + 1 minute
+  // with the alarm in place (nothing restored): stale at t0 + 30 minutes.
+  const stuck: MonitorSnapshot = {
+    config,
+    state: {
+      ...snapshot({ lastCheckedAt: t0, summaryRevision: 5 }).state,
+      nextCheckAt: t0 + minute,
+      nextSlotAt: t0 + minute,
+    },
+  };
+  const readAt = t0 + 30 * minute;
+
+  /** The watchdog's read of `value`: its batch item. */
+  const read = (value: MonitorSnapshot, at = readAt) => {
+    const action = decide(row(), live(value), at);
+    if (!WatchdogAction.$is("Refresh")(action)) {
+      throw new Error("expected a refresh");
+    }
+    return { observation: action.observation, revision: action.revision };
+  };
+
+  /** A same-status check of `value` finishing at `at`. */
+  const check = (value: MonitorSnapshot, at: number) => {
+    const started = startCheck(value.config, value.state, "scheduled", "c", at);
+    const completion = completeCheck(
+      value.config,
+      started.state,
+      started.inflight,
+      up,
+      at + 100
+    );
+    if (!Completion.$is("Committed")(completion)) {
+      throw new Error("expected a committed check");
+    }
+    return { config: value.config, state: completion.state };
+  };
+
+  it("does not alert when a same-status check completes before the batch", () => {
+    const item = read(stuck);
+    assert.isTrue(item.observation.stale);
+    assert.isFalse(item.observation.alarmRestored);
+    // The overdue alarm fires right after the read; the check keeps the
+    // status (up) but revives the monitor, so it bumps and pushes.
+    const after = check(stuck, readAt + 1000);
+    assert.strictEqual(after.state.status, "up");
+    assert.strictEqual(after.state.summaryRevision, 6);
+    assert.isTrue(shouldPushSummary(stuck, after));
+    // The batch finds the pushed revision newer than its read: ignored.
+    assert.deepStrictEqual(
+      watchOutcome(watched({ summaryRevision: 6 }), item),
+      { applied: false, change: "none" }
+    );
+    // The next run (checks kept going) reads it fresh at that revision.
+    const later = {
+      ...after,
+      state: { ...after.state, lastCheckedAt: readAt + 55 * minute },
+    };
+    assert.deepStrictEqual(
+      watchOutcome(
+        watched({ summaryRevision: 6 }),
+        read(later, readAt + 60 * minute)
+      ),
+      { applied: true, change: "none" }
+    );
+  });
+
+  it("still alerts a monitor that stays stuck", () => {
+    const item = read(stuck);
+    // Its alarm is armed and already due, like every stale monitor's (the
+    // next check only moves when one completes), so "armed and due soon"
+    // cannot tell it apart from one about to be checked.
+    assert.isAtMost(nextAlarmAt(stuck.config, stuck.state) ?? 0, readAt);
+    // No check completes: the Registry still has the read revision.
+    assert.deepStrictEqual(watchOutcome(watched(), item), {
+      applied: true,
+      change: "open",
+    });
+  });
+
+  it("does not bump the revision for a same-status check of a fresh monitor", () => {
+    const fresh = check(stuck, t0 + 5 * minute);
+    assert.strictEqual(fresh.state.summaryRevision, 5);
+    assert.isFalse(shouldPushSummary(stuck, fresh));
+    // The first check after a gap bumps once; the next one does not.
+    const revived = check(stuck, readAt);
+    const following = check(revived, readAt + minute);
+    assert.strictEqual(revived.state.summaryRevision, 6);
+    assert.strictEqual(following.state.summaryRevision, 6);
+  });
+
+  it("bumps the revision when an edit restarts a stale monitor's schedule", () => {
+    // A timeout edit is probe-affecting but not in the summary.
+    assert.strictEqual(editTimeout(stuck, readAt), 6);
+    assert.strictEqual(editTimeout(stuck, t0 + 5 * minute), 5);
+  });
+
+  describe(revives, () => {
+    it("is true only when a stale monitor stops being stale", () => {
+      const checked = {
+        ...stuck,
+        state: { ...stuck.state, lastCheckedAt: readAt },
+      };
+      assert.isTrue(revives(stuck, checked, readAt));
+      // Not stale before, or still stale after.
+      assert.isFalse(revives(stuck, checked, t0 + 5 * minute));
+      assert.isFalse(revives(stuck, stuck, readAt));
+      // A disabled monitor is never stale, so enabling it revives nothing.
+      const disabled = { ...stuck, config: { ...config, enabled: false } };
+      assert.isFalse(revives(disabled, checked, readAt));
+    });
   });
 });
 

@@ -8,6 +8,7 @@ import type {
   ProbeOutcome,
 } from "../domain/monitor.ts";
 import { reviseSummary } from "../domain/monitor.ts";
+import { revives } from "../watchdog/rules.ts";
 import { nextMaintenanceTime } from "./history.ts";
 import type { Transition } from "./machine.ts";
 import { evaluate } from "./machine.ts";
@@ -312,7 +313,9 @@ const settle = (
  * in-flight record still names this check and the configuration generation
  * did not change while it ran. The summary revision moves only when the
  * status did (see `reviseSummary`), so a check that changes nothing leaves
- * the Registry's summary current and is not pushed.
+ * the Registry's summary current and is not pushed; except the first check
+ * after a stale gap (`revives`), which bumps it so a watchdog observation
+ * read before the check is recognised as out of date.
  */
 export const completeCheck = (
   config: MonitorConfig,
@@ -329,7 +332,8 @@ export const completeCheck = (
         openIncident: completion.openIncident,
         state: reviseSummary(
           { config, state },
-          { config, state: completion.state }
+          { config, state: completion.state },
+          revives({ config, state }, { config, state: completion.state }, now)
         ),
         transition: completion.transition,
       })
