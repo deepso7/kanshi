@@ -5,10 +5,10 @@ import type {
   MonitorState,
   ProbeOutcome,
 } from "../../src/domain/monitor.ts";
-import type { Completion } from "../../src/monitor/cycle.ts";
 import {
   alignSlot,
   completeCheck,
+  Completion,
   confirmDelayMs,
   dueCheck,
   expireInflight,
@@ -61,7 +61,7 @@ const down: ProbeOutcome = {
 
 const committed = (completion: Completion) => {
   assert.strictEqual(completion._tag, "Committed");
-  if (completion._tag !== "Committed") {
+  if (!Completion.$is("Committed")(completion)) {
     throw new Error("expected a committed result");
   }
   return completion;
@@ -230,15 +230,15 @@ describe("check cycle", () => {
       t0 + 50
     );
     assert.isNull(edited.state.inflight);
-    assert.strictEqual(
+    assert.deepStrictEqual(
       completeCheck(
         edited.config,
         edited.state,
         started.inflight,
         down,
         t0 + 100
-      )._tag,
-      "Stale"
+      ),
+      Completion.Stale()
     );
     // A newer check started under the new generation is also not ours.
     const newer = startCheck(
@@ -248,15 +248,15 @@ describe("check cycle", () => {
       "c-new",
       t0 + 60
     );
-    assert.strictEqual(
+    assert.deepStrictEqual(
       completeCheck(
         edited.config,
         newer.state,
         started.inflight,
         down,
         t0 + 100
-      )._tag,
-      "Stale"
+      ),
+      Completion.Stale()
     );
     assert.strictEqual(
       completeCheck(edited.config, newer.state, newer.inflight, up, t0 + 100)
@@ -279,9 +279,9 @@ describe("check cycle", () => {
     }
     // The lost probe cannot commit afterwards.
     if (expired !== null) {
-      assert.strictEqual(
-        completeCheck(config, expired, started.inflight, up, deadline + 1)._tag,
-        "Stale"
+      assert.deepStrictEqual(
+        completeCheck(config, expired, started.inflight, up, deadline + 1),
+        Completion.Stale()
       );
     }
   });

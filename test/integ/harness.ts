@@ -9,13 +9,16 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Test from "alchemy/Test/Bun";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
-import type { MonitorResponse } from "../../src/api/spec.ts";
-import type { MonitorStatusView } from "../../src/monitor/monitor.ts";
-import type { CheckRow, IncidentRow } from "../../src/monitor/storage.ts";
-import type { RegistryEntry } from "../../src/registry/registry.ts";
+import { MonitorResponse } from "../../src/api/spec.ts";
+import { Notification, OutboxEntry } from "../../src/domain/alert.ts";
+import { Check, IncidentWithAlerts } from "../../src/domain/history.ts";
+import type { MonitorCreateInput } from "../../src/domain/monitor-input.ts";
+import { MonitorSnapshot, MonitorSummary } from "../../src/domain/monitor.ts";
+import { Lifecycle } from "../../src/registry/registry.ts";
 import Stack, { apiToken } from "./alchemy.run.ts";
 
 export type Method = "DELETE" | "GET" | "PATCH" | "POST";
@@ -32,14 +35,84 @@ export interface RawReply {
   readonly text: string;
 }
 
-export interface Detail {
-  readonly checks: readonly CheckRow[];
-  readonly incidents: readonly IncidentRow[];
-  readonly status: MonitorStatusView;
-}
+/** Decode a reply's JSON body with `schema`. */
+export const bodyOf =
+  <S extends Schema.ConstraintDecoder<unknown>>(schema: S) =>
+  (reply: Reply) =>
+    Schema.decodeUnknownEffect(schema)(reply.body);
+
+/** `MonitorStatusView`, as the dev inspector returns it. */
+const MonitorStatusView = Schema.Struct({
+  alarmAt: Schema.NullOr(Schema.Number),
+  snapshot: Schema.NullOr(MonitorSnapshot),
+  tombstonedAt: Schema.NullOr(Schema.Number),
+});
+
+/** `MonitorAlertsView`, as the dev inspector returns it. */
+const MonitorAlertsView = Schema.Struct({
+  notifications: Schema.Array(Notification),
+  outbox: Schema.Array(OutboxEntry),
+  recipients: Schema.Array(
+    Schema.Struct({ channelId: Schema.String, incidentId: Schema.String })
+  ),
+});
+
+/** `GET /_dev/monitors/:id`: a monitor's status, alert rows and history. */
+export const Detail = Schema.Struct({
+  alerts: MonitorAlertsView,
+  checks: Schema.Array(Check),
+  incidents: Schema.Array(IncidentWithAlerts),
+  status: MonitorStatusView,
+});
+export type Detail = typeof Detail.Type;
+
+/** `RegistryEntry`, as `GET /_dev/registry` returns it. */
+const RegistryEntry = Schema.Struct({
+  createdAt: Schema.Number,
+  id: Schema.String,
+  key: Schema.String,
+  lifecycle: Lifecycle,
+  managed: Schema.Boolean,
+  opId: Schema.String,
+  public: Schema.Boolean,
+  summary: MonitorSummary,
+  summaryRevision: Schema.Number,
+  updatedAt: Schema.Number,
+  watch: Schema.Struct({
+    episodeId: Schema.NullOr(Schema.String),
+    staleRuns: Schema.Number,
+  }),
+});
+
+/** A `/_dev/events` row for a request the `/_dev/webhook` sink received. */
+export const SinkEvent = Schema.Struct({
+  at: Schema.Number,
+  detail: Schema.Struct({
+    body: Schema.String,
+    idempotencyKey: Schema.NullOr(Schema.String),
+    query: Schema.String,
+    respondedWith: Schema.Number,
+  }),
+  id: Schema.Number,
+});
+export type SinkEvent = typeof SinkEvent.Type;
+
+/** The generic webhook alert body (`WebhookPayload`), as the sink got it. */
+export const WebhookAlert = Schema.fromJsonString(
+  Schema.Struct({
+    event: Schema.Literals(["checked", "down", "not_checked", "test", "up"]),
+    id: Schema.String,
+    monitor: Schema.NullOr(Schema.Struct({ id: Schema.String })),
+    recovered: Schema.Boolean,
+    title: Schema.String,
+  })
+);
+
+/** `{ message }`: an API error body. */
+export const ErrorBody = Schema.Struct({ message: Schema.String });
 
 /** Checks oldest first. */
-export const checksOf = (value: Detail): readonly CheckRow[] =>
+export const checksOf = (value: Detail): readonly Check[] =>
   value.checks.toReversed();
 
 export const statusOf = (value: Detail) => value.status.snapshot?.state.status;
@@ -90,18 +163,27 @@ export const setup = (stage: string) => {
     const client = yield* HttpClient.HttpClient;
     const auth = options.auth === undefined ? apiToken : options.auth;
     let request = HttpClientRequest.make(method)(`${url}${path}`).pipe(
-      HttpClientRequest.setHeaders({
-        ...options.headers,
-        ...(auth === null ? {} : { authorization: `Bearer ${auth}` }),
-      })
+      HttpClientRequest.setHeaders({ ...options.headers })
     );
+    if (auth !== null) {
+      request = HttpClientRequest.setHeader(
+        request,
+        "authorization",
+        `Bearer ${auth}`
+      );
+    }
     if (options.body !== undefined) {
       request = HttpClientRequest.bodyJsonUnsafe(request, options.body);
     }
     const response = yield* client.execute(request);
     const text = yield* response.text;
     return {
-      body: text.length > 0 ? (JSON.parse(text) as unknown) : null,
+      body:
+        text.length > 0
+          ? yield* Schema.decodeUnknownEffect(
+              Schema.fromJsonString(Schema.Unknown)
+            )(text)
+          : null,
       status: response.status,
     } satisfies Reply;
   });
@@ -119,18 +201,20 @@ export const setup = (stage: string) => {
     } = {}
   ) {
     const { url } = yield* stack;
+    const headers = new Headers();
+    if (options.form !== undefined) {
+      headers.set("content-type", "application/x-www-form-urlencoded");
+    }
+    for (const [name, value] of Object.entries(options.headers ?? {})) {
+      headers.set(name, value);
+    }
     const response = yield* Effect.promise(() =>
       fetch(`${url}${path}`, {
         body:
           options.form === undefined
             ? undefined
             : new URLSearchParams(options.form).toString(),
-        headers: {
-          ...(options.form === undefined
-            ? {}
-            : { "content-type": "application/x-www-form-urlencoded" }),
-          ...options.headers,
-        },
+        headers,
         method,
         redirect: "manual",
       })
@@ -143,23 +227,21 @@ export const setup = (stage: string) => {
     } satisfies RawReply;
   });
 
-  const detail = <D extends Detail = Detail>(id: string) =>
-    send("GET", `/_dev/monitors/${id}`).pipe(
-      Effect.map((reply) => reply.body as D)
-    );
+  const detail = (id: string) =>
+    send("GET", `/_dev/monitors/${id}`).pipe(Effect.flatMap(bodyOf(Detail)));
 
   const registryRows = send("GET", "/_dev/registry").pipe(
-    Effect.map((reply) => reply.body as readonly RegistryEntry[])
+    Effect.flatMap(bodyOf(Schema.Array(RegistryEntry)))
   );
 
   const create = Effect.fn("Test.create")(function* createMonitor(
-    body: Record<string, unknown>
+    body: Partial<typeof MonitorCreateInput.Encoded>
   ) {
     const reply = yield* send("POST", "/api/monitors", {
       body: { name: "integration", ...body },
     });
     expect(reply.status).toBe(201);
-    return reply.body as MonitorResponse;
+    return yield* bodyOf(MonitorResponse)(reply);
   });
 
   const devUrl = (path: string) =>

@@ -6,10 +6,18 @@ import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
 
-import type { MonitorResponse } from "../../src/api/spec.ts";
+import { MonitorListItem, MonitorResponse } from "../../src/api/spec.ts";
 import { monitorQuota } from "./alchemy.run.ts";
-import { checksOf, setup, statusOf, waitFor } from "./harness.ts";
+import {
+  ErrorBody,
+  bodyOf,
+  checksOf,
+  setup,
+  statusOf,
+  waitFor,
+} from "./harness.ts";
 
 const { create, detail, devUrl, registryRows, send, setFlip, test } =
   setup("integ");
@@ -122,10 +130,13 @@ test(
     expect(recovered.incidents[0]?.resolution).toBe("recovered");
 
     // The Registry summary follows the monitor.
-    yield* waitFor("summary", send("GET", "/api/monitors"), (reply) =>
-      (reply.body as readonly { id: string; status: string }[]).some(
-        (item) => item.id === monitor.id && item.status === "up"
-      )
+    yield* waitFor(
+      "summary",
+      send("GET", "/api/monitors").pipe(
+        Effect.flatMap(bodyOf(Schema.Array(MonitorListItem)))
+      ),
+      (items) =>
+        items.some((item) => item.id === monitor.id && item.status === "up")
     );
     yield* send("DELETE", `/api/monitors/${monitor.id}`);
   }),
@@ -145,7 +156,7 @@ test(
       body: { enabled: false },
     });
     expect(disabled.status).toBe(200);
-    const disabledBody = disabled.body as MonitorResponse;
+    const disabledBody = yield* bodyOf(MonitorResponse)(disabled);
     expect(disabledBody.enabled).toBe(false);
     expect(disabledBody.state.status).toBe("unknown");
     expect(disabledBody.generation).toBe(1);
@@ -220,7 +231,7 @@ test(
       body: { url: yield* devUrl("/target") },
     });
     expect(edited.status).toBe(200);
-    expect((edited.body as MonitorResponse).generation).toBe(1);
+    expect((yield* bodyOf(MonitorResponse)(edited)).generation).toBe(1);
 
     yield* waitFor("checked", detail(monitor.id), (d) => d.checks.length > 0);
     // Let the stale 3s probe finish.
@@ -328,7 +339,7 @@ test(
       body: { enabled: false, name: "over", url },
     });
     expect(over.status).toBe(409);
-    expect((over.body as { message: string }).message).toContain("quota");
+    expect((yield* bodyOf(ErrorBody)(over)).message).toContain("quota");
 
     for (const id of created) {
       expect((yield* send("DELETE", `/api/monitors/${id}`)).status).toBe(204);

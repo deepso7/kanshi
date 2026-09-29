@@ -239,7 +239,7 @@ const request = {
   url: "https://example.com",
 };
 
-describe("probe", () => {
+describe("probe()", () => {
   it.live("succeeds on an expected status", () =>
     Effect.gen(function* probeOk() {
       const outcome = yield* probe(request, respond(200));

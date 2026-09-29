@@ -6,41 +6,36 @@
 import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
-import type { MonitorListItem, MonitorResponse } from "../../src/api/spec.ts";
+import { MonitorListItem, MonitorResponse } from "../../src/api/spec.ts";
 import type { KanshiConfig } from "../../src/config.ts";
 import { env } from "../../src/config.ts";
-import type { ChannelView } from "../../src/domain/channel.ts";
-import { hashUrl } from "../../src/domain/channel.ts";
-import type { Step } from "../../src/sync/plan.ts";
+import { ChannelView, hashUrl } from "../../src/domain/channel.ts";
+import { Step } from "../../src/sync/plan.ts";
 import type { SyncOptions } from "../../src/sync/sync.ts";
 import { sync } from "../../src/sync/sync.ts";
 import { apiToken } from "./alchemy.run.ts";
-import { setup } from "./harness.ts";
+import { bodyOf, setup } from "./harness.ts";
 
 const { create, send, stack, test } = setup("integ-sync");
 
 const baseUrl = stack.pipe(Effect.map(({ url }) => url));
 
 const describeSteps = (steps: readonly Step[]) =>
-  steps.map((step) => {
-    switch (step._tag) {
-      case "CreateChannel": {
-        return `${step._tag} ${step.channel.key}`;
-      }
-      case "CreateMonitor": {
-        return `${step._tag} ${step.monitor.key}`;
-      }
-      case "UpdateChannel":
-      case "UpdateMonitor": {
-        return `${step._tag} ${step.key}: ${step.changes.join(",")}`;
-      }
-      default: {
-        return `${step._tag} ${step.key}`;
-      }
-    }
-  });
+  steps.map((step) =>
+    Step.$match(step, {
+      CreateChannel: ({ _tag, channel }) => `${_tag} ${channel.key}`,
+      CreateMonitor: ({ _tag, monitor }) => `${_tag} ${monitor.key}`,
+      DeleteChannel: ({ _tag, key }) => `${_tag} ${key}`,
+      DeleteMonitor: ({ _tag, key }) => `${_tag} ${key}`,
+      UpdateChannel: ({ _tag, changes, key }) =>
+        `${_tag} ${key}: ${changes.join(",")}`,
+      UpdateMonitor: ({ _tag, changes, key }) =>
+        `${_tag} ${key}: ${changes.join(",")}`,
+    })
+  );
 
 const runSync = (
   config: KanshiConfig,
@@ -49,37 +44,25 @@ const runSync = (
   Effect.gen(function* runSyncEffect() {
     const url = yield* baseUrl;
     const result = yield* sync({
+      adopt: options.adopt,
       baseUrl: url,
       config,
+      dryRun: options.dryRun,
       environment: options.environment ?? {},
       log: () => {},
       token: apiToken,
-      ...(options.adopt === undefined ? {} : { adopt: options.adopt }),
-      ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
     }).pipe(Effect.provide(FetchHttpClient.layer));
     return { ...result, steps: describeSteps(result.plan.steps) };
   });
 
 const monitorsByKey = send("GET", "/api/monitors").pipe(
-  Effect.map(
-    (reply) =>
-      new Map(
-        (reply.body as readonly MonitorListItem[]).map(
-          (item) => [item.key, item] as const
-        )
-      )
-  )
+  Effect.flatMap(bodyOf(Schema.Array(MonitorListItem))),
+  Effect.map((items) => new Map(items.map((item) => [item.key, item] as const)))
 );
 
 const channelsByKey = send("GET", "/api/channels").pipe(
-  Effect.map(
-    (reply) =>
-      new Map(
-        (reply.body as readonly ChannelView[]).map(
-          (item) => [item.key, item] as const
-        )
-      )
-  )
+  Effect.flatMap(bodyOf(Schema.Array(ChannelView))),
+  Effect.map((items) => new Map(items.map((item) => [item.key, item] as const)))
 );
 
 const monitorByKey = (key: string) =>
@@ -88,7 +71,7 @@ const monitorByKey = (key: string) =>
     expect(item).toBeDefined();
     const reply = yield* send("GET", `/api/monitors/${item?.id}`);
     expect(reply.status).toBe(200);
-    return reply.body as MonitorResponse;
+    return yield* bodyOf(MonitorResponse)(reply);
   });
 
 test(

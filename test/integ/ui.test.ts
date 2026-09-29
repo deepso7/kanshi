@@ -6,9 +6,10 @@ import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
 
-import type { PublicStatus } from "../../src/domain/public-status.ts";
+import { MonitorResponse } from "../../src/api/spec.ts";
+import { PublicStatus } from "../../src/domain/public-status.ts";
 import { apiToken } from "./alchemy.run.ts";
-import { setup } from "./harness.ts";
+import { bodyOf, setup } from "./harness.ts";
 
 const { create, raw, registryRows, send, stack, test } = setup("integ-ui");
 
@@ -31,9 +32,9 @@ const signIn = Effect.gen(function* signInEffect() {
 });
 
 const publicStatus = send("GET", "/api/public/status", { auth: null }).pipe(
-  Effect.map((reply) => {
+  Effect.flatMap((reply) => {
     expect(reply.status).toBe(200);
-    return reply.body as PublicStatus;
+    return bodyOf(PublicStatus)(reply);
   })
 );
 
@@ -136,7 +137,7 @@ test(
       headers: { cookie, origin: own },
     });
     expect(sameOrigin.status).toBe(201);
-    const { id } = sameOrigin.body as { readonly id: string };
+    const { id } = yield* bodyOf(MonitorResponse)(sameOrigin);
     expect((yield* send("DELETE", `/api/monitors/${id}`)).status).toBe(204);
 
     // A forged or tampered cookie is worth nothing.
@@ -243,7 +244,7 @@ test(
       body: { public: false },
     });
     expect(patched.status).toBe(200);
-    expect((patched.body as { readonly public: boolean }).public).toBe(false);
+    expect((yield* bodyOf(MonitorResponse)(patched)).public).toBe(false);
     expect(yield* publicNames).not.toContain(name);
     expect(yield* statusHtml).not.toContain(name);
 

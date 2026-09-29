@@ -4,39 +4,30 @@
 import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
-import type { ChannelTestResult } from "../../src/api/spec.ts";
-import type { ChannelView } from "../../src/domain/channel.ts";
-import type { MonitorAlertsView } from "../../src/monitor/monitor.ts";
-import type { Detail } from "./harness.ts";
-import { setup, statusOf, waitFor } from "./harness.ts";
+import { ChannelTestResult } from "../../src/api/spec.ts";
+import type { ChannelCreateInput } from "../../src/domain/channel.ts";
+import { ChannelView } from "../../src/domain/channel.ts";
+import {
+  ErrorBody,
+  SinkEvent,
+  WebhookAlert,
+  bodyOf,
+  setup,
+  statusOf,
+  waitFor,
+} from "./harness.ts";
 
 const { create, detail, devUrl, send, setFlip, test } = setup("integ-alerts");
-
-interface AlertDetail extends Detail {
-  readonly alerts: MonitorAlertsView;
-}
-
-const alertDetail = (id: string) => detail<AlertDetail>(id);
 
 /** A sink URL whose events can be told apart by `tag`. */
 const sinkUrl = (tag: string, query = "") =>
   devUrl(`/webhook?tag=${tag}${query}`);
 
-interface SinkEvent {
-  readonly at: number;
-  readonly detail: {
-    readonly body: string;
-    readonly idempotencyKey: string | null;
-    readonly query: string;
-    readonly respondedWith: number;
-  };
-  readonly id: number;
-}
-
 /** A webhook alert as received by the sink. */
 interface Received {
-  readonly event: "down" | "test" | "up";
+  readonly event: (typeof WebhookAlert.Type)["event"];
   readonly id: string;
   readonly idempotencyKey: string | null;
   readonly recovered: boolean;
@@ -47,36 +38,39 @@ interface Received {
 /** Webhook alerts the sink received for `tag`, oldest first. */
 const received = (tag: string) =>
   send("GET", "/_dev/events").pipe(
-    Effect.map((reply) =>
-      (reply.body as readonly SinkEvent[])
-        .filter((event) =>
-          new URLSearchParams(event.detail.query).getAll("tag").includes(tag)
+    Effect.flatMap(bodyOf(Schema.Array(SinkEvent))),
+    Effect.map((events) =>
+      events.filter((event) =>
+        new URLSearchParams(event.detail.query).getAll("tag").includes(tag)
+      )
+    ),
+    Effect.flatMap(
+      Effect.forEach((event) =>
+        Schema.decodeUnknownEffect(WebhookAlert)(event.detail.body).pipe(
+          Effect.map(
+            (body) =>
+              ({
+                event: body.event,
+                id: body.id,
+                idempotencyKey: event.detail.idempotencyKey,
+                recovered: body.recovered,
+                respondedWith: event.detail.respondedWith,
+                title: body.title,
+              }) satisfies Received
+          )
         )
-        .map((event) => {
-          const body = JSON.parse(event.detail.body) as Omit<
-            Received,
-            "idempotencyKey" | "respondedWith"
-          >;
-          return {
-            event: body.event,
-            id: body.id,
-            idempotencyKey: event.detail.idempotencyKey,
-            recovered: body.recovered,
-            respondedWith: event.detail.respondedWith,
-            title: body.title,
-          } satisfies Received;
-        })
+      )
     )
   );
 
 const createChannel = Effect.fn("Test.createChannel")(function* createChannel(
-  body: Record<string, unknown>
+  body: Partial<typeof ChannelCreateInput.Encoded>
 ) {
   const reply = yield* send("POST", "/api/channels", {
     body: { kind: "webhook", name: "integration channel", ...body },
   });
   expect(reply.status).toBe(201);
-  return reply.body as ChannelView;
+  return yield* bodyOf(ChannelView)(reply);
 });
 
 test(
@@ -95,7 +89,9 @@ test(
     expect(listed.status).toBe(200);
     expect(JSON.stringify(listed.body)).not.toContain(secret);
     expect(
-      (listed.body as readonly ChannelView[]).some((c) => c.id === channel.id)
+      (yield* bodyOf(Schema.Array(ChannelView))(listed)).some(
+        (c) => c.id === channel.id
+      )
     ).toBe(true);
 
     // The URL is replaceable; the new one is not readable either.
@@ -105,7 +101,7 @@ test(
     });
     expect(patched.status).toBe(200);
     expect(JSON.stringify(patched.body)).not.toContain(secret);
-    const patchedView = patched.body as ChannelView;
+    const patchedView = yield* bodyOf(ChannelView)(patched);
     expect(patchedView.name).toBe("renamed");
     expect(patchedView.urlHash).not.toBe(hash);
 
@@ -126,7 +122,7 @@ test(
       },
     });
     expect(unknownChannel.status).toBe(400);
-    expect((unknownChannel.body as { message: string }).message).toContain(
+    expect((yield* bodyOf(ErrorBody)(unknownChannel)).message).toContain(
       "missing-channel"
     );
     const monitor = yield* create({
@@ -163,7 +159,7 @@ test(
     const channel = yield* createChannel({ url: yield* sinkUrl(tag) });
     const reply = yield* send("POST", `/api/channels/${channel.id}/test`);
     expect(reply.status).toBe(200);
-    expect(reply.body as ChannelTestResult).toEqual({
+    expect(yield* bodyOf(ChannelTestResult)(reply)).toEqual({
       delivered: true,
       error: null,
       status: 200,
@@ -180,7 +176,7 @@ test(
     });
     const failed = yield* send("POST", `/api/channels/${failing.id}/test`);
     expect(failed.status).toBe(200);
-    expect(failed.body as ChannelTestResult).toEqual({
+    expect(yield* bodyOf(ChannelTestResult)(failed)).toEqual({
       delivered: false,
       error: "HTTP 503: failed",
       status: 503,
@@ -222,7 +218,7 @@ test(
       received(tag),
       (events) => events.length === 1
     );
-    const [incident] = (yield* alertDetail(monitor.id)).incidents;
+    const [incident] = (yield* detail(monitor.id)).incidents;
     const incidentId = incident?.id ?? "";
     expect(down?.event).toBe("down");
     expect(down?.recovered).toBe(false);
@@ -240,7 +236,7 @@ test(
     expect(up?.id).toBe(`${incidentId}:up:${channel.id}`);
     expect(up?.title).toStartWith("integration is up again after");
 
-    const after = yield* alertDetail(monitor.id);
+    const after = yield* detail(monitor.id);
     expect(
       after.alerts.outbox.map((row) => [row.event, row.state, row.attempts])
     ).toEqual([
@@ -277,7 +273,7 @@ test(
     expect(first?.respondedWith).toBe(500);
     const pending = yield* waitFor(
       "attempt recorded",
-      alertDetail(monitor.id),
+      detail(monitor.id),
       (d) => d.alerts.outbox[0]?.attempts === 1
     );
     const [row] = pending.alerts.outbox;
@@ -306,7 +302,7 @@ test(
     expect(retried?.recovered).toBe(true);
     expect(retried?.title).toContain("was down for");
 
-    const after = yield* waitFor("up skipped", alertDetail(monitor.id), (d) =>
+    const after = yield* waitFor("up skipped", detail(monitor.id), (d) =>
       d.alerts.outbox.some((r) => r.event === "up" && r.state === "skipped")
     );
     expect(
@@ -335,11 +331,11 @@ test(
     yield* setFlip(flip, false);
     yield* waitFor(
       "down failed",
-      alertDetail(monitor.id),
+      detail(monitor.id),
       (d) => d.alerts.outbox[0]?.state === "failed"
     );
     yield* setFlip(flip, true);
-    const after = yield* waitFor("up skipped", alertDetail(monitor.id), (d) =>
+    const after = yield* waitFor("up skipped", detail(monitor.id), (d) =>
       d.alerts.outbox.some((r) => r.event === "up" && r.state === "skipped")
     );
     expect(after.alerts.outbox.map((r) => [r.event, r.state])).toEqual([
@@ -378,7 +374,7 @@ test(
     expect(events.map((event) => event.event)).toEqual(["down", "up"]);
     yield* Effect.sleep("3 seconds");
     expect(yield* received(tagB)).toHaveLength(0);
-    const after = yield* alertDetail(monitor.id);
+    const after = yield* detail(monitor.id);
     expect(after.alerts.recipients.map((r) => r.channelId)).toEqual([
       channelA.id,
     ]);
@@ -413,7 +409,7 @@ test(
     yield* setFlip(flip, true);
     yield* Effect.sleep("8 seconds");
 
-    const after = yield* alertDetail(monitor.id);
+    const after = yield* detail(monitor.id);
     expect(after.incidents[0]?.resolution).toBe("disabled");
     expect(after.alerts.notifications.map((n) => n.event)).toEqual(["down"]);
     expect(after.alerts.outbox.map((r) => [r.event, r.state])).toEqual([

@@ -7,33 +7,74 @@ import { expect } from "bun:test";
 
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
-import type { MonitorListItem } from "../../src/api/spec.ts";
-import type { ChannelView } from "../../src/domain/channel.ts";
-import type { WatchdogAlertsView } from "../../src/registry/registry.ts";
-import type { RowReport, WatchdogReport } from "../../src/watchdog/run.ts";
+import { MonitorListItem, MonitorResponse } from "../../src/api/spec.ts";
+import { OutboxEntry } from "../../src/domain/alert.ts";
+import { ChannelView } from "../../src/domain/channel.ts";
+import { Episode } from "../../src/registry/watchdog-store.ts";
 import { watchdogCron } from "../../src/worker.ts";
-import { setup, waitFor } from "./harness.ts";
+import { SinkEvent, WebhookAlert, bodyOf, setup, waitFor } from "./harness.ts";
 
 const { create, detail, devUrl, registryRows, send, stack, test } =
   setup("integ-watchdog");
 
 const minute = 60_000;
 
+/** `RowReport`: what the watchdog did with one Registry row. */
+const RowReport = Schema.Struct({
+  action: Schema.String,
+  alarmAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  errors: Schema.Array(Schema.String),
+  id: Schema.String,
+  lifecycle: Schema.String,
+  outcome: Schema.String,
+  summaryUpdated: Schema.optionalKey(Schema.Boolean),
+  watch: Schema.optionalKey(
+    Schema.Struct({
+      applied: Schema.Boolean,
+      change: Schema.String,
+      episodeId: Schema.NullOr(Schema.String),
+      staleRuns: Schema.Number,
+    })
+  ),
+});
+type RowReport = typeof RowReport.Type;
+
+/** `WatchdogReport`, as `POST /_dev/watchdog` returns it. */
+const WatchdogReport = Schema.Struct({
+  failed: Schema.Number,
+  now: Schema.Number,
+  pruned: Schema.NullOr(Schema.Number),
+  registryAlarmAt: Schema.NullOr(Schema.Number),
+  results: Schema.Array(RowReport),
+});
+type WatchdogReport = typeof WatchdogReport.Type;
+
+/** `WatchdogAlertsView`, as `GET /_dev/watchdog` returns it. */
+const WatchdogAlertsView = Schema.Struct({
+  episodes: Schema.Array(Episode),
+  outbox: Schema.Array(OutboxEntry),
+});
+
 /** Run the watchdog once, as of `now` (default: the current time). */
 const watchdog = (now?: number) =>
   send("POST", `/_dev/watchdog${now === undefined ? "" : `?now=${now}`}`).pipe(
-    Effect.map((reply) => {
+    Effect.flatMap((reply) => {
       expect(reply.status).toBe(200);
-      return reply.body as WatchdogReport;
+      return bodyOf(WatchdogReport)(reply);
     })
   );
 
-const resultFor = (report: WatchdogReport, id: string): RowReport => {
+/** The report for `id`; the expectation fails when there is none. */
+const resultFor = (
+  report: WatchdogReport,
+  id: string
+): RowReport | undefined => {
   const result = report.results.find((entry) => entry.id === id);
   expect(result).toBeDefined();
-  return result as RowReport;
+  return result;
 };
 
 const rowOf = (id: string) =>
@@ -81,9 +122,9 @@ test(
 
     const report = yield* watchdog();
     const result = resultFor(report, monitor.id);
-    expect(result.action).toBe("Refresh");
-    expect(result.errors).toEqual([]);
-    expect(result.alarmAt).toBeNumber();
+    expect(result?.action).toBe("Refresh");
+    expect(result?.errors).toEqual([]);
+    expect(result?.alarmAt).toBeNumber();
     expect((yield* detail(monitor.id)).status.alarmAt).toBeNumber();
     yield* waitFor(
       "checks resume",
@@ -103,9 +144,9 @@ test(
       body: { enabled: false, name: "stuck", url: yield* devUrl("/target") },
       headers: { "x-kanshi-dev-skip-activate": "1" },
     }).pipe(
-      Effect.map((reply) => {
+      Effect.flatMap((reply) => {
         expect(reply.status).toBe(201);
-        return reply.body as { readonly id: string };
+        return bodyOf(MonitorResponse)(reply);
       })
     );
     expect((yield* rowOf(monitor.id))?.lifecycle).toBe("creating");
@@ -115,7 +156,7 @@ test(
 
     // Younger than five minutes: left alone.
     const early = yield* watchdog();
-    expect(resultFor(early, monitor.id).action).toBe("Wait");
+    expect(resultFor(early, monitor.id)?.action).toBe("Wait");
     expect((yield* rowOf(monitor.id))?.lifecycle).toBe("creating");
 
     const late = yield* watchdog(Date.now() + 6 * minute);
@@ -126,7 +167,7 @@ test(
     expect((yield* rowOf(monitor.id))?.lifecycle).toBe("active");
     const fetched = yield* send("GET", `/api/monitors/${monitor.id}`);
     expect(fetched.status).toBe(200);
-    expect((fetched.body as { name: string }).name).toBe("stuck");
+    expect((yield* bodyOf(MonitorResponse)(fetched)).name).toBe("stuck");
     yield* remove(monitor.id);
   }),
   { timeout: 60_000 }
@@ -240,11 +281,9 @@ test(
 
     const listed = () =>
       send("GET", "/api/monitors").pipe(
+        Effect.flatMap(bodyOf(Schema.Array(MonitorListItem))),
         Effect.map(
-          (reply) =>
-            (reply.body as readonly MonitorListItem[]).find(
-              (item) => item.id === monitor.id
-            ) ?? null
+          (items) => items.find((item) => item.id === monitor.id) ?? null
         )
       );
     expect((yield* listed())?.name).toBe("(stale)");
@@ -264,33 +303,28 @@ test(
 
     // Not newer: the next run leaves it alone.
     const again = yield* watchdog();
-    expect(resultFor(again, monitor.id).summaryUpdated).toBe(false);
+    expect(resultFor(again, monitor.id)?.summaryUpdated).toBe(false);
     yield* remove(monitor.id);
   }),
   { timeout: 60_000 }
 );
 
-interface SinkEvent {
-  readonly detail: { readonly body: string; readonly query: string };
-}
-
-interface WatchdogAlert {
-  readonly event: string;
-  readonly id: string;
-  readonly monitor: { readonly id: string } | null;
-  readonly title: string;
-}
-
 /** Webhook alerts the sink received for `tag` about `monitorId`. */
 const alertsAbout = (tag: string, monitorId: string) =>
   send("GET", "/_dev/events").pipe(
-    Effect.map((reply) =>
-      (reply.body as readonly SinkEvent[])
-        .filter((event) =>
-          new URLSearchParams(event.detail.query).getAll("tag").includes(tag)
-        )
-        .map((event) => JSON.parse(event.detail.body) as WatchdogAlert)
-        .filter((alert) => alert.monitor?.id === monitorId)
+    Effect.flatMap(bodyOf(Schema.Array(SinkEvent))),
+    Effect.map((events) =>
+      events.filter((event) =>
+        new URLSearchParams(event.detail.query).getAll("tag").includes(tag)
+      )
+    ),
+    Effect.flatMap(
+      Effect.forEach((event) =>
+        Schema.decodeUnknownEffect(WebhookAlert)(event.detail.body)
+      )
+    ),
+    Effect.map((alerts) =>
+      alerts.filter((alert) => alert.monitor?.id === monitorId)
     )
   );
 
@@ -304,7 +338,7 @@ test(
         name: "watchdog sink",
         url: yield* devUrl(`/webhook?tag=${tag}`),
       },
-    }).pipe(Effect.map((reply) => reply.body as ChannelView));
+    }).pipe(Effect.flatMap(bodyOf(ChannelView)));
     const monitor = yield* create({
       intervalSeconds: 5,
       name: "watched",
@@ -319,10 +353,10 @@ test(
     // An hour on, the last check is far older than 2 x 5s + 2m.
     const later = Date.now() + 60 * minute;
     const first = resultFor(yield* watchdog(later), monitor.id);
-    expect(first.watch).toMatchObject({ change: "none", staleRuns: 1 });
+    expect(first?.watch).toMatchObject({ change: "none", staleRuns: 1 });
     const second = resultFor(yield* watchdog(later), monitor.id);
-    expect(second.watch).toMatchObject({ change: "open", staleRuns: 2 });
-    const episodeId = second.watch?.episodeId ?? "";
+    expect(second?.watch).toMatchObject({ change: "open", staleRuns: 2 });
+    const episodeId = second?.watch?.episodeId ?? "";
     expect(episodeId).toStartWith("watchdog-");
     expect((yield* rowOf(monitor.id))?.watch).toEqual({
       episodeId,
@@ -330,7 +364,7 @@ test(
     });
     // Still stale: deduplicated, no second alert.
     const third = resultFor(yield* watchdog(later), monitor.id);
-    expect(third.watch).toMatchObject({ change: "none", staleRuns: 3 });
+    expect(third?.watch).toMatchObject({ change: "none", staleRuns: 3 });
 
     const down = yield* waitFor(
       "not-being-checked alert",
@@ -345,7 +379,7 @@ test(
 
     // Checks are recent at the real time: the episode resolves.
     const resumed = resultFor(yield* watchdog(), monitor.id);
-    expect(resumed.watch).toMatchObject({
+    expect(resumed?.watch).toMatchObject({
       change: "resolve",
       episodeId: null,
       staleRuns: 0,
@@ -358,8 +392,9 @@ test(
     expect(all.map((alert) => alert.event)).toEqual(["not_checked", "checked"]);
     expect(all[1]?.id).toBe(`${episodeId}:up:${channel.id}`);
 
-    const view = (yield* send("GET", "/_dev/watchdog"))
-      .body as WatchdogAlertsView;
+    const view = yield* bodyOf(WatchdogAlertsView)(
+      yield* send("GET", "/_dev/watchdog")
+    );
     const episode = view.episodes.find((entry) => entry.id === episodeId);
     expect(episode).toMatchObject({
       monitorId: monitor.id,

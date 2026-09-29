@@ -1,7 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 
-import type { AlertMessage } from "../../src/alerts/message.ts";
 import {
+  AlertMessage,
   alertRequest,
   alertText,
   idempotencyKey,
@@ -26,6 +27,7 @@ import {
   needsStatus,
   staleRunsToAlert,
   staleThresholdMs,
+  WatchdogAction,
   watchTransition,
 } from "../../src/watchdog/rules.ts";
 
@@ -89,32 +91,32 @@ describe("watchdog decisions", () => {
     const young = row({ lifecycle: "creating" });
     const now = t0 + creatingGraceMs - 1;
     assert.isFalse(needsStatus(young, now));
-    assert.deepStrictEqual(decide(young, null, now), { _tag: "Wait" });
+    assert.deepStrictEqual(decide(young, null, now), WatchdogAction.Wait());
   });
 
   it("activates a stuck create whose monitor was configured", () => {
     const stuck = row({ lifecycle: "creating", opId: "op9" });
     const now = t0 + creatingGraceMs;
     assert.isTrue(needsStatus(stuck, now));
-    assert.deepStrictEqual(decide(stuck, live(), now), {
-      _tag: "Activate",
-      opId: "op9",
-    });
+    assert.deepStrictEqual(
+      decide(stuck, live(), now),
+      WatchdogAction.Activate({ opId: "op9" })
+    );
   });
 
   it("abandons a stuck create whose monitor is unconfigured or tombstoned", () => {
     const stuck = row({ lifecycle: "creating", opId: "op9" });
     const now = t0 + 10 * minute;
     for (const status of [unconfigured, tombstoned]) {
-      assert.deepStrictEqual(decide(stuck, status, now), {
-        _tag: "Abandon",
-        opId: "op9",
-      });
+      assert.deepStrictEqual(
+        decide(stuck, status, now),
+        WatchdogAction.Abandon({ opId: "op9" })
+      );
     }
     // A tombstone wins even if a snapshot were somehow reported.
     assert.deepStrictEqual(
       decide(stuck, { snapshot: snapshot(), tombstonedAt: t0 }, now),
-      { _tag: "Abandon", opId: "op9" }
+      WatchdogAction.Abandon({ opId: "op9" })
     );
   });
 
@@ -126,39 +128,44 @@ describe("watchdog decisions", () => {
   it("retries a stuck delete whatever its age, without a status", () => {
     const deleting = row({ lifecycle: "deleting" });
     assert.isFalse(needsStatus(deleting, t0));
-    assert.deepStrictEqual(decide(deleting, null, t0), { _tag: "Destroy" });
+    assert.deepStrictEqual(
+      decide(deleting, null, t0),
+      WatchdogAction.Destroy()
+    );
   });
 
   it("refreshes an active monitor with its summary and revision", () => {
     const now = t0 + minute;
     const value = snapshot({ lastCheckedAt: t0 + 30_000, summaryRevision: 12 });
     assert.isTrue(needsStatus(row(), t0));
-    assert.deepStrictEqual(decide(row(), live(value), now), {
-      _tag: "Refresh",
-      observation: {
-        enabled: true,
-        intervalSeconds: 60,
-        lastCheckedAt: t0 + 30_000,
-        name: "Site",
-        stale: false,
-        url: "https://example.com/",
-      },
-      revision: 12,
-      summary: {
-        enabled: true,
-        intervalSeconds: 60,
-        lastCheckedAt: t0 + 30_000,
-        name: "Site",
-        status: "up",
-      },
-    });
+    assert.deepStrictEqual(
+      decide(row(), live(value), now),
+      WatchdogAction.Refresh({
+        observation: {
+          enabled: true,
+          intervalSeconds: 60,
+          lastCheckedAt: t0 + 30_000,
+          name: "Site",
+          stale: false,
+          url: "https://example.com/",
+        },
+        revision: 12,
+        summary: {
+          enabled: true,
+          intervalSeconds: 60,
+          lastCheckedAt: t0 + 30_000,
+          name: "Site",
+          status: "up",
+        },
+      })
+    );
   });
 
   it("refreshes disabled monitors too, which are never stale", () => {
     const value = snapshot({ config: { enabled: false } });
     const action = decide(row(), live(value), t0 + 365 * 24 * 60 * minute);
     assert.strictEqual(action._tag, "Refresh");
-    if (action._tag === "Refresh") {
+    if (WatchdogAction.$is("Refresh")(action)) {
       assert.isFalse(action.summary.enabled);
       assert.isFalse(action.observation.stale);
     }
@@ -349,6 +356,8 @@ describe("stale counter and dedup", () => {
   });
 });
 
+const ChatBody = Schema.fromJsonString(Schema.Struct({ text: Schema.String }));
+
 describe("not-being-checked messages", () => {
   const episode = {
     id: "watchdog-1",
@@ -358,13 +367,13 @@ describe("not-being-checked messages", () => {
     startedAt: t0 + 15 * minute,
   };
   const monitor = { id: "m1", name: "Site", url: "https://example.com/" };
-  const notChecked: AlertMessage = {
-    _tag: "NotChecked",
+  const notCheckedAlert = {
     episode,
     idempotencyKey: idempotencyKey("watchdog-1", "down", "c1"),
     monitor,
     sentAt: t0 + 16 * minute,
   };
+  const notChecked = AlertMessage.NotChecked(notCheckedAlert);
   const resolvedEpisode = { ...episode, resolvedAt: t0 + 40 * minute };
 
   it("says the monitor is not being checked, then checked again", () => {
@@ -373,26 +382,30 @@ describe("not-being-checked messages", () => {
       title: "monitor Site is not being checked",
     });
     assert.strictEqual(
-      alertText({
-        ...notChecked,
-        episode: { ...episode, lastCheckedAt: null },
-      }).body.split("\n")[0],
+      alertText(
+        AlertMessage.NotChecked({
+          ...notCheckedAlert,
+          episode: { ...episode, lastCheckedAt: null },
+        })
+      ).body.split("\n")[0],
       "Last check: never (expected every 5m)"
     );
     assert.strictEqual(
-      alertText({
-        ...notChecked,
-        _tag: "CheckedAgain",
-        episode: resolvedEpisode,
-      }).title,
+      alertText(
+        AlertMessage.CheckedAgain({
+          ...notCheckedAlert,
+          episode: resolvedEpisode,
+        })
+      ).title,
       "monitor Site is being checked again after 40m"
     );
     assert.strictEqual(
-      alertText({
-        ...notChecked,
-        _tag: "NotCheckedResolved",
-        episode: resolvedEpisode,
-      }).title,
+      alertText(
+        AlertMessage.NotCheckedResolved({
+          ...notCheckedAlert,
+          episode: resolvedEpisode,
+        })
+      ).title,
       "monitor Site was not checked for 40m, checks resumed"
     );
   });
@@ -404,7 +417,7 @@ describe("not-being-checked messages", () => {
       notChecked
     );
     assert.match(
-      (JSON.parse(slack.body) as { text: string }).text,
+      Schema.decodeUnknownSync(ChatBody)(slack.body).text,
       /^Kanshi: monitor Site is not being checked\n/u
     );
     const ntfy = new URL(
@@ -435,12 +448,13 @@ describe("not-being-checked messages", () => {
       text: "monitor Site is not being checked\nLast check: 16m ago (expected every 5m)\nhttps://example.com/",
       title: "monitor Site is not being checked",
     });
-    const again = webhookPayload({
-      ...notChecked,
-      _tag: "CheckedAgain",
-      episode: resolvedEpisode,
-      idempotencyKey: "watchdog-1:up:c1",
-    });
+    const again = webhookPayload(
+      AlertMessage.CheckedAgain({
+        ...notCheckedAlert,
+        episode: resolvedEpisode,
+        idempotencyKey: "watchdog-1:up:c1",
+      })
+    );
     assert.strictEqual(again.event, "checked");
     assert.isTrue(again.recovered);
   });

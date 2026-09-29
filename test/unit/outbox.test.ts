@@ -3,7 +3,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 
-import { backoffMs, maxAttempts } from "../../src/alerts/delivery.ts";
+import {
+  backoffMs,
+  DeliveryResult,
+  maxAttempts,
+} from "../../src/alerts/delivery.ts";
 import type { Notification, OutboxEntry } from "../../src/domain/alert.ts";
 import type { MonitorConfig } from "../../src/domain/monitor.ts";
 import { initialState, nextAlarmAt } from "../../src/monitor/cycle.ts";
@@ -18,6 +22,7 @@ import {
   notificationsDueAt,
   notificationWaits,
   outboxDecision,
+  OutboxDecision,
   outboxDueAt,
   skipped,
 } from "../../src/monitor/outbox.ts";
@@ -112,14 +117,14 @@ describe("notifications", () => {
 describe("outbox ordering", () => {
   it("sends down while open and down-recovered once resolved", () => {
     const down = row({ event: "down" });
-    assert.deepStrictEqual(outboxDecision(down, down, open), {
-      _tag: "Send",
-      message: "Down",
-    });
-    assert.deepStrictEqual(outboxDecision(down, down, recovered), {
-      _tag: "Send",
-      message: "DownRecovered",
-    });
+    assert.deepStrictEqual(
+      outboxDecision(down, down, open),
+      OutboxDecision.Send({ message: "Down" })
+    );
+    assert.deepStrictEqual(
+      outboxDecision(down, down, recovered),
+      OutboxDecision.Send({ message: "DownRecovered" })
+    );
   });
 
   it("skips a down whose incident was closed by disabling or deleting", () => {
@@ -137,12 +142,13 @@ describe("outbox ordering", () => {
   it("an up waits for its down, and is sent only after it was delivered", () => {
     const up = row({ event: "up" });
     const down = row({ event: "down" });
-    assert.deepStrictEqual(outboxDecision(up, down, recovered), {
-      _tag: "Wait",
-    });
+    assert.deepStrictEqual(
+      outboxDecision(up, down, recovered),
+      OutboxDecision.Wait()
+    );
     assert.deepStrictEqual(
       outboxDecision(up, { ...down, state: "delivered" }, recovered),
-      { _tag: "Send", message: "Recovered" }
+      OutboxDecision.Send({ message: "Recovered" })
     );
   });
 
@@ -171,7 +177,7 @@ describe("outbox ordering", () => {
     for (const state of ["delivered", "failed", "skipped"] as const) {
       assert.deepStrictEqual(
         outboxDecision(row({ event: "down", state }), null, open),
-        { _tag: "Done" }
+        OutboxDecision.Done()
       );
     }
   });
@@ -224,7 +230,7 @@ describe("delivery attempts", () => {
   it("marks delivered and records whether recovery was included", () => {
     const delivered = afterAttempt(
       down,
-      { _tag: "Delivered", status: 200 },
+      DeliveryResult.Delivered({ status: 200 }),
       true,
       t0 + 5
     );
@@ -237,7 +243,11 @@ describe("delivery attempts", () => {
   it("fails permanently on a permanent error", () => {
     const failed = afterAttempt(
       down,
-      { _tag: "Failed", error: "HTTP 404", permanent: true, status: 404 },
+      DeliveryResult.Failed({
+        error: "HTTP 404",
+        permanent: true,
+        status: 404,
+      }),
       false,
       t0
     );
@@ -246,12 +256,11 @@ describe("delivery attempts", () => {
   });
 
   it("retries with backoff and fails after the 8th attempt", () => {
-    const retry = {
-      _tag: "Failed",
+    const retry = DeliveryResult.Failed({
       error: "HTTP 500",
       permanent: false,
       status: 500,
-    } as const;
+    });
     let current = down;
     let now = t0;
     for (let attempt = 1; attempt < maxAttempts; attempt += 1) {

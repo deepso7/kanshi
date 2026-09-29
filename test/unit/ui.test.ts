@@ -4,7 +4,7 @@ import * as Result from "effect/Result";
 
 import type { RecentBucket } from "../../src/domain/history.ts";
 import { overallStatus } from "../../src/domain/public-status.ts";
-import { discardBody, readFormBody } from "../../src/http/body.ts";
+import { discardBody, FormBody, readFormBody } from "../../src/http/body.ts";
 import { recentActivity } from "../../src/monitor/history.ts";
 import type { BarDay } from "../../src/ui/charts.ts";
 import {
@@ -83,7 +83,7 @@ describe("uptime bars", () => {
   });
 });
 
-describe("sparkline", () => {
+describe(sparkline, () => {
   it("scales latency to the height and breaks at gaps", () => {
     const path = sparklinePath(
       [bucket(100), bucket(50), bucket(null), bucket(0)],
@@ -405,27 +405,35 @@ describe("form bodies", () => {
   it.effect("parses a small form", () =>
     Effect.promise(() => readFormBody(post("token=a%20b&x=1"))).pipe(
       Effect.map((result) =>
-        assert.deepStrictEqual(result, {
-          _tag: "Form",
-          fields: [
-            ["token", "a b"],
-            ["x", "1"],
-          ],
-        })
+        assert.deepStrictEqual(
+          result,
+          FormBody.Form({
+            fields: [
+              ["token", "a b"],
+              ["x", "1"],
+            ],
+          })
+        )
       )
     )
   );
 
   it.effect("refuses a form over the limit", () =>
     Effect.promise(() => readFormBody(post("a".repeat(65)), 64)).pipe(
-      Effect.map((result) => assert.strictEqual(result._tag, "TooLarge"))
+      Effect.map((result) =>
+        assert.deepStrictEqual(result, FormBody.TooLarge())
+      )
     )
   );
 
   it.effect("refuses a declared length over the limit unread", () =>
     Effect.promise(() =>
       readFormBody(post("a=1", { "content-length": "999999" }), 64)
-    ).pipe(Effect.map((result) => assert.strictEqual(result._tag, "TooLarge")))
+    ).pipe(
+      Effect.map((result) =>
+        assert.deepStrictEqual(result, FormBody.TooLarge())
+      )
+    )
   );
 
   it.effect("discards a body chunk by chunk up to the cap", () =>

@@ -1,15 +1,17 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import {
   backoffMs,
   classifyStatus,
   deliver,
+  DeliveryResult,
   errorBodyBytes,
   maxAttempts,
 } from "../../src/alerts/delivery.ts";
-import type { AlertMessage } from "../../src/alerts/message.ts";
 import {
+  AlertMessage,
   alertRequest,
   alertText,
   formatDuration,
@@ -28,25 +30,37 @@ const incident = {
   resolvedAt: null,
   startedAt: t0,
 };
-const down: AlertMessage = {
-  _tag: "Down",
+const down = AlertMessage.Down({
   idempotencyKey: idempotencyKey("inc1", "down", "c1"),
   incident,
   monitor,
   sentAt: t0 + 1000,
-};
-const recovered: AlertMessage = {
-  _tag: "Recovered",
+});
+const recoveredAlert = {
   idempotencyKey: idempotencyKey("inc1", "up", "c1"),
   incident: { ...incident, resolvedAt: t0 + 12 * minute },
   monitor,
   sentAt: t0 + 12 * minute + 500,
 };
-const downRecovered: AlertMessage = {
-  ...recovered,
-  _tag: "DownRecovered",
+const recovered = AlertMessage.Recovered(recoveredAlert);
+const downRecovered = AlertMessage.DownRecovered({
+  ...recoveredAlert,
   idempotencyKey: idempotencyKey("inc1", "down", "c1"),
-};
+});
+
+const DiscordBody = Schema.fromJsonString(
+  Schema.Struct({ allowed_mentions: Schema.Json, content: Schema.String })
+);
+const WebhookBody = Schema.fromJsonString(
+  Schema.Struct({
+    event: Schema.String,
+    id: Schema.String,
+    incident: Schema.NullOr(Schema.Struct({ durationMs: Schema.Number })),
+    monitor: Schema.Json,
+    recovered: Schema.Boolean,
+  })
+);
+const decodeWebhook = Schema.decodeUnknownSync(WebhookBody);
 
 describe("retry classification and backoff", () => {
   it("treats 2xx as delivered and 4xx other than 408/425/429 as permanent", () => {
@@ -117,10 +131,7 @@ describe("message formatting", () => {
       "https://discord.com/api/webhooks/1/x",
       recovered
     );
-    const body = JSON.parse(discord.body) as {
-      allowed_mentions: unknown;
-      content: string;
-    };
+    const body = Schema.decodeUnknownSync(DiscordBody)(discord.body);
     assert.deepStrictEqual(body.allowed_mentions, { parse: [] });
     assert.isTrue(
       body.content.startsWith("Kanshi: Site is up again after 12m")
@@ -130,24 +141,21 @@ describe("message formatting", () => {
   it("gives generic webhooks an Idempotency-Key equal to the body id", () => {
     const request = alertRequest("webhook", "https://example.com/hook", down);
     assert.strictEqual(request.headers["idempotency-key"], "inc1:down:c1");
-    const body = JSON.parse(request.body) as Record<string, unknown>;
+    const body = decodeWebhook(request.body);
     assert.strictEqual(body.id, "inc1:down:c1");
     assert.strictEqual(body.event, "down");
     assert.strictEqual(body.recovered, false);
     assert.deepStrictEqual(body.monitor, monitor);
 
-    const combined = JSON.parse(
+    const combined = decodeWebhook(
       alertRequest("webhook", "https://example.com/hook", downRecovered).body
-    ) as Record<string, unknown>;
+    );
     assert.strictEqual(combined.event, "down");
     assert.strictEqual(combined.recovered, true);
-    assert.strictEqual(
-      (combined.incident as { durationMs: number }).durationMs,
-      12 * minute
-    );
-    const up = JSON.parse(
+    assert.strictEqual(combined.incident?.durationMs, 12 * minute);
+    const up = decodeWebhook(
       alertRequest("webhook", "https://example.com/hook", recovered).body
-    ) as Record<string, unknown>;
+    );
     assert.strictEqual(up.event, "up");
     assert.strictEqual(up.id, "inc1:up:c1");
   });
@@ -173,16 +181,15 @@ describe("message formatting", () => {
   });
 
   it("formats test messages for every kind", () => {
-    const test: AlertMessage = {
-      _tag: "Test",
+    const test = AlertMessage.Test({
       channelName: "Ops",
       idempotencyKey: "test:c1:x",
       sentAt: t0,
-    };
+    });
     assert.strictEqual(alertText(test).title, 'Test alert for channel "Ops"');
-    const body = JSON.parse(
+    const body = decodeWebhook(
       alertRequest("webhook", "https://example.com/hook", test).body
-    ) as Record<string, unknown>;
+    );
     assert.strictEqual(body.event, "test");
     assert.strictEqual(body.id, "test:c1:x");
   });
@@ -193,7 +200,7 @@ const answering =
   () =>
     Promise.resolve(new Response(text, { status }));
 
-describe("deliver", () => {
+describe("deliver()", () => {
   const request = alertRequest("webhook", "https://example.com/hook", down);
   it.effect("returns Delivered for 2xx", () =>
     Effect.gen(function* deliveredTest() {
@@ -202,10 +209,10 @@ describe("deliver", () => {
         seen = init;
         return Promise.resolve(new Response(null, { status: 204 }));
       });
-      assert.deepStrictEqual(result, { _tag: "Delivered", status: 204 });
+      assert.deepStrictEqual(result, DeliveryResult.Delivered({ status: 204 }));
       assert.strictEqual(seen.method, "POST");
       assert.strictEqual(
-        (seen.headers as Record<string, string>)["idempotency-key"],
+        new Headers(seen.headers).get("idempotency-key"),
         "inc1:down:c1"
       );
     })
@@ -213,25 +220,29 @@ describe("deliver", () => {
 
   it.effect("classifies failures", () =>
     Effect.gen(function* failuresTest() {
-      assert.deepStrictEqual(yield* deliver(request, answering(404, "nope")), {
-        _tag: "Failed",
-        error: "HTTP 404: nope",
-        permanent: true,
-        status: 404,
-      });
+      assert.deepStrictEqual(
+        yield* deliver(request, answering(404, "nope")),
+        DeliveryResult.Failed({
+          error: "HTTP 404: nope",
+          permanent: true,
+          status: 404,
+        })
+      );
       const busy = yield* deliver(request, answering(429));
-      assert.isTrue(busy._tag === "Failed" && !busy.permanent);
+      assert.isTrue(DeliveryResult.$is("Failed")(busy) && !busy.permanent);
       const broken = yield* deliver(request, answering(500));
-      assert.isTrue(broken._tag === "Failed" && !broken.permanent);
+      assert.isTrue(DeliveryResult.$is("Failed")(broken) && !broken.permanent);
       const offline = yield* deliver(request, () =>
         Promise.reject(new Error("connection refused"))
       );
-      assert.deepStrictEqual(offline, {
-        _tag: "Failed",
-        error: "connection refused",
-        permanent: false,
-        status: null,
-      });
+      assert.deepStrictEqual(
+        offline,
+        DeliveryResult.Failed({
+          error: "connection refused",
+          permanent: false,
+          status: null,
+        })
+      );
     })
   );
 
@@ -255,12 +266,14 @@ describe("deliver", () => {
         const result = yield* deliver(request, () =>
           Promise.resolve(new Response(endless, { status: 500 }))
         );
-        assert.deepStrictEqual(result, {
-          _tag: "Failed",
-          error: `HTTP 500: ${"x".repeat(200)}`,
-          permanent: false,
-          status: 500,
-        });
+        assert.deepStrictEqual(
+          result,
+          DeliveryResult.Failed({
+            error: `HTTP 500: ${"x".repeat(200)}`,
+            permanent: false,
+            status: 500,
+          })
+        );
         assert.isTrue(cancelled);
         // The stream may pull ahead a chunk or two, never much more.
         assert.isAtMost(pulled * chunk.byteLength, errorBodyBytes + 3 * 512);
@@ -281,7 +294,7 @@ describe("deliver", () => {
       const result = yield* deliver(request, () =>
         Promise.resolve(new Response(body, { status: 200 }))
       );
-      assert.deepStrictEqual(result, { _tag: "Delivered", status: 200 });
+      assert.deepStrictEqual(result, DeliveryResult.Delivered({ status: 200 }));
       assert.isTrue(cancelled);
     })
   );

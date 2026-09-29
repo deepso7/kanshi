@@ -6,6 +6,7 @@ import type {
   MonitorConfig,
   MonitorSnapshot,
 } from "../../src/domain/monitor.ts";
+import { summaryOf } from "../../src/domain/monitor.ts";
 import { initialState } from "../../src/monitor/cycle.ts";
 import { InvalidMonitorInput } from "../../src/monitor/errors.ts";
 import type { RegistryEntry } from "../../src/registry/registry.ts";
@@ -36,13 +37,22 @@ const config: MonitorConfig = {
 
 const snapshot: MonitorSnapshot = { config, state: initialState(t0) };
 
-const entry = {
+const entry: RegistryEntry = {
+  createdAt: t0,
   id: "m1",
   key: "m1",
   lifecycle: "active",
   managed: false,
+  opId: "op1",
   public: false,
-} as unknown as RegistryEntry;
+  summary: summaryOf(config, snapshot.state),
+  summaryRevision: 0,
+  updatedAt: t0,
+  watch: { episodeId: null, staleRuns: 0 },
+};
+
+type RegistryStub = ReturnType<MonitorServiceDeps["registries"]["getByName"]>;
+type MonitorStub = ReturnType<MonitorServiceDeps["monitors"]["getByName"]>;
 
 /**
  * A service over fake objects whose `update` fails like a concurrent edit
@@ -52,25 +62,34 @@ const makeRacingService = (
   update: () => Effect.Effect<MonitorSnapshot, InvalidMonitorInput>
 ) => {
   const writes: string[] = [];
-  const registry = {
-    get: () => Effect.succeed(entry),
-    missingChannels: () => Effect.succeed([]),
-    setPublic: (_id: string, isPublic: boolean) =>
-      Effect.sync(() => {
-        writes.push(`public=${String(isPublic)}`);
-        return true;
-      }),
+  const registry: Pick<RegistryStub, "get" | "missingChannels" | "setPublic"> =
+    {
+      get: () => Effect.succeed(entry),
+      missingChannels: () => Effect.succeed([]),
+      setPublic: (_id: string, isPublic: boolean) =>
+        Effect.sync(() => {
+          writes.push(`public=${String(isPublic)}`);
+          return true;
+        }),
+    };
+  const monitor: Pick<MonitorStub, "snapshot" | "update"> = {
+    snapshot: () => Effect.succeed(snapshot),
+    update,
   };
-  const monitor = { snapshot: () => Effect.succeed(snapshot), update };
   const service = makeMonitorService({
     devMode: false,
+    // SAFETY: the update path only calls `getByName` on the namespace, then
+    // `snapshot` and `update` on the stub; this double implements exactly those.
     monitors: {
-      getByName: () => monitor,
-    } as unknown as MonitorServiceDeps["monitors"],
+      getByName: (_name: string) => monitor,
+    } as MonitorServiceDeps["monitors"],
     quota: 10,
+    // SAFETY: the update path only calls `getByName` on the namespace, then
+    // `get`, `missingChannels` and `setPublic` on the stub; this double
+    // implements exactly those.
     registries: {
-      getByName: () => registry,
-    } as unknown as MonitorServiceDeps["registries"],
+      getByName: (_name: string) => registry,
+    } as MonitorServiceDeps["registries"],
   });
   return { service, writes };
 };

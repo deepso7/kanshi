@@ -14,9 +14,8 @@ import type {
   Desired,
   DesiredChannel,
   DesiredMonitor,
-  Step,
 } from "../../src/sync/plan.ts";
-import { diff, formatPlan, monitorSettingKeys } from "../../src/sync/plan.ts";
+import { diff, formatPlan, Step } from "../../src/sync/plan.ts";
 
 const desiredChannel = (
   key: string,
@@ -75,35 +74,34 @@ const currentMonitor = (
     readonly managed?: boolean;
   } = {}
 ): CurrentMonitor => {
-  const { channelIds, managed, ...settings } = overrides;
-  const monitor = desiredMonitor(key, settings);
+  const { channelIds, managed, ...overridden } = overrides;
+  const {
+    channels: _channels,
+    key: _key,
+    ...settings
+  } = desiredMonitor(key, overridden);
   return {
     channels: channelIds ?? "all",
     id: `mon-${key}`,
     key,
     managed: managed ?? true,
-    name: monitor.name,
-    settings: Object.fromEntries(
-      monitorSettingKeys.map((field) => [field, monitor[field]])
-    ) as unknown as NonNullable<CurrentMonitor["settings"]>,
+    name: settings.name,
+    settings,
   };
 };
 
 const empty: Current = { channels: [], monitors: [] };
 const tags = (steps: readonly Step[]) =>
-  steps.map((step) => {
-    switch (step._tag) {
-      case "CreateChannel": {
-        return `${step._tag} ${step.channel.key}`;
-      }
-      case "CreateMonitor": {
-        return `${step._tag} ${step.monitor.key}`;
-      }
-      default: {
-        return `${step._tag} ${step.key}`;
-      }
-    }
-  });
+  steps.map((step) =>
+    Step.$match(step, {
+      CreateChannel: ({ channel }) => `CreateChannel ${channel.key}`,
+      CreateMonitor: ({ monitor }) => `CreateMonitor ${monitor.key}`,
+      DeleteChannel: ({ key }) => `DeleteChannel ${key}`,
+      DeleteMonitor: ({ key }) => `DeleteMonitor ${key}`,
+      UpdateChannel: ({ key }) => `UpdateChannel ${key}`,
+      UpdateMonitor: ({ key }) => `UpdateMonitor ${key}`,
+    })
+  );
 
 describe("config diff", () => {
   it("creates everything on an empty Worker, channels first", () => {
@@ -153,13 +151,12 @@ describe("config diff", () => {
     const current: Current = { channels: [], monitors: [currentMonitor("m")] };
     const plan = diff(desired, current);
     assert.deepStrictEqual(plan.steps, [
-      {
-        _tag: "UpdateMonitor",
+      Step.UpdateMonitor({
         changes: ["expectedStatus", "intervalSeconds", "public"],
         id: "mon-m",
         key: "m",
         patch: { expectedStatus: "200", intervalSeconds: 30, public: true },
-      },
+      }),
     ]);
   });
 
@@ -170,7 +167,7 @@ describe("config diff", () => {
       monitors: [currentMonitor("m", { bodyContains: "ok", enabled: false })],
     };
     const [step] = diff(desired, current).steps;
-    assert.deepStrictEqual(step?._tag === "UpdateMonitor" && step.patch, {
+    assert.deepStrictEqual(Step.$is("UpdateMonitor")(step) && step.patch, {
       bodyContains: null,
       enabled: true,
     });
@@ -188,13 +185,12 @@ describe("config diff", () => {
     };
     const current: Current = { channels: [channelView("a")], monitors: [] };
     assert.deepStrictEqual(diff(desired, current).steps, [
-      {
-        _tag: "UpdateChannel",
+      Step.UpdateChannel({
         changes: ["url"],
         id: "ch-a",
         key: "a",
         patch: { url: "https://hooks.example.com/rotated" },
-      },
+      }),
     ]);
   });
 
@@ -205,7 +201,7 @@ describe("config diff", () => {
     };
     const current: Current = { channels: [channelView("a")], monitors: [] };
     const [step] = diff(desired, current).steps;
-    assert.deepStrictEqual(step?._tag === "UpdateChannel" && step.changes, [
+    assert.deepStrictEqual(Step.$is("UpdateChannel")(step) && step.changes, [
       "kind",
       "name",
     ]);
@@ -233,13 +229,12 @@ describe("config diff", () => {
       current
     );
     assert.deepStrictEqual(narrowed.steps, [
-      {
-        _tag: "UpdateMonitor",
+      Step.UpdateMonitor({
         changes: ["channels"],
         id: "mon-m",
         key: "m",
         patch: { channels: ["a"] },
-      },
+      }),
     ]);
   });
 
@@ -412,17 +407,20 @@ describe("config diff", () => {
       { adopt: true }
     );
     assert.deepStrictEqual(plan.errors, []);
-    assert.deepStrictEqual(
-      plan.steps.map((step) =>
-        step._tag === "UpdateChannel" || step._tag === "UpdateMonitor"
-          ? [step._tag, step.changes, step.patch]
-          : step._tag
-      ),
-      [
-        ["UpdateChannel", ["managed"], { managed: true }],
-        ["UpdateMonitor", ["managed"], { managed: true }],
-      ]
-    );
+    assert.deepStrictEqual(plan.steps, [
+      Step.UpdateChannel({
+        changes: ["managed"],
+        id: "ch-a",
+        key: "a",
+        patch: { managed: true },
+      }),
+      Step.UpdateMonitor({
+        changes: ["managed"],
+        id: "mon-m",
+        key: "m",
+        patch: { managed: true },
+      }),
+    ]);
   });
 
   it("rejects duplicate keys in the config", () => {
