@@ -29,12 +29,41 @@ You need Node, pnpm, [Bun](https://bun.sh) and a Cloudflare account.
    pnpm run deploy        # builds the UI, alchemy deploy --stage prod; prints the Worker URL
    ```
 
+   The Worker is named `kanshi`, so it is served at
+   `https://kanshi.<your-account-subdomain>.workers.dev` (the account's
+   workers.dev subdomain is in the Cloudflare dashboard under Workers).
    Alchemy authenticates with a Cloudflare profile (manage it with
    `pnpm exec alchemy profile`) or with `CLOUDFLARE_ACCOUNT_ID` /
-   `CLOUDFLARE_API_TOKEN` from the environment. The token is deployed as
-   a Worker secret. Deployment state lives in `.alchemy/`; keep it on the
-   machine you deploy from. `pnpm run destroy` removes everything. (Use
-   `pnpm run deploy`: plain `pnpm deploy` is pnpm's own command.)
+   `CLOUDFLARE_API_TOKEN` from the environment. `KANSHI_API_TOKEN` is
+   deployed as a Worker secret. `pnpm run destroy` removes the Worker and
+   its data. (Use `pnpm run deploy`: plain `pnpm deploy` is pnpm's own
+   command.)
+
+   **Deployment state is kept in your Cloudflare account**
+   (`Cloudflare.state()`), so you can deploy or destroy from any machine
+   logged in to the same account. The first `pnpm run deploy` finds no
+   state store and asks _"Cloudflare State Store not found. Do you want to
+   deploy it?"_. Confirming deploys, once per account (shared by every
+   Alchemy project on it):
+   - the `alchemy-state-store` Worker (a Durable Object with SQLite, on
+     your workers.dev subdomain) that holds the state;
+   - an account Secrets Store with two secrets: the bearer token the CLI
+     uses to reach that Worker and the key that encrypts the state at rest.
+
+   The store's URL and token are then cached in
+   `~/.alchemy/<profile>/cloudflare-state-store.json` (profile `default`
+   unless you pass `--profile`); later deploys skip the prompt. With
+   `CI=true` nothing is cached: each run reads the token from the Secrets
+   Store (the API token then needs Secrets Store write access). In CI a
+   missing or outdated store is an error, not a prompt: deploy with
+   `--yes`, or run `pnpm exec alchemy provider cloudflare bootstrap` once
+   beforehand.
+
+   The deployment's state, including the `KANSHI_API_TOKEN` secret, is
+   stored encrypted in that store, not in plain text on disk. `.alchemy/`
+   only holds state for local runs (`pnpm dev`, `pnpm test:integ`), which
+   stay on disk and never contact Cloudflare; a deploy writes only build
+   output and logs there.
 
 2. **Open the dashboard** at the Worker URL and sign in with the token. The
    public status page is at `/status`.
