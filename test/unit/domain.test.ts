@@ -12,6 +12,7 @@ import {
 import { buildConfig, patchConfig } from "../../src/domain/monitor-input.ts";
 import {
   classifyFetchError,
+  excerptBytes,
   maxBodyBytes,
   probe,
 } from "../../src/domain/probe.ts";
@@ -285,6 +286,88 @@ describe("probe()", () => {
       assert.strictEqual(outcome.errorKind, "status");
       assert.strictEqual(outcome.status, 503);
       assert.strictEqual(outcome.message, "expected 2xx, got 503");
+      assert.isNull(outcome.responseExcerpt);
+    })
+  );
+
+  it.effect("keeps the start of a failed response's body", () =>
+    Effect.gen(function* probeExcerpt() {
+      const body = '{"_tag":"ServiceUnavailable","details":{"ok":false}}';
+      const outcome = yield* probe(request).pipe(
+        Effect.provide(answering(503, body).layer)
+      );
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: body,
+        truncated: false,
+      });
+      // A keyword failure keeps it too.
+      const keyword = yield* probe({
+        ...request,
+        bodyContains: "healthy",
+      }).pipe(Effect.provide(answering(200, "degraded").layer));
+      assert.deepStrictEqual(keyword.responseExcerpt, {
+        text: "degraded",
+        truncated: false,
+      });
+      // A success keeps none, though a GET reads its body.
+      const ok = yield* probe(request).pipe(
+        Effect.provide(answering(200, "ok").layer)
+      );
+      assert.isNull(ok.responseExcerpt);
+    })
+  );
+
+  it.effect("caps the excerpt at 2 KB, on a character boundary", () =>
+    Effect.gen(function* probeExcerptCap() {
+      const long = yield* probe(request).pipe(
+        Effect.provide(answering(500, "a".repeat(5000)).layer)
+      );
+      assert.deepStrictEqual(long.responseExcerpt, {
+        text: "a".repeat(excerptBytes),
+        truncated: true,
+      });
+      const exact = yield* probe(request).pipe(
+        Effect.provide(answering(500, "b".repeat(excerptBytes)).layer)
+      );
+      assert.isFalse(exact.responseExcerpt?.truncated);
+      // "é" is two bytes: the character cut at byte 2048 is dropped whole.
+      const accented = yield* probe(request).pipe(
+        Effect.provide(answering(500, `x${"é".repeat(1500)}`).layer)
+      );
+      assert.strictEqual(
+        accented.responseExcerpt?.text,
+        `x${"é".repeat(1023)}`
+      );
+      assert.isTrue(accented.responseExcerpt?.truncated);
+      // A blank body is no excerpt.
+      const blank = yield* probe(request).pipe(
+        Effect.provide(answering(503, " \n").layer)
+      );
+      assert.isNull(blank.responseExcerpt);
+    })
+  );
+
+  it.effect("reads only 2 KB of a failed HEAD response for the excerpt", () =>
+    Effect.gen(function* probeHeadExcerpt() {
+      const chunkBytes = 512;
+      const endless = endlessBody(chunkBytes);
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(endless.body, { status: 503 }))
+      );
+      const outcome = yield* probe({ ...request, method: "HEAD" }).pipe(
+        Effect.provide(client.layer)
+      );
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: "x".repeat(excerptBytes),
+        truncated: true,
+      });
+      assert.isTrue(endless.seen.cancelled);
+      assert.isAtMost(
+        endless.seen.pulled * chunkBytes,
+        excerptBytes + 3 * chunkBytes
+      );
     })
   );
 
@@ -317,6 +400,7 @@ describe("probe()", () => {
         Effect.provide(client.layer)
       );
       assert.isTrue(outcome.ok);
+      assert.isNull(outcome.responseExcerpt);
       assert.strictEqual(client.sent[0]?.request.method, "HEAD");
       assert.isTrue(client.sent[0]?.signal.aborted);
       assert.isAtMost(endless.seen.pulled, 1);
@@ -429,6 +513,9 @@ describe("probe()", () => {
       }).pipe(Effect.provide(rejecting(new Error("boom")).layer));
       assert.strictEqual(unknown.errorKind, "network");
       assert.strictEqual(unknown.message, "boom");
+      // Transport errors have no excerpt.
+      assert.isNull(outcome.responseExcerpt);
+      assert.isNull(unknown.responseExcerpt);
       assert.strictEqual(
         classifyFetchError(new Error("DNS lookup failed")),
         "dns"

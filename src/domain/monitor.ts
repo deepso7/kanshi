@@ -50,6 +50,17 @@ export const ProbeOutcome = Schema.Struct({
 });
 export type ProbeOutcome = typeof ProbeOutcome.Type;
 
+/**
+ * The start of a failed check's response body, decoded as UTF-8:
+ * `truncated` when the body went on past it. Kept on the incident the
+ * failure opens (for its alerts), never on every stored check.
+ */
+export const ResponseExcerpt = Schema.Struct({
+  text: Schema.String,
+  truncated: Schema.Boolean,
+});
+export type ResponseExcerpt = typeof ResponseExcerpt.Type;
+
 export const LastResult = Schema.Struct({
   ...ProbeOutcome.fields,
   at: NonNegativeInt,
