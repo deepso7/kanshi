@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import { constTrue } from "effect/Function";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -70,6 +71,54 @@ export const readPrefix = (
       Effect.succeed(new Uint8Array(0))
     )
   );
+
+/** `chunks` joined into one array. */
+export const concatBytes = (chunks: readonly Uint8Array[]): Uint8Array => {
+  const out = new Uint8Array(
+    chunks.reduce((size, chunk) => size + chunk.byteLength, 0)
+  );
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+};
+
+/**
+ * A best-effort {@link readPrefix}: appends each chunk it reads (at most
+ * `limit` bytes in all) to `into` as it goes, and gives up after `ms` or on
+ * a read error, cancelling the body. Never fails: succeeds with true when
+ * the body ended or reached `limit`, false when it gave up, `into` then
+ * holding what was read by then.
+ */
+export const readPrefixWithin = (
+  response: HttpClientResponse.HttpClientResponse,
+  limit: number,
+  ms: number,
+  into: Uint8Array[]
+): Effect.Effect<boolean> =>
+  Effect.suspend(() => {
+    let size = 0;
+    return response.stream.pipe(
+      Stream.runForEachWhile((chunk: Uint8Array) =>
+        Effect.sync(() => {
+          const bytes = chunk.subarray(0, limit - size);
+          into.push(bytes);
+          size += bytes.byteLength;
+          return size < limit;
+        })
+      ),
+      Effect.catchReason(
+        "HttpClientError",
+        "EmptyBodyError",
+        () => Effect.void
+      ),
+      Effect.timeoutOption(ms),
+      Effect.map(Option.isSome),
+      Effect.orElseSucceed(() => false)
+    );
+  });
 
 /**
  * What went wrong underneath an `HttpClientError`: the `fetch` rejection

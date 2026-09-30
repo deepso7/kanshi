@@ -13,6 +13,7 @@ import { buildConfig, patchConfig } from "../../src/domain/monitor-input.ts";
 import {
   classifyFetchError,
   excerptBytes,
+  excerptReadMs,
   maxBodyBytes,
   probe,
 } from "../../src/domain/probe.ts";
@@ -470,6 +471,109 @@ describe("probe()", () => {
       const outcome = yield* Fiber.join(fiber);
       assert.strictEqual(outcome.errorKind, "timeout");
       assert.isTrue(client.sent[0]?.signal.aborted);
+    })
+  );
+
+  it.effect("keeps a failed HEAD status when its body stalls", () =>
+    Effect.gen(function* probeHeadStalled() {
+      const client = testHttpClient(() =>
+        Effect.succeed(
+          new Response(new ReadableStream<Uint8Array>(), { status: 503 })
+        )
+      );
+      const fiber = yield* probe({
+        ...request,
+        method: "HEAD",
+        timeoutMs: 10_000,
+      }).pipe(Effect.provide(client.layer), Effect.forkChild);
+      yield* TestClock.adjust(excerptReadMs - 1);
+      assert.isUndefined(fiber.pollUnsafe());
+      // The excerpt read has its own bound, well within the timeout.
+      yield* TestClock.adjust(1);
+      const outcome = yield* Fiber.join(fiber);
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.strictEqual(outcome.status, 503);
+      assert.strictEqual(outcome.message, "expected 2xx, got 503");
+      assert.strictEqual(outcome.latencyMs, 0);
+      assert.isNull(outcome.responseExcerpt);
+      assert.isTrue(client.sent[0]?.signal.aborted);
+    })
+  );
+
+  it.effect("keeps the excerpt read before a failed GET body stalls", () =>
+    Effect.gen(function* probeGetStalled() {
+      const partial = new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          controller.enqueue(new TextEncoder().encode("partial error"));
+        },
+      });
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(partial, { status: 500 }))
+      );
+      const fiber = yield* probe({ ...request, timeoutMs: 10_000 }).pipe(
+        Effect.provide(client.layer),
+        Effect.forkChild
+      );
+      yield* TestClock.adjust(excerptReadMs);
+      const outcome = yield* Fiber.join(fiber);
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.strictEqual(outcome.status, 500);
+      // Cut off: marked truncated.
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: "partial error",
+        truncated: true,
+      });
+    })
+  );
+
+  it.effect("keeps a failed status when its body read errors", () =>
+    Effect.gen(function* probeBodyError() {
+      const broken = new ReadableStream<Uint8Array>({
+        pull: (controller) => {
+          controller.error(new Error("Network connection lost."));
+        },
+        start: (controller) => {
+          controller.enqueue(new TextEncoder().encode("oops"));
+        },
+      });
+      const outcome = yield* probe(request).pipe(
+        Effect.provide(
+          testHttpClient(() =>
+            Effect.succeed(new Response(broken, { status: 502 }))
+          ).layer
+        )
+      );
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.strictEqual(outcome.status, 502);
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: "oops",
+        truncated: true,
+      });
+    })
+  );
+
+  it.effect("keeps a failed status whose body stalls near the timeout", () =>
+    Effect.gen(function* probeStalledAtDeadline() {
+      // Headers after 200 ms of a 300 ms budget: 100 ms left for the excerpt.
+      const client = testHttpClient(() =>
+        Effect.sleep(200).pipe(
+          Effect.as(
+            new Response(new ReadableStream<Uint8Array>(), { status: 503 })
+          )
+        )
+      );
+      for (const method of ["GET", "HEAD"] as const) {
+        const fiber = yield* probe({ ...request, method, timeoutMs: 300 }).pipe(
+          Effect.provide(client.layer),
+          Effect.forkChild
+        );
+        yield* TestClock.adjust(300);
+        const outcome = yield* Fiber.join(fiber);
+        assert.strictEqual(outcome.errorKind, "status");
+        assert.strictEqual(outcome.status, 503);
+        assert.strictEqual(outcome.latencyMs, 200);
+        assert.isNull(outcome.responseExcerpt);
+      }
     })
   );
 

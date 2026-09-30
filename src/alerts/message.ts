@@ -404,14 +404,47 @@ export const excerptBlock = (
   return `${open}${head}${close}${marker}`;
 };
 
-/** The excerpt as plain text, cut to `maxLength` with the marker. */
-const excerptText = (excerpt: ResponseExcerpt, maxLength: number): string => {
+/** The length of `text` in UTF-8 bytes. */
+const utf8Length = (text: string): number =>
+  new TextEncoder().encode(text).byteLength;
+
+/** `text` cut to at most `max` UTF-8 bytes, on a character boundary. */
+const cutBytes = (text: string, max: number): string => {
+  const bytes = new TextEncoder().encode(text);
+  return bytes.byteLength <= max
+    ? text
+    : new TextDecoder().decode(bytes.subarray(0, Math.max(0, max)), {
+        stream: true,
+      });
+};
+
+/** `text` in at most `max` UTF-8 bytes, ending in `…` if it was cut. */
+const clipBytes = (text: string, max: number): string =>
+  utf8Length(text) <= max ? text : `${cutBytes(text, max - utf8Length("…"))}…`;
+
+/**
+ * The excerpt as plain text, in at most `maxLength` characters and
+ * `maxBytes` UTF-8 bytes, the marker included when it was cut.
+ */
+const excerptText = (
+  excerpt: ResponseExcerpt,
+  maxLength: number,
+  maxBytes: number
+): string => {
   const body = Option.getOrElse(prettyJson(excerpt.text), () => excerpt.text);
   const marker = `\n${truncatedMarker}`;
-  if (!excerpt.truncated && body.length <= maxLength) {
+  if (
+    !excerpt.truncated &&
+    body.length <= maxLength &&
+    utf8Length(body) <= maxBytes
+  ) {
     return body;
   }
-  return `${cut(body, maxLength - marker.length)}${marker}`;
+  const head = cutBytes(
+    cut(body, maxLength - marker.length),
+    maxBytes - utf8Length(marker)
+  );
+  return `${head}${marker}`;
 };
 
 /** Discord embed colours (its own red, green, amber and blurple). */
@@ -430,7 +463,11 @@ const discordLimits = {
   title: 256,
   /** Title, description, field names and values together. */
   total: 6000,
+  url: 2048,
 };
+
+/** Below this, a description is left out rather than squeezed. */
+const discordMinDescription = 100;
 
 interface DiscordField {
   readonly inline: boolean;
@@ -471,29 +508,41 @@ const discordDescription = (
 
 /**
  * A Discord webhook body: one embed (title linked to the monitor, colour
- * per tone, fields, the excerpt as the description, timestamp). A down
+ * per tone, fields, the excerpt as the description, timestamp), within
+ * Discord's limits (a URL too long to link is a cut `URL` field instead). A down
  * alert says `@everyone` in `content` and allows exactly that mention;
  * every other alert allows none.
  */
 export const discordPayload = (message: AlertMessage): DiscordPayload => {
   const content = alertContent(message);
   const title = clip(`${content.emoji} ${content.title}`, discordLimits.title);
-  const fields = content.fields.map((field): DiscordField => ({
-    inline: field.inline,
-    name: clip(field.name, discordLimits.fieldName),
-    value: clip(field.value, discordLimits.fieldValue),
-  }));
+  // A URL too long to link the title is shown, cut, as a field instead.
+  const linked =
+    content.url !== null && content.url.length <= discordLimits.url
+      ? content.url
+      : null;
+  const urlField =
+    content.url === null || linked !== null
+      ? []
+      : [{ inline: false, name: "URL", value: content.url }];
+  const fields = [...content.fields, ...urlField].map(
+    (field): DiscordField => ({
+      inline: field.inline,
+      name: clip(field.name, discordLimits.fieldName),
+      value: clip(field.value, discordLimits.fieldValue),
+    })
+  );
   const used =
     title.length +
     fields.reduce(
       (sum, field) => sum + field.name.length + field.value.length,
       0
     );
-  const description = discordDescription(
-    content,
-    fields.length > 0,
-    Math.min(discordLimits.description, discordLimits.total - used)
-  );
+  const room = Math.min(discordLimits.description, discordLimits.total - used);
+  const description =
+    room < discordMinDescription
+      ? null
+      : discordDescription(content, fields.length > 0, room);
   const embed: DiscordEmbed = {
     color: discordColors[content.tone],
     timestamp: new Date(content.at).toISOString(),
@@ -505,8 +554,8 @@ export const discordPayload = (message: AlertMessage): DiscordPayload => {
   if (fields.length > 0) {
     embed.fields = fields;
   }
-  if (content.url !== null) {
-    embed.url = content.url;
+  if (linked !== null) {
+    embed.url = linked;
   }
   const payload: DiscordPayload = {
     allowed_mentions: { parse: content.mention ? ["everyone"] : [] },
@@ -524,15 +573,42 @@ const slackLimits = {
   fields: 10,
   header: 150,
   sectionText: 3000,
+  /** The top-level `text` (the notification fallback). */
+  text: 40_000,
 };
+
+/** The longest link label: the full URL is behind it. */
+const slackLabelMax = 200;
+/** A link whose label would be shorter shows the URL, cut, instead. */
+const slackLabelMin = 40;
 
 /** Slack's required escapes in `mrkdwn` text. */
 const slackEscape = (text: string): string =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
-/** A `<url|label>` link; the URL must not carry `|` or `>`. */
-const slackLink = (url: string): string =>
-  `<${url.replaceAll("|", "%7C").replaceAll(">", "%3E")}|${slackEscape(url)}>`;
+/**
+ * `text` escaped for `mrkdwn` and cut to `max` characters, ending in `…`
+ * if it was cut; never through an escape.
+ */
+const slackClip = (text: string, max: number): string => {
+  const escaped = slackEscape(text);
+  return escaped.length <= max
+    ? escaped
+    : `${cut(escaped, max - 1).replace(/&[a-z]*$/u, "")}…`;
+};
+
+/**
+ * A `<url|label>` link in at most `max` characters, the label cut to fit
+ * (the URL must not carry `|` or `>`). A URL too long for that is shown as
+ * plain text, cut, without a link.
+ */
+const slackLink = (url: string, max: number): string => {
+  const target = url.replaceAll("|", "%7C").replaceAll(">", "%3E");
+  const room = Math.min(slackLabelMax, max - target.length - "<|>".length);
+  return room < slackLabelMin
+    ? slackClip(url, max)
+    : `<${target}|${slackClip(url, room)}>`;
+};
 
 const mrkdwn = (text: string) => ({ text, type: "mrkdwn" as const });
 
@@ -540,25 +616,24 @@ const mrkdwn = (text: string) => ({ text, type: "mrkdwn" as const });
  * A Slack incoming-webhook body in Block Kit: a header (emoji and title),
  * the monitor link (after `<!channel>` on a down alert), the fields, the
  * excerpt as a code block and the time. `text` is the notification
- * fallback.
+ * fallback. Every text is cut to Slack's limits (a URL too long to link
+ * is shown cut, as plain text).
  */
 export const slackPayload = (message: AlertMessage) => {
   const content = alertContent(message);
   const heading = `${content.emoji} ${content.title}`;
-  const lead = [
-    content.mention ? "<!channel>" : null,
-    content.url === null ? null : slackLink(content.url),
-  ].filter(Predicate.isNotNull);
-  const fields = content.fields
-    .slice(0, slackLimits.fields)
-    .map((field) =>
-      mrkdwn(
-        clip(
-          `*${slackEscape(field.name)}*\n${slackEscape(field.value)}`,
-          slackLimits.fieldText
-        )
-      )
+  const alarm = content.mention ? "<!channel> " : "";
+  const lead = `${alarm}${
+    content.url === null
+      ? ""
+      : slackLink(content.url, slackLimits.sectionText - alarm.length)
+  }`.trim();
+  const fields = content.fields.slice(0, slackLimits.fields).map((field) => {
+    const name = `*${slackEscape(field.name)}*\n`;
+    return mrkdwn(
+      `${name}${slackClip(field.value, slackLimits.fieldText - name.length)}`
     );
+  });
   const seconds = Math.floor(content.at / 1000);
   const iso = new Date(content.at).toISOString();
   const blocks = [
@@ -572,14 +647,12 @@ export const slackPayload = (message: AlertMessage) => {
     },
     ...(lead.length === 0
       ? []
-      : [{ text: mrkdwn(lead.join(" ")), type: "section" as const }]),
+      : [{ text: mrkdwn(lead), type: "section" as const }]),
     ...(fields.length === 0 ? [] : [{ fields, type: "section" as const }]),
     ...(fields.length === 0 && content.summary !== null
       ? [
           {
-            text: mrkdwn(
-              clip(slackEscape(content.summary), slackLimits.sectionText)
-            ),
+            text: mrkdwn(slackClip(content.summary, slackLimits.sectionText)),
             type: "section" as const,
           },
         ]
@@ -607,7 +680,7 @@ export const slackPayload = (message: AlertMessage) => {
   ];
   return {
     blocks,
-    text: `${content.mention ? "<!channel> " : ""}${slackEscape(heading)}`,
+    text: `${alarm}${slackClip(heading, slackLimits.text - alarm.length)}`,
   };
 };
 
@@ -712,34 +785,44 @@ const ntfyTags = (message: AlertMessage): string =>
 
 /**
  * ntfy turns a message over 4096 bytes into an attachment (or rejects
- * it); the excerpt is cut to keep well under that.
+ * it); the whole message is kept to {@link ntfyMaxBytes}, the excerpt to
+ * {@link ntfyExcerptChars} characters.
  */
 const ntfyExcerptChars = 3000;
 const ntfyMaxBytes = 4000;
-
-/** `text` cut to at most `max` UTF-8 bytes, on a character boundary. */
-const fitBytes = (text: string, max: number): string => {
-  const bytes = new TextEncoder().encode(text);
-  return bytes.byteLength <= max
-    ? text
-    : new TextDecoder().decode(bytes.subarray(0, max), { stream: true });
-};
+/** The excerpt keeps at least this much before the summary is cut. */
+const ntfyMinExcerptBytes = 512;
+const ntfySeparator = "\n\n";
 
 /**
  * The ntfy message: the summary, then the excerpt as plain text (the
- * monitor URL when there is neither; it is also the click-through).
+ * monitor URL when there is neither; it is also the click-through), in at
+ * most {@link ntfyMaxBytes}. The excerpt is cut first (keeping its
+ * marker), down to {@link ntfyMinExcerptBytes}; then the summary (ending
+ * in `…`).
  */
 const ntfyBody = (content: AlertContent): string => {
-  const parts = [
-    content.summary,
-    content.excerpt === null
+  if (content.excerpt === null) {
+    return clipBytes(
+      content.summary ?? content.url ?? content.title,
+      ntfyMaxBytes
+    );
+  }
+  const summary =
+    content.summary === null
       ? null
-      : excerptText(content.excerpt, ntfyExcerptChars),
-  ].filter(Predicate.isNotNull);
-  return fitBytes(
-    parts.length === 0 ? (content.url ?? content.title) : parts.join("\n\n"),
-    ntfyMaxBytes
+      : clipBytes(
+          content.summary,
+          ntfyMaxBytes - ntfySeparator.length - ntfyMinExcerptBytes
+        );
+  const used =
+    summary === null ? 0 : utf8Length(summary) + ntfySeparator.length;
+  const excerpt = excerptText(
+    content.excerpt,
+    ntfyExcerptChars,
+    ntfyMaxBytes - used
   );
+  return summary === null ? excerpt : `${summary}${ntfySeparator}${excerpt}`;
 };
 
 export interface AlertRequest {

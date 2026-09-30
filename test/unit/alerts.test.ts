@@ -138,6 +138,40 @@ const aspenPretty = JSON.stringify(JSON.parse(aspenBody), null, 2);
 /** Occurrences of ``` in `text`. */
 const fences = (text: string) => text.split("```").length - 1;
 
+/** A signed URL of `length` characters, with `&` to escape. */
+const longUrl = (length: number) => {
+  const head = "https://example.com/reports/";
+  const query = "?X-Signature=a&b=c".padEnd(length - head.length, "x&y");
+  return `${head}${query}`;
+};
+/** A down alert past every limit: long URL, name, cause and excerpt. */
+const oversized = (url: string) =>
+  AlertMessage.Down({
+    ...downAlert,
+    incident: {
+      ...incident,
+      cause: `expected 2xx, got 500: ${"<é&>".repeat(1500)}`,
+      responseExcerpt: {
+        text: JSON.stringify({ items: "x".repeat(5000) }),
+        truncated: true,
+      },
+    },
+    monitor: { ...monitor, name: "N".repeat(400), url },
+  });
+
+/** The length of `text` in UTF-8 bytes. */
+const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+
+const SlackBlocks = Schema.Array(
+  Schema.Struct({
+    fields: Schema.optionalKey(
+      Schema.Array(Schema.Struct({ text: Schema.String }))
+    ),
+    text: Schema.optionalKey(Schema.Struct({ text: Schema.String })),
+    type: Schema.String,
+  })
+);
+
 describe("retry classification and backoff", () => {
   it("treats 2xx as delivered and 4xx other than 408/425/429 as permanent", () => {
     assert.strictEqual(classifyStatus(200), "delivered");
@@ -328,6 +362,36 @@ describe("Discord payloads", () => {
     assert.isAtMost(total, 6000);
   });
 
+  it("keeps every part within Discord's limits for a long URL", () => {
+    const url = longUrl(5000);
+    const embed = embedOf(oversized(url));
+    const fields = embed.fields ?? [];
+    const description = embed.description ?? "";
+    assert.isAtMost(embed.title.length, 256);
+    // Too long to link: shown, cut, as a field.
+    assert.isUndefined(embed.url);
+    const urlField = fields.find((field) => field.name === "URL");
+    assert.isDefined(urlField);
+    assert.isTrue(urlField?.value.startsWith("https://example.com/reports/"));
+    assert.isTrue(urlField?.value.endsWith("…"));
+    for (const field of fields) {
+      assert.isAtMost(field.name.length, 256);
+      assert.isAtMost(field.value.length, 1024);
+    }
+    assert.isAtMost(description.length, 4096);
+    assert.isTrue(description.endsWith("…(truncated)"));
+    const total =
+      embed.title.length +
+      description.length +
+      fields.reduce((sum, f) => sum + f.name.length + f.value.length, 0);
+    assert.isAtMost(total, 6000);
+
+    // A URL within 2,048 characters still links the title.
+    const linked = embedOf(oversized(longUrl(2048)));
+    assert.strictEqual(linked.url, longUrl(2048));
+    assert.isUndefined(linked.fields?.find((field) => field.name === "URL"));
+  });
+
   it("keeps backticks in the body from closing the block", () => {
     const { description = "" } = embedOf(
       downWith("oops ``` @everyone ```` done")
@@ -375,6 +439,49 @@ describe("Slack payloads", () => {
         type: "context",
       },
     ]);
+  });
+
+  it("keeps every text within Slack's limits for a long URL", () => {
+    for (const message of [
+      oversized(longUrl(5000)),
+      AlertMessage.Recovered({
+        ...recoveredAlert,
+        monitor: { ...monitor, url: longUrl(5000) },
+      }),
+    ]) {
+      const body = slackOf(message);
+      const blocks = Schema.decodeUnknownSync(SlackBlocks)(body.blocks);
+      for (const block of blocks) {
+        const text = block.text?.text ?? "";
+        assert.isAtMost(
+          text.length,
+          block.type === "header" ? 150 : 3000,
+          block.type
+        );
+        for (const field of block.fields ?? []) {
+          assert.isAtMost(field.text.length, 2000);
+          // Never cut through an escape.
+          assert.notMatch(field.text, /&[a-z]*…$/u);
+        }
+      }
+      // Too long to link: the URL is shown, cut, as plain text.
+      const lead = blocks[1]?.text?.text ?? "";
+      assert.notInclude(lead, "<https://");
+      assert.include(
+        lead,
+        "https://example.com/reports/?X-Signature=a&amp;b=c"
+      );
+      assert.isTrue(lead.endsWith("…"));
+    }
+
+    // A URL that fits keeps its link, with a shortened label.
+    const url = longUrl(2500);
+    const lead =
+      Schema.decodeUnknownSync(SlackBlocks)(slackOf(oversized(url)).blocks)[1]
+        ?.text?.text ?? "";
+    assert.isAtMost(lead.length, 3000);
+    assert.isTrue(lead.startsWith(`<!channel> <${url}|https://example.com/`));
+    assert.isTrue(lead.endsWith("…>"));
   });
 
   it("escapes the excerpt and mentions no one on recovery", () => {
@@ -449,6 +556,49 @@ describe("ntfy and webhook payloads", () => {
       alertRequest("ntfy", "https://ntfy.sh/t", downWith("down", true)).body,
       "expected 2xx, got 500\n\ndown\n…(truncated)"
     );
+
+    // An oversized cause and excerpt fit 4,000 bytes, still marked.
+    const big = alertRequest(
+      "ntfy",
+      "https://ntfy.sh/t",
+      oversized(longUrl(5000))
+    );
+    assert.isAtMost(bytes(big.body), 4000);
+    assert.isTrue(big.body.endsWith("\n…(truncated)"));
+    assert.isTrue(big.body.startsWith("expected 2xx, got 500: <é&>"));
+    assert.notInclude(big.body, "\uFFFD");
+    // A cause that fits is kept whole; the excerpt gives way.
+    const cause = `cause ${"é".repeat(1500)}`;
+    const shrunk = alertRequest(
+      "ntfy",
+      "https://ntfy.sh/t",
+      AlertMessage.Down({
+        ...downAlert,
+        incident: {
+          ...incident,
+          cause,
+          responseExcerpt: { text: "é".repeat(2000), truncated: false },
+        },
+      })
+    ).body;
+    assert.isAtMost(bytes(shrunk), 4000);
+    assert.isTrue(shrunk.startsWith(`${cause}\n\n`));
+    assert.isTrue(shrunk.endsWith("é\n…(truncated)"));
+    // A long cause alone ends in an ellipsis.
+    const alone = alertRequest(
+      "ntfy",
+      "https://ntfy.sh/t",
+      AlertMessage.Down({
+        ...downAlert,
+        incident: {
+          ...incident,
+          cause: "é".repeat(3000),
+          responseExcerpt: null,
+        },
+      })
+    ).body;
+    assert.isAtMost(bytes(alone), 4000);
+    assert.isTrue(alone.endsWith("é…"));
 
     const up = alertRequest("ntfy", "https://ntfy.sh/t", recovered);
     const upUrl = new URL(up.url);

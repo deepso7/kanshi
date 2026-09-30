@@ -2,12 +2,20 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as HttpClientError from "effect/unstable/http/HttpClientError";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
-import { errorCause, exchange, readPrefix, userAgent } from "../http/client.ts";
+import {
+  concatBytes,
+  errorCause,
+  exchange,
+  readPrefix,
+  readPrefixWithin,
+  userAgent,
+} from "../http/client.ts";
 import { matchesExpectedStatus } from "./expected-status.ts";
 import type {
   CheckErrorKind,
@@ -117,6 +125,44 @@ const transportFailure = (error: HttpClientError.HttpClientError) => {
   return failure(classifyFetchError(cause), firstLine(cause));
 };
 
+/** The longest a failed status waits for its excerpt: its result is known. */
+export const excerptReadMs = 1000;
+
+/** What an attempt saw of a response before the probe's result. */
+interface Observed {
+  /** The body read: all of it the check needs, or the excerpt's part. */
+  readonly body: Uint8Array;
+  /** False when the best-effort excerpt read gave up before its end. */
+  readonly complete: boolean;
+  readonly latencyMs: number;
+  readonly status: number;
+}
+
+/** A response whose status failed, and its excerpt's chunks read so far. */
+interface FailedStatus {
+  readonly chunks: Uint8Array[];
+  readonly latencyMs: number;
+  readonly status: number;
+}
+
+const failedObserved = (seen: FailedStatus, complete: boolean): Observed => ({
+  body: concatBytes(seen.chunks),
+  complete,
+  latencyMs: seen.latencyMs,
+  status: seen.status,
+});
+
+/**
+ * The excerpt of `body`; one whose read gave up early is marked truncated:
+ * the body went on past it, or was cut off.
+ */
+const observedExcerpt = (observed: Observed): ResponseExcerpt | null => {
+  const excerpt = responseExcerpt(observed.body);
+  return excerpt === null || observed.complete
+    ? excerpt
+    : { ...excerpt, truncated: true };
+};
+
 /**
  * Probe a target once with the ambient `HttpClient`. Follows redirects,
  * gives up after `timeoutMs` (request, body and the retry together; the
@@ -124,14 +170,16 @@ const transportFailure = (error: HttpClientError.HttpClientError) => {
  * `bodyContains` is set) and never fails: every problem becomes a failed
  * {@link ProbeResult}.
  *
- * A check that fails on its status or keyword carries the first 2 KB of
- * the body as `responseExcerpt`. A failed status whose body is not read
- * otherwise (HEAD without a keyword) reads just those 2 KB, within the
- * same timeout; a successful one still leaves its body unread.
+ * A status that fails is known from the headers: the probe then only
+ * reads the first 2 KB of the body as `responseExcerpt`, best-effort,
+ * within {@link excerptReadMs} (and the timeout's remaining budget). A body
+ * that stalls or errors keeps what was read by then (marked truncated),
+ * never turning the `status` failure into a timeout. A successful HEAD
+ * without a keyword leaves its body unread.
  *
- * Latency runs from the request to the end of the body the check needs
- * (none for HEAD without a keyword, else up to 1 MB); the extra excerpt
- * read of a failed status is not part of it.
+ * Latency runs from the request to the end of the body the check needs:
+ * the headers for a failed status or a HEAD without a keyword, else the
+ * body (up to 1 MB). The excerpt read is not part of it.
  */
 export const probe = Effect.fn("Probe.run")(function* probeEffect(
   request: ProbeRequest
@@ -140,29 +188,41 @@ export const probe = Effect.fn("Probe.run")(function* probeEffect(
   const httpRequest = HttpClientRequest.make(request.method)(request.url, {
     headers: { "user-agent": userAgent },
   });
+  const deadline = (yield* Clock.currentTimeMillis) + request.timeoutMs;
+  // Set as soon as a status fails, so that the timeout, should it still
+  // fire during the excerpt read, keeps the status failure.
+  const failedStatus = yield* Ref.make(Option.none<FailedStatus>());
 
   const attempt = Effect.gen(function* attemptEffect() {
     const startedAt = yield* Clock.currentTimeMillis;
     return yield* exchange(httpRequest, (response) =>
       Effect.gen(function* responseEffect() {
+        if (!matchesExpectedStatus(request.expectedStatus, response.status)) {
+          const now = yield* Clock.currentTimeMillis;
+          const seen: FailedStatus = {
+            chunks: [],
+            latencyMs: Math.max(0, now - startedAt),
+            status: response.status,
+          };
+          yield* Ref.set(failedStatus, Option.some(seen));
+          const complete = yield* readPrefixWithin(
+            response,
+            excerptBytes + 1,
+            Math.max(0, Math.min(excerptReadMs, deadline - now)),
+            seen.chunks
+          );
+          return failedObserved(seen, complete);
+        }
         const body = readBody
           ? yield* readPrefix(response, maxBodyBytes)
-          : null;
+          : new Uint8Array(0);
         const finishedAt = yield* Clock.currentTimeMillis;
-        // Only the excerpt needs this read: failing it loses the excerpt,
-        // not the check's result.
-        const excerptBody =
-          body === null &&
-          !matchesExpectedStatus(request.expectedStatus, response.status)
-            ? yield* readPrefix(response, excerptBytes + 1).pipe(
-                Effect.orElseSucceed(() => new Uint8Array(0))
-              )
-            : null;
         return {
-          body: body ?? excerptBody ?? new Uint8Array(0),
+          body,
+          complete: true,
           latencyMs: Math.max(0, finishedAt - startedAt),
           status: response.status,
-        };
+        } satisfies Observed;
       })
     );
   }).pipe(Effect.mapError(transportFailure));
@@ -176,17 +236,23 @@ export const probe = Effect.fn("Probe.run")(function* probeEffect(
   if (Result.isFailure(result)) {
     return result.failure;
   }
-  if (Option.isNone(result.success)) {
+  // A timeout during the excerpt read keeps the failed status.
+  const observed = Option.isSome(result.success)
+    ? result.success
+    : (yield* Ref.get(failedStatus)).pipe(
+        Option.map((seen) => failedObserved(seen, false))
+      );
+  if (Option.isNone(observed)) {
     return failure("timeout", `no response within ${request.timeoutMs}ms`);
   }
-  const { body, latencyMs, status } = result.success.value;
+  const { body, latencyMs, status } = observed.value;
   if (!matchesExpectedStatus(request.expectedStatus, status)) {
     return failure(
       "status",
       `expected ${request.expectedStatus}, got ${status}`,
       status,
       latencyMs,
-      responseExcerpt(body)
+      observedExcerpt(observed.value)
     );
   }
   if (request.bodyContains !== null) {

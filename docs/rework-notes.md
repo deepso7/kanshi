@@ -1942,17 +1942,23 @@ any more (the probe's `user-agent` still does).
 - **Capture.** `probe` returns a `ProbeResult`: the `ProbeOutcome` plus
   `responseExcerpt` (`{ text, truncated }`, `ResponseExcerpt` in
   `src/domain/monitor.ts`) when the check failed on its status or keyword.
-  It is the first 2 KB (`excerptBytes`) of the body read anyway (GET, or a
-  keyword), decoded with `TextDecoder`'s `stream` option so a character
-  cut at the limit is dropped rather than turned into U+FFFD; `truncated`
-  when the body is longer. A HEAD without a keyword, whose body is not
-  otherwise read, reads `excerptBytes + 1` of a failed-status response
-  (same `readPrefix`, same timeout; a failing read only loses the
-  excerpt). Successes and transport errors have none; a blank body is
-  none.
-- **Latency** is unchanged: it stops at the end of the body the check
-  needs (none for HEAD without a keyword, else up to 1 MB). The extra
-  excerpt read of a failed HEAD is after it, inside the timeout.
+  It is the first 2 KB (`excerptBytes`) of the body, decoded with
+  `TextDecoder`'s `stream` option so a character cut at the limit is
+  dropped rather than turned into U+FFFD; `truncated` when the body is
+  longer. Successes and transport errors have none; a blank body is none.
+- **Best-effort excerpt read.** A failing status is known from the
+  headers, so the probe then reads only `excerptBytes + 1` of the body
+  (GET or HEAD), with `readPrefixWithin`: its own bound of
+  `excerptReadMs` (1 s), never past the timeout's remaining budget. A body
+  that stalls or errors keeps what was read (marked `truncated`) and the
+  `status` failure: before, a stalled body after a failing HEAD became a
+  `timeout` with no status, after the full timeout. The attempt records
+  the failed status in a `Ref` as soon as it sees it, so the outer timeout
+  firing in the same instant still reports it. A keyword check still reads
+  its body (up to 1 MB) within the timeout.
+- **Latency** stops at the end of the body the check needs: the headers
+  for a failed status or a HEAD without a keyword, else the body (up to
+  1 MB). The excerpt read is never part of it.
 - **Storage.** Migration `6_incident_excerpt` adds `latency_ms`,
   `response_excerpt` and `response_truncated` to `incidents`. `settle`
   splits the excerpt off the result: it goes on the `IncidentOpen` of a
@@ -1968,10 +1974,16 @@ any more (the probe's `user-agent` still does).
   JSON object or array (decoded with Schema), breaks every run of
   backticks with U+200B so the body cannot close the fence, and cuts to
   the target's limit with `…(truncated)` (also shown when the probe cut
-  it). Discord: description within 4096 and the embed within 6000 in
-  total. Slack: `&<>` escaped, section text within 3000, no language tag
-  (Slack does not highlight). ntfy: excerpt within 3000 characters and the
-  message within 4000 bytes (larger ones become attachments).
+  it). Discord: title 256, field names 256 and values 1024, description
+  4096, the embed within 6000 in total; a URL over 2048 characters does
+  not link the title but is shown, cut, as a `URL` field. Slack: `&<>`
+  escaped and never cut through an escape; header 150, section text 3000,
+  field text 2000; the monitor link's label is cut (to 200), and a URL too
+  long to link within the section is shown cut, as plain text. No language
+  tag (Slack does not highlight). ntfy: the message within 4000 UTF-8
+  bytes (larger ones become attachments): the excerpt (at most 3000
+  characters) shrinks first, keeping `…(truncated)`, down to 512 bytes;
+  then the cause is cut, ending in `…`.
 - **Mentions.** Only a fresh `Down` pings: Discord `content: "@everyone"`
   with `allowed_mentions: { parse: ["everyone"] }` (webhooks default to
   parsing users only, so without it the text would not ping), Slack
