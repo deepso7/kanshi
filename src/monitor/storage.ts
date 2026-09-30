@@ -1,4 +1,5 @@
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -147,7 +148,8 @@ export const monitorMigrationRecord = {
     // Existing monitors: assume enabled since creation, maintain now.
     yield* sql`INSERT INTO enabled_periods (started_at, ended_at, interval_seconds)
       SELECT created_at, NULL, interval_seconds FROM config WHERE enabled = 1`;
-    yield* sql`UPDATE state SET next_maintenance_at = ${Date.now()}
+    const now = yield* Clock.currentTimeMillis;
+    yield* sql`UPDATE state SET next_maintenance_at = ${now}
       WHERE next_maintenance_at IS NULL`;
   }),
   "4_schedule_reset": Effect.gen(function* scheduleResetMigration() {

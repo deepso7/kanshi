@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 
 import type { MonitorConfig } from "../../src/domain/monitor.ts";
 import {
@@ -18,6 +19,37 @@ import {
 import { clientLayer, columns, migrate, rows } from "./local-sqlite.ts";
 
 describe("Monitor migrations", () => {
+  it.effect("schedule maintenance now for version 2 Monitors", () =>
+    Effect.gen(function* historyMigrationTest() {
+      const db = new DatabaseSync(":memory:");
+      yield* migrate(db, monitorMigrationRecord, 2);
+      db.exec(`INSERT INTO config (singleton, id, key, managed, name, url,
+          method, expected_status, body_contains, timeout_ms,
+          interval_seconds, failure_threshold, success_threshold, enabled,
+          channels, generation, created_at, updated_at)
+        VALUES (1, 'm1', 'site', 1, 'Site', 'https://example.com/', 'GET',
+          '2xx', NULL, 10000, 60, 2, 1, 1, '[]', 1, 100, 1000)`);
+      db.exec(`INSERT INTO state (singleton, status, failure_streak,
+          success_streak, last_checked_at, last_result, open_incident_id,
+          next_check_at, next_check_kind, next_slot_at, confirm_counted,
+          manual_requested_at, inflight, summary_revision,
+          next_maintenance_at, rolled_up_through)
+        VALUES (1, 'up', 0, 1, 5000, NULL, NULL, 65000, 'scheduled', 65000,
+          0, NULL, NULL, 1, NULL, NULL)`);
+
+      yield* TestClock.setTime(1_234_567);
+      yield* migrate(db, monitorMigrationRecord, 3);
+      assert.deepStrictEqual(
+        rows(db, "SELECT next_maintenance_at FROM state"),
+        [{ next_maintenance_at: 1_234_567 }]
+      );
+      assert.deepStrictEqual(rows(db, "SELECT * FROM enabled_periods"), [
+        { ended_at: null, id: 1, interval_seconds: 60, started_at: 100 },
+      ]);
+      db.close();
+    })
+  );
+
   it.effect("upgrade a populated version 4 Monitor, keeping its data", () =>
     Effect.gen(function* upgradeTest() {
       const db = new DatabaseSync(":memory:");

@@ -1,3 +1,5 @@
+import * as DateTime from "effect/DateTime";
+
 import type {
   DailyRollup,
   RecentActivity,
@@ -34,7 +36,7 @@ export const partialThreshold = 0.8;
 
 /** The UTC day of a timestamp. */
 export const dayOf = (at: number): string =>
-  new Date(at).toISOString().slice(0, 10);
+  DateTime.formatIsoDateUtc(DateTime.makeUnsafe(at));
 
 /** Midnight UTC starting `day`. */
 export const dayStart = (day: string): number => Date.parse(`${day}T00:00:00Z`);
