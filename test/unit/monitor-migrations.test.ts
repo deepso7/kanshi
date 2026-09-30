@@ -8,8 +8,12 @@ import * as Effect from "effect/Effect";
 
 import type { MonitorConfig } from "../../src/domain/monitor.ts";
 import {
+  incidentExcerpt,
+  listIncidents,
   monitorMigrationRecord,
+  openIncident,
   readConfig,
+  readIncident,
 } from "../../src/monitor/storage.ts";
 import { clientLayer, columns, migrate, rows } from "./local-sqlite.ts";
 
@@ -54,11 +58,7 @@ describe("Monitor migrations", () => {
       const kept = ["state", "checks", "incidents", "outbox"] as const;
       const before = kept.map((table) => rows(db, `SELECT * FROM ${table}`));
 
-      const upgraded = yield* migrate(
-        db,
-        monitorMigrationRecord,
-        Number.POSITIVE_INFINITY
-      );
+      const upgraded = yield* migrate(db, monitorMigrationRecord, 5);
       assert.deepStrictEqual(
         upgraded.map(([id, name]) => `${id}_${name}`),
         ["5_drop_key_managed"]
@@ -91,9 +91,96 @@ describe("Monitor migrations", () => {
       } satisfies MonitorConfig);
 
       // Applied migrations are skipped on the next activation.
+      assert.deepStrictEqual(yield* migrate(db, monitorMigrationRecord, 5), []);
+      db.close();
+    })
+  );
+
+  it.effect("add the opening check's excerpt and latency to incidents", () =>
+    Effect.gen(function* excerptMigrationTest() {
+      const db = new DatabaseSync(":memory:");
+      yield* migrate(db, monitorMigrationRecord, 5);
+      db.exec(`INSERT INTO incidents (id, started_at, resolved_at,
+          resolution, cause, last_http_status)
+        VALUES ('i1', 5000, 9000, 'recovered', 'expected 2xx, got 500', 500)`);
+      const before = rows(db, "SELECT * FROM incidents");
+
+      const upgraded = yield* migrate(
+        db,
+        monitorMigrationRecord,
+        Number.POSITIVE_INFINITY
+      );
       assert.deepStrictEqual(
-        yield* migrate(db, monitorMigrationRecord, Number.POSITIVE_INFINITY),
-        []
+        upgraded.map(([id, name]) => `${id}_${name}`),
+        ["6_incident_excerpt"]
+      );
+      assert.includeMembers(
+        [...columns(db, "incidents")],
+        ["latency_ms", "response_excerpt", "response_truncated"]
+      );
+      // The old incident is kept, with nothing known about its body.
+      assert.deepStrictEqual(rows(db, "SELECT * FROM incidents"), [
+        {
+          ...before[0],
+          latency_ms: null,
+          response_excerpt: null,
+          response_truncated: 0,
+        },
+      ]);
+
+      const client = clientLayer(db);
+      const old = yield* readIncident("i1").pipe(Effect.provide(client));
+      assert.strictEqual(old?.latencyMs, null);
+      assert.isNull(old === null ? "missing" : incidentExcerpt(old));
+
+      // A new incident stores what its opening check saw.
+      const excerpt = { text: '{"ok":false}', truncated: true };
+      yield* openIncident({
+        cause: "expected 2xx, got 503",
+        id: "i2",
+        lastHttpStatus: 503,
+        latencyMs: 412,
+        responseExcerpt: excerpt,
+        startedAt: 10_000,
+      }).pipe(Effect.provide(client));
+      const stored = yield* readIncident("i2").pipe(Effect.provide(client));
+      assert.deepStrictEqual(stored, {
+        cause: "expected 2xx, got 503",
+        id: "i2",
+        lastHttpStatus: 503,
+        latencyMs: 412,
+        resolution: null,
+        resolvedAt: null,
+        responseExcerpt: '{"ok":false}',
+        responseTruncated: true,
+        startedAt: 10_000,
+      });
+      assert.deepStrictEqual(
+        stored === null ? null : incidentExcerpt(stored),
+        excerpt
+      );
+      // The API's incident list leaves the alert-only columns out.
+      const listed = yield* listIncidents(10).pipe(Effect.provide(client));
+      assert.deepStrictEqual(
+        listed.map((incident) => Object.keys(incident).toSorted()),
+        [
+          [
+            "cause",
+            "id",
+            "lastHttpStatus",
+            "resolution",
+            "resolvedAt",
+            "startedAt",
+          ],
+          [
+            "cause",
+            "id",
+            "lastHttpStatus",
+            "resolution",
+            "resolvedAt",
+            "startedAt",
+          ],
+        ]
       );
       db.close();
     })

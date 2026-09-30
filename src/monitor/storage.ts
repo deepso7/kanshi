@@ -7,7 +7,7 @@ import type { AlertEvent } from "../domain/alert.ts";
 import { Notification, OutboxEntry } from "../domain/alert.ts";
 import type { DailyRollup } from "../domain/history.ts";
 import { Check, Incident } from "../domain/history.ts";
-import type { IncidentResolution } from "../domain/monitor.ts";
+import type { IncidentResolution, ResponseExcerpt } from "../domain/monitor.ts";
 import {
   ChannelSelection,
   Inflight,
@@ -165,6 +165,16 @@ export const monitorMigrationRecord = {
     yield* sql`ALTER TABLE config DROP COLUMN key`;
     yield* sql`ALTER TABLE config DROP COLUMN managed`;
   }),
+  // What the opening check saw, for the incident's alerts: its latency and
+  // the start of the response body (not kept per check). Existing
+  // incidents have neither.
+  "6_incident_excerpt": Effect.gen(function* incidentExcerptMigration() {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`ALTER TABLE incidents ADD COLUMN latency_ms INTEGER`;
+    yield* sql`ALTER TABLE incidents ADD COLUMN response_excerpt TEXT`;
+    yield* sql`ALTER TABLE incidents
+      ADD COLUMN response_truncated INTEGER NOT NULL DEFAULT 0`;
+  }),
 } satisfies Record<
   string,
   Effect.Effect<unknown, unknown, SqlClient.SqlClient>
@@ -205,8 +215,25 @@ export const CheckRow = Schema.Struct({
 });
 export type CheckRow = typeof CheckRow.Type;
 
-export const IncidentRow = Incident;
-export type IncidentRow = Incident;
+/**
+ * A stored incident: the API's {@link Incident} plus what its opening
+ * check saw, which only its alerts use.
+ */
+export const IncidentRow = Schema.Struct({
+  ...Incident.fields,
+  latencyMs: Schema.NullOr(Schema.Number),
+  responseExcerpt: Schema.NullOr(Schema.String),
+  responseTruncated: Schema.BooleanFromBit,
+});
+export type IncidentRow = typeof IncidentRow.Type;
+
+/** The opening check's response excerpt of a stored incident. */
+export const incidentExcerpt = (
+  row: Pick<IncidentRow, "responseExcerpt" | "responseTruncated">
+): ResponseExcerpt | null =>
+  row.responseExcerpt === null
+    ? null
+    : { text: row.responseExcerpt, truncated: row.responseTruncated };
 
 const NotificationRow = Schema.Struct({
   ...Notification.fields,
@@ -284,12 +311,19 @@ export const insertCheck = Effect.fn("MonitorStorage.insertCheck")(
 export const openIncident = Effect.fn("MonitorStorage.openIncident")(
   function* openIncidentEffect(incident: IncidentOpen) {
     const sql = yield* SqlClient.SqlClient;
-    yield* sql`INSERT OR IGNORE INTO incidents ${sql.insert({
-      cause: incident.cause,
-      id: incident.id,
-      lastHttpStatus: incident.lastHttpStatus,
-      startedAt: incident.startedAt,
-    })}`;
+    yield* sql`INSERT OR IGNORE INTO incidents ${sql.insert(
+      Schema.encodeSync(IncidentRow)({
+        cause: incident.cause,
+        id: incident.id,
+        lastHttpStatus: incident.lastHttpStatus,
+        latencyMs: incident.latencyMs,
+        resolution: null,
+        resolvedAt: null,
+        responseExcerpt: incident.responseExcerpt?.text ?? null,
+        responseTruncated: incident.responseExcerpt?.truncated ?? false,
+        startedAt: incident.startedAt,
+      })
+    )}`;
   }
 );
 
@@ -353,14 +387,16 @@ export const readRecent = Effect.fn("MonitorStorage.readRecent")(
   }
 );
 
+/** Incidents as the API shows them, without the alert-only columns. */
 export const listIncidents = Effect.fn("MonitorStorage.listIncidents")(
   function* listIncidentsEffect(limit: number) {
     const sql = yield* SqlClient.SqlClient;
-    const rows =
-      yield* sql`SELECT * FROM incidents ORDER BY started_at DESC LIMIT ${limit}`;
-    return yield* Schema.decodeUnknownEffect(Schema.Array(IncidentRow))(
-      rows
-    ).pipe(Effect.orDie);
+    const rows = yield* sql`SELECT id, started_at, resolved_at, resolution,
+        cause, last_http_status
+      FROM incidents ORDER BY started_at DESC LIMIT ${limit}`;
+    return yield* Schema.decodeUnknownEffect(Schema.Array(Incident))(rows).pipe(
+      Effect.orDie
+    );
   }
 );
 
