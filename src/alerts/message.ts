@@ -1,4 +1,5 @@
 import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Match from "effect/Match";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
@@ -336,18 +337,23 @@ export const alertText = (message: AlertMessage): AlertText => {
   };
 };
 
+/** `at` (epoch ms) as an ISO 8601 UTC timestamp, e.g. `2026-01-02T03:04:05.000Z`. */
+const isoTime = (at: number): string =>
+  DateTime.formatIso(DateTime.makeUnsafe(at));
+
 /** Appended to an excerpt that was cut, by the probe or to fit a limit. */
 export const truncatedMarker = "…(truncated)";
 
-const decodeJson = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Unknown)
-);
+/** JSON text, encoded with a 2-space indent. */
+const PrettyJson = Schema.fromJsonString(Schema.Unknown, { space: 2 });
+const decodePrettyJson = Schema.decodeUnknownOption(PrettyJson);
+const encodePrettyJson = Schema.encodeOption(PrettyJson);
 
 /** The excerpt pretty-printed (2-space indent) if it is a JSON object or array. */
 const prettyJson = (text: string): Option.Option<string> =>
-  decodeJson(text).pipe(
+  decodePrettyJson(text).pipe(
     Option.filter(Predicate.isObjectOrArray),
-    Option.map((value) => JSON.stringify(value, null, 2))
+    Option.flatMap(encodePrettyJson)
   );
 
 /**
@@ -545,7 +551,7 @@ export const discordPayload = (message: AlertMessage): DiscordPayload => {
       : discordDescription(content, fields.length > 0, room);
   const embed: DiscordEmbed = {
     color: discordColors[content.tone],
-    timestamp: new Date(content.at).toISOString(),
+    timestamp: isoTime(content.at),
     title,
   };
   if (description !== null) {
@@ -635,7 +641,7 @@ export const slackPayload = (message: AlertMessage) => {
     );
   });
   const seconds = Math.floor(content.at / 1000);
-  const iso = new Date(content.at).toISOString();
+  const iso = isoTime(content.at);
   const blocks = [
     {
       text: {
@@ -834,12 +840,14 @@ export interface AlertRequest {
 /** The JSON bodies sent to Slack, Discord and generic webhooks. */
 type JsonBody = DiscordPayload | SlackPayload | WebhookPayload;
 
+const encodeJsonBody = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
 const json = (
   url: string,
   body: JsonBody,
   headers: Readonly<Record<string, string>> = {}
 ): AlertRequest => ({
-  body: JSON.stringify(body),
+  body: encodeJsonBody(body),
   headers: { "content-type": "application/json", ...headers },
   url,
 });

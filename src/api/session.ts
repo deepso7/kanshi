@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
@@ -49,7 +50,9 @@ export const SessionHandlers = HttpApiBuilder.group(
         const signedIn =
           value === undefined
             ? Effect.succeed(false)
-            : verifySession(token, value, Date.now());
+            : Clock.currentTimeMillis.pipe(
+                Effect.flatMap((now) => verifySession(token, value, now))
+              );
         return signedIn.pipe(Effect.map((valid) => ({ signedIn: valid })));
       })
       .handle("signIn", ({ payload, request }) =>
@@ -62,7 +65,8 @@ export const SessionHandlers = HttpApiBuilder.group(
             yield* Effect.logWarning("dashboard sign-in with a wrong token");
             return yield* new HttpApiError.Unauthorized();
           }
-          const session = yield* createSession(token, Date.now());
+          const now = yield* Clock.currentTimeMillis;
+          const session = yield* createSession(token, now);
           yield* withCookie(sessionCookie(session));
         })
       )

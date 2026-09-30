@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -68,7 +69,10 @@ export const credentialValidatorLayer = (expected: Redacted.Redacted<string>) =>
     CredentialValidator,
     CredentialValidator.of({
       validateSession: (value) =>
-        verifySession(Redacted.value(expected), value, Date.now()).pipe(
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) =>
+            verifySession(Redacted.value(expected), value, now)
+          ),
           Effect.flatMap((valid) =>
             valid ? Effect.void : Effect.fail(new HttpApiError.Unauthorized())
           )
