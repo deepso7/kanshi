@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { RuntimeContext } from "alchemy";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 
 import type { RecentActivity } from "../../src/domain/history.ts";
 import type {
@@ -22,6 +23,8 @@ import {
 } from "../../src/service/monitors.ts";
 
 const t0 = 1_000_000;
+/** When the dashboard reads happen: a day after `t0`. */
+const readAt = t0 + 86_400_000;
 
 const config: MonitorConfig = {
   bodyContains: null,
@@ -310,14 +313,14 @@ const makeReadService = (
       ),
     recent: (windowMs: number, buckets: number) =>
       recentStub(id, windowMs, buckets),
-    // "old" was created long ago and never checked (stale); the others
-    // were just created.
+    // "old" was created a day before the reads and never checked (stale);
+    // the others were just created.
     snapshot: () =>
       Effect.succeed({
         ...snapshot,
         config: {
           ...config,
-          createdAt: id === "old" ? t0 : Date.now(),
+          createdAt: id === "old" ? t0 : readAt,
           id,
         },
       }),
@@ -395,6 +398,7 @@ describe("monitor reads for the dashboard", () => {
 
   it.effect("get and list report an open watchdog episode", () =>
     Effect.gen(function* notCheckedTest() {
+      yield* TestClock.setTime(readAt);
       const { service } = makeReadService(
         [entryOf("m1", {}, "watchdog-1"), entryOf("m2"), entryOf("old")],
         () => Effect.succeed(activity(1, 1))

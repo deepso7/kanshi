@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -82,6 +83,7 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
       if (target === null) {
         return yield* notFound(id);
       }
+      const sentAt = yield* Clock.currentTimeMillis;
       const result = yield* deliver(
         alertRequest(
           target.kind,
@@ -89,7 +91,7 @@ export const makeChannelService = (deps: ChannelServiceDeps) => {
           AlertMessage.Test({
             channelName: target.name,
             idempotencyKey: `test:${target.id}:${crypto.randomUUID()}`,
-            sentAt: Date.now(),
+            sentAt,
           })
         )
       ).pipe(Effect.provideService(HttpClient.HttpClient, deps.http));

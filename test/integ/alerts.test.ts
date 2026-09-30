@@ -32,6 +32,8 @@ interface Received {
   readonly idempotencyKey: string | null;
   readonly recovered: boolean;
   readonly respondedWith: number;
+  readonly responseExcerpt: string | null;
+  readonly responseTruncated: boolean;
   readonly title: string;
 }
 
@@ -55,6 +57,8 @@ const received = (tag: string) =>
                 idempotencyKey: event.detail.idempotencyKey,
                 recovered: body.recovered,
                 respondedWith: event.detail.respondedWith,
+                responseExcerpt: body.responseExcerpt,
+                responseTruncated: body.responseTruncated,
                 title: body.title,
               }) satisfies Received
           )
@@ -217,6 +221,9 @@ test(
     expect(down?.id).toBe(`${incidentId}:down:${channel.id}`);
     expect(down?.idempotencyKey).toBe(down?.id ?? "");
     expect(down?.title).toBe("integration is down");
+    // The flip target answers 503 "down": the alert carries that body.
+    expect(down?.responseExcerpt).toBe("down");
+    expect(down?.responseTruncated).toBe(false);
 
     yield* setFlip(flip, true);
     const [, up] = yield* waitFor(
@@ -226,7 +233,8 @@ test(
     );
     expect(up?.event).toBe("up");
     expect(up?.id).toBe(`${incidentId}:up:${channel.id}`);
-    expect(up?.title).toStartWith("integration is up again after");
+    expect(up?.title).toBe("integration recovered");
+    expect(up?.responseExcerpt).toBeNull();
 
     const after = yield* detail(monitor.id);
     expect(
@@ -293,6 +301,7 @@ test(
     expect(retried?.idempotencyKey).toBe(first?.id ?? "");
     expect(retried?.recovered).toBe(true);
     expect(retried?.title).toContain("was down for");
+    expect(retried?.responseExcerpt).toBe("down");
 
     const after = yield* waitFor("up skipped", detail(monitor.id), (d) =>
       d.alerts.outbox.some((r) => r.event === "up" && r.state === "skipped")

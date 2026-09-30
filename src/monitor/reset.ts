@@ -1,10 +1,9 @@
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
+
 import { probeAffectingFields } from "../domain/monitor-input.ts";
-import type {
-  IncidentResolution,
-  MonitorConfig,
-  MonitorState,
-} from "../domain/monitor.ts";
-import { reviseSummary } from "../domain/monitor.ts";
+import type { IncidentResolution, MonitorState } from "../domain/monitor.ts";
+import { MonitorConfig, reviseSummary } from "../domain/monitor.ts";
 import { revives } from "../watchdog/rules.ts";
 import type { IncidentClose } from "./cycle.ts";
 
@@ -16,14 +15,15 @@ export interface ConfigChange {
   readonly state: MonitorState;
 }
 
-const sameValue = <T>(left: T, right: T): boolean =>
-  JSON.stringify(left) === JSON.stringify(right);
+/** Structural equality over the probe-affecting fields only. */
+const sameProbe = Schema.toEquivalence(
+  MonitorConfig.mapFields(Struct.pick(probeAffectingFields))
+);
 
 export const isProbeAffecting = (
   before: MonitorConfig,
   after: MonitorConfig
-): boolean =>
-  probeAffectingFields.some((field) => !sameValue(before[field], after[field]));
+): boolean => !sameProbe(before, after);
 
 /**
  * Clears the in-flight check and any pending confirm; next check now. Stamps

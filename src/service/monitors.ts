@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -211,7 +212,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
   const create = (payload: MonitorCreateInput, options: CreateOptions = {}) =>
     Effect.gen(function* createMonitor() {
       const id = crypto.randomUUID();
-      const now = Date.now();
+      const now = yield* Clock.currentTimeMillis;
       const built = buildConfig(id, payload, { devMode: deps.devMode, now });
       if (Result.isFailure(built)) {
         return yield* new BadRequest({ message: built.failure });
@@ -274,7 +275,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
         return toResponse(
           { notChecked: false, public: isPublic },
           snapshot,
-          Date.now()
+          yield* Clock.currentTimeMillis
         );
       }
       const activated = yield* registry().activate(id, opId);
@@ -286,7 +287,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
       return toResponse(
         { notChecked: false, public: isPublic },
         snapshot,
-        Date.now()
+        yield* Clock.currentTimeMillis
       );
     });
 
@@ -296,7 +297,11 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
       const snapshot = yield* monitor(id)
         .snapshot()
         .pipe(Effect.mapError(() => notFound(id)));
-      return toResponse(flagsOf(entry), snapshot, Date.now());
+      return toResponse(
+        flagsOf(entry),
+        snapshot,
+        yield* Clock.currentTimeMillis
+      );
     });
 
   /**
@@ -330,7 +335,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
           .pipe(Effect.mapError(() => notFound(id)));
         const checked = patchConfig(current.config, rest, {
           devMode: deps.devMode,
-          now: Date.now(),
+          now: yield* Clock.currentTimeMillis,
         });
         if (Result.isFailure(checked)) {
           return yield* new BadRequest({ message: checked.failure });
@@ -389,7 +394,7 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
           public: patch.public ?? entry.public,
         },
         snapshot,
-        Date.now()
+        yield* Clock.currentTimeMillis
       );
     });
 
@@ -416,7 +421,11 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
             MonitorTombstoned: () => Effect.fail(notFound(id)),
           })
         );
-      return toResponse(flagsOf(entry), snapshot, Date.now());
+      return toResponse(
+        flagsOf(entry),
+        snapshot,
+        yield* Clock.currentTimeMillis
+      );
     });
 
   const checks = (id: string, query: ChecksQuery) =>
@@ -470,9 +479,11 @@ export const makeMonitorService = (deps: MonitorServiceDeps) => {
 
   /** The dashboard's data in one call. */
   const overview = (window: RecentWindow) =>
-    listWithLive(window).pipe(
-      Effect.map((rows) => toOverview(rows, Date.now()))
-    );
+    Effect.gen(function* overviewEffect() {
+      const rows = yield* listWithLive(window);
+      const now = yield* Clock.currentTimeMillis;
+      return toOverview(rows, now);
+    });
 
   /** The watchdog's open "not being checked" episodes. */
   const openEpisodes = () => registry().openEpisodes();

@@ -1,4 +1,5 @@
 import type { RuntimeContext } from "alchemy";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -43,9 +44,10 @@ const statusParam = (value: string | null, fallback: number): number => {
 
 const maxDelayMs = 60_000;
 
-const nowParam = (url: URL): number => {
+/** The `now` query parameter (epoch ms), else `now`. */
+const nowParam = (url: URL, now: number): number => {
   const value = Number(url.searchParams.get("now") ?? Number.NaN);
-  return Number.isFinite(value) ? value : Date.now();
+  return Number.isFinite(value) ? value : now;
 };
 
 type Method = "ANY" | "GET" | "POST";
@@ -114,10 +116,15 @@ const target = (url: URL) =>
     return HttpServerResponse.text(body, { status });
   });
 
-/** A JSON alert body's candidate message fields (Slack, Discord). */
+/**
+ * A JSON alert body's candidate message fields: Slack's `text`, a Discord
+ * embed's title, a generic webhook's `text`.
+ */
 const AlertBody = Schema.fromJsonString(
   Schema.Struct({
-    content: Schema.optionalKey(Schema.Json),
+    embeds: Schema.optionalKey(
+      Schema.Array(Schema.Struct({ title: Schema.optionalKey(Schema.Json) }))
+    ),
     text: Schema.optionalKey(Schema.Json),
   })
 );
@@ -130,7 +137,7 @@ const alertSummary = (url: URL, body: string): string => {
   const text = decodeAlertBody(body).pipe(
     Option.flatMap((parsed) =>
       Option.fromUndefinedOr(
-        [parsed.text, parsed.content].find(Predicate.isString)
+        [parsed.text, parsed.embeds?.[0]?.title].find(Predicate.isString)
       )
     ),
     Option.getOrElse(() => body)
@@ -207,9 +214,10 @@ export const makeDevRoutes = (deps: DevDeps) => {
 
   const maintain = (id: string, url: URL) =>
     Effect.gen(function* maintainRoute() {
+      const now = yield* Clock.currentTimeMillis;
       return yield* deps.monitors
         .getByName(id)
-        .maintain(nowParam(url))
+        .maintain(nowParam(url, now))
         .pipe(
           Effect.flatMap((result) => HttpServerResponse.json(result)),
           Effect.catchTags({
@@ -287,9 +295,9 @@ export const makeDevRoutes = (deps: DevDeps) => {
       "POST",
       "watchdog",
       ({ url }) =>
-        Effect.flatMap(
-          runWatchdog(deps, nowParam(url)),
-          HttpServerResponse.json
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) => runWatchdog(deps, nowParam(url, now))),
+          Effect.flatMap(HttpServerResponse.json)
         ),
     ],
     ["GET", "monitors/:id", (input) => monitorDetail(param(input))],

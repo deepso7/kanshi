@@ -22,6 +22,7 @@ import {
   nextAlarmAt,
   startCheck,
 } from "../../src/monitor/cycle.ts";
+import type { CheckResult } from "../../src/monitor/cycle.ts";
 import { nextMaintenanceTime } from "../../src/monitor/history.ts";
 import { evaluate } from "../../src/monitor/machine.ts";
 import { applyConfigChange } from "../../src/monitor/reset.ts";
@@ -76,7 +77,7 @@ let checkCounter = 0;
 const runDue = (
   cfg: MonitorConfig,
   state: MonitorState,
-  outcome: ProbeOutcome,
+  outcome: CheckResult,
   at: number,
   finishAt = at + 100
 ) => {
@@ -182,6 +183,41 @@ describe("check cycle", () => {
     // Back on the slot grid.
     assert.strictEqual(confirmed.state.nextCheckKind, "scheduled");
     assert.strictEqual(confirmed.state.nextCheckAt, t0 + intervalMs);
+  });
+
+  it("keeps the confirming failure's excerpt and latency on the incident only", () => {
+    const failing: CheckResult = {
+      ...down,
+      latencyMs: 412,
+      responseExcerpt: { text: '{"ok":false}', truncated: false },
+    };
+    const failed = runDue(config, initialState(t0), failing, t0);
+    const confirmed = runDue(
+      config,
+      failed.state,
+      { ...failing, responseExcerpt: { text: "confirm", truncated: true } },
+      failed.state.nextCheckAt
+    );
+    assert.deepStrictEqual(confirmed.openIncident, {
+      cause: "expected 2xx, got 500",
+      id: confirmed.check.checkId,
+      lastHttpStatus: 500,
+      latencyMs: 412,
+      responseExcerpt: { text: "confirm", truncated: true },
+      startedAt: confirmed.check.at,
+    });
+    // Neither the stored check nor the last result carries it.
+    assert.notProperty(failed.check, "responseExcerpt");
+    assert.notProperty(confirmed.check, "responseExcerpt");
+    assert.notProperty(confirmed.state.lastResult, "responseExcerpt");
+    // A plain outcome opens an incident without one.
+    const plain = runDue(
+      config,
+      runDue(config, initialState(t0), down, t0).state,
+      down,
+      t0 + 100 + confirmDelayMs
+    );
+    assert.isNull(plain.openIncident?.responseExcerpt);
   });
 
   it("a successful confirm clears a transient failure", () => {

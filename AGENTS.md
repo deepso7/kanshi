@@ -50,6 +50,7 @@ Fix the code, don't disable rules; the overrides and their reasons are in
 - Services are a `Context.Service` with a static `layer`; `make*` constructors stay private (exported for tests only).
 - Decode with Schema instead of `as`, `JSON.parse` or `typeof`; an unavoidable `as` needs a `// SAFETY:` comment.
 - Data-first Effect calls use the pipe form: `xs.pipe(Effect.forEach(f))`.
+- src/ is Effect-native, enforced by lint: no Date/fetch/timers/async/try/JSON/console/process.env/Math.random; use Clock/DateTime, HttpClient, Effect.sleep, Effect.gen, Effect.try, Schema, Effect.log, Config, Random.
 
 ## Local dev and credentials
 

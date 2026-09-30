@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -194,7 +195,7 @@ export const makeStatusService = (deps: StatusDeps) => {
         { concurrency: 8 }
       );
       return {
-        generatedAt: Date.now(),
+        generatedAt: yield* Clock.currentTimeMillis,
         monitors,
         overall: overallStatus(monitors),
       } satisfies PublicStatus;

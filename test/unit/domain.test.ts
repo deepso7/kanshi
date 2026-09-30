@@ -12,6 +12,8 @@ import {
 import { buildConfig, patchConfig } from "../../src/domain/monitor-input.ts";
 import {
   classifyFetchError,
+  excerptBytes,
+  excerptReadMs,
   maxBodyBytes,
   probe,
 } from "../../src/domain/probe.ts";
@@ -285,6 +287,88 @@ describe("probe()", () => {
       assert.strictEqual(outcome.errorKind, "status");
       assert.strictEqual(outcome.status, 503);
       assert.strictEqual(outcome.message, "expected 2xx, got 503");
+      assert.isNull(outcome.responseExcerpt);
+    })
+  );
+
+  it.effect("keeps the start of a failed response's body", () =>
+    Effect.gen(function* probeExcerpt() {
+      const body = '{"_tag":"ServiceUnavailable","details":{"ok":false}}';
+      const outcome = yield* probe(request).pipe(
+        Effect.provide(answering(503, body).layer)
+      );
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: body,
+        truncated: false,
+      });
+      // A keyword failure keeps it too.
+      const keyword = yield* probe({
+        ...request,
+        bodyContains: "healthy",
+      }).pipe(Effect.provide(answering(200, "degraded").layer));
+      assert.deepStrictEqual(keyword.responseExcerpt, {
+        text: "degraded",
+        truncated: false,
+      });
+      // A success keeps none, though a GET reads its body.
+      const ok = yield* probe(request).pipe(
+        Effect.provide(answering(200, "ok").layer)
+      );
+      assert.isNull(ok.responseExcerpt);
+    })
+  );
+
+  it.effect("caps the excerpt at 2 KB, on a character boundary", () =>
+    Effect.gen(function* probeExcerptCap() {
+      const long = yield* probe(request).pipe(
+        Effect.provide(answering(500, "a".repeat(5000)).layer)
+      );
+      assert.deepStrictEqual(long.responseExcerpt, {
+        text: "a".repeat(excerptBytes),
+        truncated: true,
+      });
+      const exact = yield* probe(request).pipe(
+        Effect.provide(answering(500, "b".repeat(excerptBytes)).layer)
+      );
+      assert.isFalse(exact.responseExcerpt?.truncated);
+      // "é" is two bytes: the character cut at byte 2048 is dropped whole.
+      const accented = yield* probe(request).pipe(
+        Effect.provide(answering(500, `x${"é".repeat(1500)}`).layer)
+      );
+      assert.strictEqual(
+        accented.responseExcerpt?.text,
+        `x${"é".repeat(1023)}`
+      );
+      assert.isTrue(accented.responseExcerpt?.truncated);
+      // A blank body is no excerpt.
+      const blank = yield* probe(request).pipe(
+        Effect.provide(answering(503, " \n").layer)
+      );
+      assert.isNull(blank.responseExcerpt);
+    })
+  );
+
+  it.effect("reads only 2 KB of a failed HEAD response for the excerpt", () =>
+    Effect.gen(function* probeHeadExcerpt() {
+      const chunkBytes = 512;
+      const endless = endlessBody(chunkBytes);
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(endless.body, { status: 503 }))
+      );
+      const outcome = yield* probe({ ...request, method: "HEAD" }).pipe(
+        Effect.provide(client.layer)
+      );
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: "x".repeat(excerptBytes),
+        truncated: true,
+      });
+      assert.isTrue(endless.seen.cancelled);
+      assert.isAtMost(
+        endless.seen.pulled * chunkBytes,
+        excerptBytes + 3 * chunkBytes
+      );
     })
   );
 
@@ -317,6 +401,7 @@ describe("probe()", () => {
         Effect.provide(client.layer)
       );
       assert.isTrue(outcome.ok);
+      assert.isNull(outcome.responseExcerpt);
       assert.strictEqual(client.sent[0]?.request.method, "HEAD");
       assert.isTrue(client.sent[0]?.signal.aborted);
       assert.isAtMost(endless.seen.pulled, 1);
@@ -389,6 +474,109 @@ describe("probe()", () => {
     })
   );
 
+  it.effect("keeps a failed HEAD status when its body stalls", () =>
+    Effect.gen(function* probeHeadStalled() {
+      const client = testHttpClient(() =>
+        Effect.succeed(
+          new Response(new ReadableStream<Uint8Array>(), { status: 503 })
+        )
+      );
+      const fiber = yield* probe({
+        ...request,
+        method: "HEAD",
+        timeoutMs: 10_000,
+      }).pipe(Effect.provide(client.layer), Effect.forkChild);
+      yield* TestClock.adjust(excerptReadMs - 1);
+      assert.isUndefined(fiber.pollUnsafe());
+      // The excerpt read has its own bound, well within the timeout.
+      yield* TestClock.adjust(1);
+      const outcome = yield* Fiber.join(fiber);
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.strictEqual(outcome.status, 503);
+      assert.strictEqual(outcome.message, "expected 2xx, got 503");
+      assert.strictEqual(outcome.latencyMs, 0);
+      assert.isNull(outcome.responseExcerpt);
+      assert.isTrue(client.sent[0]?.signal.aborted);
+    })
+  );
+
+  it.effect("keeps the excerpt read before a failed GET body stalls", () =>
+    Effect.gen(function* probeGetStalled() {
+      const partial = new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          controller.enqueue(new TextEncoder().encode("partial error"));
+        },
+      });
+      const client = testHttpClient(() =>
+        Effect.succeed(new Response(partial, { status: 500 }))
+      );
+      const fiber = yield* probe({ ...request, timeoutMs: 10_000 }).pipe(
+        Effect.provide(client.layer),
+        Effect.forkChild
+      );
+      yield* TestClock.adjust(excerptReadMs);
+      const outcome = yield* Fiber.join(fiber);
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.strictEqual(outcome.status, 500);
+      // Cut off: marked truncated.
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: "partial error",
+        truncated: true,
+      });
+    })
+  );
+
+  it.effect("keeps a failed status when its body read errors", () =>
+    Effect.gen(function* probeBodyError() {
+      const broken = new ReadableStream<Uint8Array>({
+        pull: (controller) => {
+          controller.error(new Error("Network connection lost."));
+        },
+        start: (controller) => {
+          controller.enqueue(new TextEncoder().encode("oops"));
+        },
+      });
+      const outcome = yield* probe(request).pipe(
+        Effect.provide(
+          testHttpClient(() =>
+            Effect.succeed(new Response(broken, { status: 502 }))
+          ).layer
+        )
+      );
+      assert.strictEqual(outcome.errorKind, "status");
+      assert.strictEqual(outcome.status, 502);
+      assert.deepStrictEqual(outcome.responseExcerpt, {
+        text: "oops",
+        truncated: true,
+      });
+    })
+  );
+
+  it.effect("keeps a failed status whose body stalls near the timeout", () =>
+    Effect.gen(function* probeStalledAtDeadline() {
+      // Headers after 200 ms of a 300 ms budget: 100 ms left for the excerpt.
+      const client = testHttpClient(() =>
+        Effect.sleep(200).pipe(
+          Effect.as(
+            new Response(new ReadableStream<Uint8Array>(), { status: 503 })
+          )
+        )
+      );
+      for (const method of ["GET", "HEAD"] as const) {
+        const fiber = yield* probe({ ...request, method, timeoutMs: 300 }).pipe(
+          Effect.provide(client.layer),
+          Effect.forkChild
+        );
+        yield* TestClock.adjust(300);
+        const outcome = yield* Fiber.join(fiber);
+        assert.strictEqual(outcome.errorKind, "status");
+        assert.strictEqual(outcome.status, 503);
+        assert.strictEqual(outcome.latencyMs, 200);
+        assert.isNull(outcome.responseExcerpt);
+      }
+    })
+  );
+
   it.effect("retries once when a pooled connection was lost", () =>
     Effect.gen(function* probeRetry() {
       const flaky = testHttpClient(() =>
@@ -429,6 +617,9 @@ describe("probe()", () => {
       }).pipe(Effect.provide(rejecting(new Error("boom")).layer));
       assert.strictEqual(unknown.errorKind, "network");
       assert.strictEqual(unknown.message, "boom");
+      // Transport errors have no excerpt.
+      assert.isNull(outcome.responseExcerpt);
+      assert.isNull(unknown.responseExcerpt);
       assert.strictEqual(
         classifyFetchError(new Error("DNS lookup failed")),
         "dns"

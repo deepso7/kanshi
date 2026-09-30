@@ -1,3 +1,6 @@
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
+
 import type {
   DailyRollup,
   RecentActivity,
@@ -34,10 +37,14 @@ export const partialThreshold = 0.8;
 
 /** The UTC day of a timestamp. */
 export const dayOf = (at: number): string =>
-  new Date(at).toISOString().slice(0, 10);
+  DateTime.formatIsoDateUtc(DateTime.makeUnsafe(at));
 
-/** Midnight UTC starting `day`. */
-export const dayStart = (day: string): number => Date.parse(`${day}T00:00:00Z`);
+/** Midnight UTC starting `day` (`YYYY-MM-DD`); `NaN` if `day` is not a date. */
+export const dayStart = (day: string): number =>
+  DateTime.make(`${day}T00:00:00Z`).pipe(
+    Option.map(DateTime.toEpochMillis),
+    Option.getOrElse(() => Number.NaN)
+  );
 
 export const addDays = (day: string, days: number): string =>
   dayOf(dayStart(day) + days * dayMs);

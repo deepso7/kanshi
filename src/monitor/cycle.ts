@@ -6,6 +6,7 @@ import type {
   MonitorConfig,
   MonitorState,
   ProbeOutcome,
+  ResponseExcerpt,
 } from "../domain/monitor.ts";
 import { reviseSummary } from "../domain/monitor.ts";
 import { revives } from "../watchdog/rules.ts";
@@ -119,7 +120,19 @@ export interface IncidentOpen {
   readonly cause: string;
   readonly id: string;
   readonly lastHttpStatus: number | null;
+  /** The opening check's latency. */
+  readonly latencyMs: number | null;
+  /** The opening check's response excerpt. */
+  readonly responseExcerpt: ResponseExcerpt | null;
   readonly startedAt: number;
+}
+
+/**
+ * A probe result as committed: the outcome and, for a failure, the
+ * response excerpt (only kept if the check opens an incident).
+ */
+export interface CheckResult extends ProbeOutcome {
+  readonly responseExcerpt?: ResponseExcerpt | null;
 }
 
 export interface IncidentClose {
@@ -223,7 +236,7 @@ const settle = (
   config: MonitorConfig,
   state: MonitorState,
   inflight: Inflight,
-  outcome: ProbeOutcome,
+  result: CheckResult,
   now: number
 ): Completion => {
   if (
@@ -233,6 +246,8 @@ const settle = (
   ) {
     return Completion.Stale();
   }
+  // The excerpt goes to the incident only, not to the check or lastResult.
+  const { responseExcerpt = null, ...outcome } = result;
 
   const {
     counted,
@@ -280,6 +295,8 @@ const settle = (
       cause: incidentCause(outcome),
       id: inflight.checkId,
       lastHttpStatus: outcome.status,
+      latencyMs: outcome.latencyMs,
+      responseExcerpt,
       startedAt: now,
     };
     return Completion.Committed({
@@ -321,7 +338,7 @@ export const completeCheck = (
   config: MonitorConfig,
   state: MonitorState,
   inflight: Inflight,
-  outcome: ProbeOutcome,
+  outcome: CheckResult,
   now: number
 ): Completion => {
   const completion = settle(config, state, inflight, outcome, now);

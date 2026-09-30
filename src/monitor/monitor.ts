@@ -1,6 +1,7 @@
 import type { RuntimeContext } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Result from "effect/Result";
@@ -98,6 +99,7 @@ import {
   prune,
   readAlertWork,
   readConfig,
+  incidentExcerpt,
   readIncident,
   readOutboxPair,
   readPeriods,
@@ -456,7 +458,7 @@ export const MonitorLive = Monitor.make(
               const current = { config: loaded.config, state: loaded.state };
               return { after: current, before: current } satisfies Change;
             }
-            const now = Date.now();
+            const now = yield* Clock.currentTimeMillis;
             const initial = initialState(now);
             yield* writeConfig(config);
             yield* writeState(initial);
@@ -475,7 +477,7 @@ export const MonitorLive = Monitor.make(
         transact(
           Effect.gen(function* updateTx() {
             const live = yield* loadLive;
-            const now = Date.now();
+            const now = yield* Clock.currentTimeMillis;
             const patched = patchConfig(live.config, patch, {
               devMode: options.devMode,
               now,
@@ -519,7 +521,8 @@ export const MonitorLive = Monitor.make(
             }
             // Any check that starts after this request answers it, so
             // repeated requests collapse into one.
-            const next = { ...live.state, manualRequestedAt: Date.now() };
+            const now = yield* Clock.currentTimeMillis;
+            const next = { ...live.state, manualRequestedAt: now };
             yield* writeState(next);
             return { config: live.config, state: next };
           })
@@ -535,14 +538,15 @@ export const MonitorLive = Monitor.make(
               return;
             }
             // The incident is closed for the record, then every row goes.
+            const now = yield* Clock.currentTimeMillis;
             const current = yield* readState;
             if (current?.openIncidentId) {
               yield* closeIncident(
-                { id: current.openIncidentId, resolvedAt: Date.now() },
+                { id: current.openIncidentId, resolvedAt: now },
                 "deleted"
               );
             }
-            yield* wipe(Date.now());
+            yield* wipe(now);
           })
         ).pipe(
           Effect.andThen(rearm),
@@ -567,7 +571,8 @@ export const MonitorLive = Monitor.make(
       const expireStep = transact(
         Effect.gen(function* expireTx() {
           const live = yield* loadLive;
-          const expired = expireInflight(live.config, live.state, Date.now());
+          const now = yield* Clock.currentTimeMillis;
+          const expired = expireInflight(live.config, live.state, now);
           if (expired !== null) {
             yield* Effect.logWarning(
               `in-flight check ${live.state.inflight?.checkId} expired`
@@ -580,7 +585,7 @@ export const MonitorLive = Monitor.make(
       const beginCheck = transact(
         Effect.gen(function* beginCheckTx() {
           const live = yield* loadLive;
-          const now = Date.now();
+          const now = yield* Clock.currentTimeMillis;
           const kind = dueCheck(live.config, live.state, now);
           if (kind === null) {
             return null;
@@ -604,12 +609,13 @@ export const MonitorLive = Monitor.make(
         transact(
           Effect.gen(function* commitCheckTx() {
             const live = yield* loadLive;
+            const now = yield* Clock.currentTimeMillis;
             const completion = completeCheck(
               live.config,
               live.state,
               inflight,
               outcome,
-              Date.now()
+              now
             );
             if (Completion.$is("Stale")(completion)) {
               yield* Effect.logInfo(
@@ -701,7 +707,8 @@ export const MonitorLive = Monitor.make(
             if (down !== undefined && !down.resolved) {
               return;
             }
-            yield* transact(resolveUp(current.incidentId, Date.now()));
+            const resolvedAt = yield* Clock.currentTimeMillis;
+            yield* transact(resolveUp(current.incidentId, resolvedAt));
             return;
           }
           const recipients = yield* registry()
@@ -712,29 +719,29 @@ export const MonitorLive = Monitor.make(
               `resolving recipients for incident ${current.incidentId} failed`,
               recipients.cause
             );
+            const failedAt = yield* Clock.currentTimeMillis;
             yield* transact(
               writeNotification(
                 notificationFailed(
                   current,
                   `registry: ${describeCause(recipients.cause)}`,
-                  Date.now()
+                  failedAt
                 )
               )
             );
             return;
           }
+          const resolvedAt = yield* Clock.currentTimeMillis;
           yield* transact(
-            resolveDown(current.incidentId, recipients.value, Date.now())
+            resolveDown(current.incidentId, recipients.value, resolvedAt)
           );
         });
 
       const notifyStep = Effect.gen(function* notifyStepEffect() {
         const live = yield* withSql(loadLive);
         const { notifications } = yield* withSql(readAlertWork);
-        for (const notification of dueNotifications(
-          notifications,
-          Date.now()
-        )) {
+        const now = yield* Clock.currentTimeMillis;
+        for (const notification of dueNotifications(notifications, now)) {
           yield* logged(`notify ${notification.incidentId}`)(
             resolveNotification(notification, live.config)
           );
@@ -763,7 +770,8 @@ export const MonitorLive = Monitor.make(
             const reason = OutboxDecision.$is("Skip")(decision)
               ? decision.reason
               : "incident no longer exists";
-            yield* transact(writeOutbox(skipped(entry, reason, Date.now())));
+            const now = yield* Clock.currentTimeMillis;
+            yield* transact(writeOutbox(skipped(entry, reason, now)));
             return;
           }
           const target = yield* registry()
@@ -774,13 +782,10 @@ export const MonitorLive = Monitor.make(
               `resolving channel ${entry.channelId} failed`,
               target.cause
             );
+            const now = yield* Clock.currentTimeMillis;
             yield* transact(
               writeOutbox(
-                deferred(
-                  entry,
-                  `registry: ${describeCause(target.cause)}`,
-                  Date.now()
-                )
+                deferred(entry, `registry: ${describeCause(target.cause)}`, now)
               )
             );
             return;
@@ -791,11 +796,11 @@ export const MonitorLive = Monitor.make(
               permanent: true,
               status: null,
             });
-            yield* transact(
-              writeOutbox(afterAttempt(entry, gone, false, Date.now()))
-            );
+            const now = yield* Clock.currentTimeMillis;
+            yield* transact(writeOutbox(afterAttempt(entry, gone, false, now)));
             return;
           }
+          const sentAt = yield* Clock.currentTimeMillis;
           const result = yield* withHttp(
             deliver(
               alertRequest(
@@ -811,7 +816,9 @@ export const MonitorLive = Monitor.make(
                     cause: incident.cause,
                     id: incident.id,
                     lastHttpStatus: incident.lastHttpStatus,
+                    latencyMs: incident.latencyMs,
                     resolvedAt: incident.resolvedAt,
+                    responseExcerpt: incidentExcerpt(incident),
                     startedAt: incident.startedAt,
                   },
                   monitor: {
@@ -819,7 +826,7 @@ export const MonitorLive = Monitor.make(
                     name: config.name,
                     url: config.url,
                   },
-                  sentAt: Date.now(),
+                  sentAt,
                 })
               )
             )
@@ -829,13 +836,14 @@ export const MonitorLive = Monitor.make(
               `alert ${entry.incidentId}:${entry.event} to ${entry.channelId} failed: ${result.error}`
             );
           }
+          const attemptedAt = yield* Clock.currentTimeMillis;
           yield* transact(
             writeOutbox(
               afterAttempt(
                 entry,
                 result,
                 decision.message === "DownRecovered",
-                Date.now()
+                attemptedAt
               )
             )
           );
@@ -848,7 +856,8 @@ export const MonitorLive = Monitor.make(
       const deliverStep = Effect.gen(function* deliverStepEffect() {
         const live = yield* withSql(loadLive);
         const { outbox } = yield* withSql(readAlertWork);
-        yield* deliverDue(dueOutbox(outbox, Date.now()), (entry) =>
+        const now = yield* Clock.currentTimeMillis;
+        yield* deliverDue(dueOutbox(outbox, now), (entry) =>
           logged(`deliver ${entry.incidentId}:${entry.event}`)(
             sendOne(entry, live.config)
           ).pipe(Effect.asVoid)
@@ -909,16 +918,16 @@ export const MonitorLive = Monitor.make(
       const postponeMaintenance = transact(
         Effect.gen(function* postponeMaintenanceTx() {
           const live = yield* loadLive;
+          const now = yield* Clock.currentTimeMillis;
           yield* writeState({
             ...live.state,
-            nextMaintenanceAt: Date.now() + maintenanceRetryMs,
+            nextMaintenanceAt: now + maintenanceRetryMs,
           });
         })
       ).pipe(Effect.ignore);
 
-      const maintainStep = Effect.suspend(() =>
-        maintain(Date.now(), false)
-      ).pipe(
+      const maintainStep = Clock.currentTimeMillis.pipe(
+        Effect.flatMap((now) => maintain(now, false)),
         Effect.tap((result) =>
           result === null
             ? Effect.void
@@ -937,7 +946,7 @@ export const MonitorLive = Monitor.make(
         withSql(
           Effect.gen(function* uptimeEffect() {
             const live = yield* loadLive;
-            const now = Date.now();
+            const now = yield* Clock.currentTimeMillis;
             const covered = reportDays(days, live.config.createdAt, now);
             const [first] = covered;
             const last = covered.at(-1);
@@ -984,11 +993,11 @@ export const MonitorLive = Monitor.make(
       const recent = (windowMs: number, buckets: number) => {
         const count = Math.max(1, Math.floor(buckets));
         const bucketMs = Math.max(1, Math.ceil(windowMs / count));
-        const since = Date.now() - bucketMs * count;
-        return withSql(readRecent(since, bucketMs)).pipe(
-          Effect.map((rows) => recentActivity(since, bucketMs, count, rows)),
-          Effect.orDie
-        );
+        return Effect.gen(function* recentEffect() {
+          const since = (yield* Clock.currentTimeMillis) - bucketMs * count;
+          const rows = yield* withSql(readRecent(since, bucketMs));
+          return recentActivity(since, bucketMs, count, rows);
+        }).pipe(Effect.orDie);
       };
 
       const alarm = (_info?: Cloudflare.AlarmInvocationInfo) =>
@@ -1035,6 +1044,7 @@ export const MonitorLive = Monitor.make(
           Effect.gen(function* overviewEffect() {
             const activity = yield* recent(windowMs, buckets);
             const loaded = yield* withSql(load).pipe(Effect.orDie);
+            const now = yield* Clock.currentTimeMillis;
             const live =
               loaded.tombstonedAt === null &&
               loaded.config !== null &&
@@ -1044,7 +1054,7 @@ export const MonitorLive = Monitor.make(
             return {
               lastCheckedAt: live?.state.lastCheckedAt ?? null,
               recent: activity,
-              stale: live !== null && isStale(live, Date.now()),
+              stale: live !== null && isStale(live, now),
               summary:
                 live === null ? null : summaryOf(live.config, live.state),
             } satisfies MonitorOverview;

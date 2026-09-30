@@ -1,6 +1,7 @@
 import type { RuntimeContext } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -184,11 +185,15 @@ export interface DevEvent {
   readonly kind: string;
 }
 
+/** A dev event's `detail`, stored as JSON text. */
+const DevEventDetail = Schema.fromJsonString(Schema.Json);
+const encodeDevEventDetail = Schema.encodeEffect(DevEventDetail);
+
 /** `dev_events` rows; `detail` is stored as JSON text. */
 const DevEventRows = Schema.Array(
   Schema.Struct({
     at: Schema.Number,
-    detail: Schema.fromJsonString(Schema.Json),
+    detail: DevEventDetail,
     id: Schema.Number,
     kind: Schema.String,
   })
@@ -428,7 +433,7 @@ export const RegistryLive = Registry.make(
                 return yield* new QuotaExceeded({ quota: input.quota });
               }
               const opId = crypto.randomUUID();
-              const now = Date.now();
+              const now = yield* Clock.currentTimeMillis;
               yield* sql`INSERT INTO monitors ${sql.insert({
                 createdAt: now,
                 enabled: input.summary.enabled ? 1 : 0,
@@ -449,29 +454,34 @@ export const RegistryLive = Registry.make(
           .pipe(Effect.catchTag("SqlError", Effect.die));
 
       const activate = (id: string, opId: string) =>
-        sql<{ id: string }>`UPDATE monitors
-          SET lifecycle = 'active',
-              updated_at = CASE lifecycle
-                WHEN 'creating' THEN ${Date.now()} ELSE updated_at END
-          WHERE id = ${id}
-            AND lifecycle IN ('creating', 'active')
-            AND op_id = ${opId}
-          RETURNING id`.pipe(
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap(
+            (now) => sql<{ id: string }>`UPDATE monitors
+              SET lifecycle = 'active',
+                  updated_at = CASE lifecycle
+                    WHEN 'creating' THEN ${now} ELSE updated_at END
+              WHERE id = ${id}
+                AND lifecycle IN ('creating', 'active')
+                AND op_id = ${opId}
+              RETURNING id`
+          ),
           Effect.map((rows) => rows.length === 1),
           Effect.orDie
         );
 
       const markDeleting = (id: string, opId: string | null) =>
-        (opId === null
-          ? sql<{ id: string }>`UPDATE monitors
-              SET lifecycle = 'deleting', updated_at = ${Date.now()}
-              WHERE id = ${id}
-              RETURNING id`
-          : sql<{ id: string }>`UPDATE monitors
-              SET lifecycle = 'deleting', updated_at = ${Date.now()}
-              WHERE id = ${id} AND lifecycle = 'creating' AND op_id = ${opId}
-              RETURNING id`
-        ).pipe(
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) =>
+            opId === null
+              ? sql<{ id: string }>`UPDATE monitors
+                  SET lifecycle = 'deleting', updated_at = ${now}
+                  WHERE id = ${id}
+                  RETURNING id`
+              : sql<{ id: string }>`UPDATE monitors
+                  SET lifecycle = 'deleting', updated_at = ${now}
+                  WHERE id = ${id} AND lifecycle = 'creating' AND op_id = ${opId}
+                  RETURNING id`
+          ),
           Effect.map((rows) => rows.length === 1),
           Effect.orDie
         );
@@ -481,18 +491,21 @@ export const RegistryLive = Registry.make(
         summary: MonitorSummary,
         revision: number
       ) =>
-        sql<{ id: string }>`UPDATE monitors
-          SET name = ${summary.name},
-              status = ${summary.status},
-              enabled = ${summary.enabled ? 1 : 0},
-              interval_seconds = ${summary.intervalSeconds},
-              url = ${summary.url},
-              summary_revision = ${revision},
-              updated_at = ${Date.now()}
-          WHERE id = ${id}
-            AND lifecycle != 'deleting'
-            AND summary_revision < ${revision}
-          RETURNING id`.pipe(
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap(
+            (now) => sql<{ id: string }>`UPDATE monitors
+              SET name = ${summary.name},
+                  status = ${summary.status},
+                  enabled = ${summary.enabled ? 1 : 0},
+                  interval_seconds = ${summary.intervalSeconds},
+                  url = ${summary.url},
+                  summary_revision = ${revision},
+                  updated_at = ${now}
+              WHERE id = ${id}
+                AND lifecycle != 'deleting'
+                AND summary_revision < ${revision}
+              RETURNING id`
+          ),
           Effect.map((rows) => rows.length === 1),
           Effect.orDie
         );
@@ -518,7 +531,7 @@ export const RegistryLive = Registry.make(
 
       const createChannel = (record: ChannelRecord) =>
         Effect.gen(function* createChannelEffect() {
-          const now = Date.now();
+          const now = yield* Clock.currentTimeMillis;
           const [row] = yield* channelRows(
             sql`INSERT INTO channels ${sql.insert({
               createdAt: now,
@@ -541,11 +554,12 @@ export const RegistryLive = Registry.make(
           if (current === null) {
             return null;
           }
+          const now = yield* Clock.currentTimeMillis;
           const rows = yield* channelRows(sql`UPDATE channels
             SET kind = ${patch.kind ?? current.kind},
                 name = ${patch.name ?? current.name},
                 url = ${patch.url ?? current.url},
-                updated_at = ${Date.now()}
+                updated_at = ${now}
             WHERE id = ${id}
             RETURNING *`);
           const [row] = rows;
@@ -589,9 +603,8 @@ export const RegistryLive = Registry.make(
             const reason = OutboxDecision.$is("Skip")(decision)
               ? decision.reason
               : "episode no longer exists";
-            yield* transact(
-              writeWatchdogOutbox(skipped(entry, reason, Date.now()))
-            );
+            const now = yield* Clock.currentTimeMillis;
+            yield* transact(writeWatchdogOutbox(skipped(entry, reason, now)));
             return;
           }
           const target = yield* getChannel(entry.channelId);
@@ -601,11 +614,13 @@ export const RegistryLive = Registry.make(
               permanent: true,
               status: null,
             });
+            const now = yield* Clock.currentTimeMillis;
             yield* transact(
-              writeWatchdogOutbox(afterAttempt(entry, gone, false, Date.now()))
+              writeWatchdogOutbox(afterAttempt(entry, gone, false, now))
             );
             return;
           }
+          const sentAt = yield* Clock.currentTimeMillis;
           const result = yield* withHttp(
             deliver(
               alertRequest(
@@ -629,7 +644,7 @@ export const RegistryLive = Registry.make(
                     name: episode.monitorName,
                     url: episode.monitorUrl,
                   },
-                  sentAt: Date.now(),
+                  sentAt,
                 })
               )
             )
@@ -639,13 +654,14 @@ export const RegistryLive = Registry.make(
               `watchdog alert ${entry.incidentId}:${entry.event} to ${entry.channelId} failed: ${result.error}`
             );
           }
+          const attemptedAt = yield* Clock.currentTimeMillis;
           yield* transact(
             writeWatchdogOutbox(
               afterAttempt(
                 entry,
                 result,
                 decision.message === "DownRecovered",
-                Date.now()
+                attemptedAt
               )
             )
           );
@@ -662,7 +678,8 @@ export const RegistryLive = Registry.make(
           );
           // Bounded like the Monitor's outbox: rows left over stay due and
           // the alarm re-arms for them at once.
-          yield* deliverDue(dueOutbox(work, Date.now()), (entry) =>
+          const now = yield* Clock.currentTimeMillis;
+          yield* deliverDue(dueOutbox(work, now), (entry) =>
             sendOne(entry).pipe(
               Effect.catchCause((cause) =>
                 Effect.logError(
@@ -695,11 +712,12 @@ export const RegistryLive = Registry.make(
               : yield* upsertSummary(item.id, item.summary, item.revision);
             // Skipped if a newer summary was pushed since the watchdog read
             // the monitor (a disable, say), or the row is being deleted.
+            const now = yield* Clock.currentTimeMillis;
             const watch = yield* observeMonitor(
               item.id,
               item,
               at,
-              Date.now(),
+              now,
               confirmed
             );
             return { summaryUpdated, watch };
@@ -767,7 +785,7 @@ export const RegistryLive = Registry.make(
 
       // Dev inspection: calls per method, in memory (see `devCalls`).
       const instanceId = crypto.randomUUID();
-      const startedAt = Date.now();
+      const startedAt = yield* Clock.currentTimeMillis;
       const calls = new Map<string, number>();
       /** `method`, counting each call under `name`. */
       const counted =
@@ -830,11 +848,14 @@ export const RegistryLive = Registry.make(
           )
         ),
         devRewindSummary: counted("devRewindSummary", (id: string) =>
-          sql<{ id: string }>`UPDATE monitors
-            SET name = '(stale)', status = 'unknown', url = '',
-                summary_revision = 0, updated_at = ${Date.now()}
-            WHERE id = ${id}
-            RETURNING id`.pipe(
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap(
+              (now) => sql<{ id: string }>`UPDATE monitors
+                SET name = '(stale)', status = 'unknown', url = '',
+                    summary_revision = 0, updated_at = ${now}
+                WHERE id = ${id}
+                RETURNING id`
+            ),
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
           )
@@ -877,9 +898,15 @@ export const RegistryLive = Registry.make(
         recordDevEvent: counted(
           "recordDevEvent",
           (kind: string, detail: Schema.Json) =>
-            sql<{ id: number }>`INSERT INTO dev_events (at, kind, detail)
-            VALUES (${Date.now()}, ${kind}, ${JSON.stringify(detail)})
-            RETURNING id`.pipe(
+            Effect.gen(function* recordDevEventEffect() {
+              const now = yield* Clock.currentTimeMillis;
+              const json = yield* encodeDevEventDetail(detail);
+              return yield* sql<{
+                id: number;
+              }>`INSERT INTO dev_events (at, kind, detail)
+                VALUES (${now}, ${kind}, ${json})
+                RETURNING id`;
+            }).pipe(
               Effect.map((rows) => rows[0]?.id ?? 0),
               Effect.orDie
             )
@@ -887,17 +914,21 @@ export const RegistryLive = Registry.make(
         remove: counted("remove", (id: string) =>
           transact(
             Effect.gen(function* removeTx() {
-              yield* closeMonitorEpisode(id, Date.now());
+              const now = yield* Clock.currentTimeMillis;
+              yield* closeMonitorEpisode(id, now);
               yield* sql`DELETE FROM monitors WHERE id = ${id}`;
             })
           ).pipe(Effect.andThen(rearm), Effect.asVoid)
         ),
         setFlip: counted("setFlip", setFlip),
         setPublic: counted("setPublic", (id: string, isPublic: boolean) =>
-          sql<{ id: string }>`UPDATE monitors
-            SET public = ${isPublic ? 1 : 0}, updated_at = ${Date.now()}
-            WHERE id = ${id} AND lifecycle != 'deleting'
-            RETURNING id`.pipe(
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap(
+              (now) => sql<{ id: string }>`UPDATE monitors
+                SET public = ${isPublic ? 1 : 0}, updated_at = ${now}
+                WHERE id = ${id} AND lifecycle != 'deleting'
+                RETURNING id`
+            ),
             Effect.map((rows) => rows.length === 1),
             Effect.orDie
           )

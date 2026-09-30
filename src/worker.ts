@@ -1,5 +1,6 @@
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -111,9 +112,8 @@ export default class Kanshi extends Cloudflare.Worker<Kanshi>()(
     const registries = yield* Registry;
 
     yield* Cloudflare.Workers.cron(watchdogCron, () =>
-      Effect.suspend(() =>
-        runWatchdog({ monitors, registries }, Date.now())
-      ).pipe(
+      Clock.currentTimeMillis.pipe(
+        Effect.flatMap((now) => runWatchdog({ monitors, registries }, now)),
         Effect.catchCause((cause) =>
           Effect.logError("watchdog run failed", cause)
         ),
