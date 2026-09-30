@@ -5,7 +5,6 @@ import { DatabaseSync } from "node:sqlite";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as TestClock from "effect/testing/TestClock";
 
 import type { MonitorConfig } from "../../src/domain/monitor.ts";
 import {
@@ -37,12 +36,14 @@ describe("Monitor migrations", () => {
         VALUES (1, 'up', 0, 1, 5000, NULL, NULL, 65000, 'scheduled', 65000,
           0, NULL, NULL, 1, NULL, NULL)`);
 
-      yield* TestClock.setTime(1_234_567);
+      // The applied migration reads the wall clock (Date.now), not Clock.
+      const before = Date.now();
       yield* migrate(db, monitorMigrationRecord, 3);
-      assert.deepStrictEqual(
-        rows(db, "SELECT next_maintenance_at FROM state"),
-        [{ next_maintenance_at: 1_234_567 }]
-      );
+      const after = Date.now();
+      const scheduled = rows(db, "SELECT next_maintenance_at FROM state")[0]
+        ?.next_maintenance_at;
+      assert.isAtLeast(Number(scheduled), before);
+      assert.isAtMost(Number(scheduled), after);
       assert.deepStrictEqual(rows(db, "SELECT * FROM enabled_periods"), [
         { ended_at: null, id: 1, interval_seconds: 60, started_at: 100 },
       ]);
