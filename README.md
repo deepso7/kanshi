@@ -91,6 +91,18 @@ hour (30s doubling to 30m, 8 attempts); 4xx responses other than
 408/425/429 are final. Use "Send test alert" on the channels page or
 `POST /api/channels/:id/test` to check a channel.
 
+A down alert shows the cause, HTTP status, latency and the start of the
+failing response's body (the first 2 KB, pretty-printed when it is JSON):
+
+- **Discord**: an embed (red for down, green for recovered) whose title
+  links to the monitor URL. Down alerts ping `@everyone`; recoveries and
+  test alerts ping no one. The webhook must be allowed to mention everyone.
+- **Slack**: Block Kit, with `<!channel>` on down alerts.
+- **ntfy**: title "<name> is down", the cause and body as the message,
+  priority high (down) or default (recovered), click-through to the URL.
+- **webhook**: `responseExcerpt` (string or null) and `responseTruncated`
+  in the JSON body, next to the existing fields.
+
 ## API
 
 All routes except `/api/public/*` and `/api/session` need `Authorization:

@@ -1933,6 +1933,56 @@ Alchemy.Stage` fails every request with "Service not found: Stage" (as
   resolves `name: "kanshi"` for `prod` and no name for `dev` / `integ`.
   Nothing was deployed or planned against Cloudflare.
 
+## Alert formatting and response excerpts
+
+Alerts carry the start of the failing response's body and are formatted
+per channel kind instead of as one line of text. No alert says "Kanshi"
+any more (the probe's `user-agent` still does).
+
+- **Capture.** `probe` returns a `ProbeResult`: the `ProbeOutcome` plus
+  `responseExcerpt` (`{ text, truncated }`, `ResponseExcerpt` in
+  `src/domain/monitor.ts`) when the check failed on its status or keyword.
+  It is the first 2 KB (`excerptBytes`) of the body read anyway (GET, or a
+  keyword), decoded with `TextDecoder`'s `stream` option so a character
+  cut at the limit is dropped rather than turned into U+FFFD; `truncated`
+  when the body is longer. A HEAD without a keyword, whose body is not
+  otherwise read, reads `excerptBytes + 1` of a failed-status response
+  (same `readPrefix`, same timeout; a failing read only loses the
+  excerpt). Successes and transport errors have none; a blank body is
+  none.
+- **Latency** is unchanged: it stops at the end of the body the check
+  needs (none for HEAD without a keyword, else up to 1 MB). The extra
+  excerpt read of a failed HEAD is after it, inside the timeout.
+- **Storage.** Migration `6_incident_excerpt` adds `latency_ms`,
+  `response_excerpt` and `response_truncated` to `incidents`. `settle`
+  splits the excerpt off the result: it goes on the `IncidentOpen` of a
+  check that opens an incident (with its latency) and never into `checks`
+  or `state.last_result`, so only one excerpt per incident is stored. The
+  excerpt of the check that opens the incident is kept (the confirm, or
+  the threshold-th failure), not of the first failure. `listIncidents`
+  selects the API's columns only, so the API is unchanged; `readIncident`
+  (the outbox) reads all of them.
+- **Messages.** `alertContent` builds one tone/emoji/title/fields/excerpt
+  view per `AlertMessage`; `discordPayload`, `slackPayload`, the ntfy
+  request and `webhookPayload` shape it. `excerptBlock` pretty-prints a
+  JSON object or array (decoded with Schema), breaks every run of
+  backticks with U+200B so the body cannot close the fence, and cuts to
+  the target's limit with `…(truncated)` (also shown when the probe cut
+  it). Discord: description within 4096 and the embed within 6000 in
+  total. Slack: `&<>` escaped, section text within 3000, no language tag
+  (Slack does not highlight). ntfy: excerpt within 3000 characters and the
+  message within 4000 bytes (larger ones become attachments).
+- **Mentions.** Only a fresh `Down` pings: Discord `content: "@everyone"`
+  with `allowed_mentions: { parse: ["everyone"] }` (webhooks default to
+  parsing users only, so without it the text would not ping), Slack
+  `<!channel>`. Recoveries, the combined "was down, recovered" alert
+  (the outage is over), watchdog and test alerts ping no one, and send
+  `parse: []`. Hard-coded rather than a channel option; a per-channel
+  `mention` setting is a possible follow-up.
+- **Recovered alerts** show "Down for" and the cause, not the excerpt (it
+  describes the failure, not the recovery); their timestamp is the
+  recovery time. The webhook's `responseExcerpt` is null on `up` events.
+
 ## Lint conventions
 
 `pnpm check` runs oxlint (ultracite core, vitest, react and anti-slop
