@@ -792,6 +792,15 @@ describe("checks between the watchdog's read and its batch", () => {
 });
 
 const ChatBody = Schema.fromJsonString(Schema.Struct({ text: Schema.String }));
+const DiscordBody = Schema.fromJsonString(
+  Schema.Struct({
+    allowed_mentions: Schema.Struct({ parse: Schema.Array(Schema.String) }),
+    content: Schema.optionalKey(Schema.String),
+    embeds: Schema.Array(
+      Schema.Struct({ color: Schema.Number, title: Schema.String })
+    ),
+  })
+);
 
 describe("not-being-checked messages", () => {
   const episode = {
@@ -845,16 +854,33 @@ describe("not-being-checked messages", () => {
     );
   });
 
-  it("prefixes chat messages with Kanshi", () => {
+  it("formats chat messages without a brand or a mention", () => {
     const slack = alertRequest(
       "slack",
       "https://hooks.slack.com/x",
       notChecked
     );
-    assert.match(
+    assert.strictEqual(
       Schema.decodeUnknownSync(ChatBody)(slack.body).text,
-      /^Kanshi: monitor Site is not being checked\n/u
+      "🟠 monitor Site is not being checked"
     );
+    const discord = Schema.decodeUnknownSync(DiscordBody)(
+      alertRequest(
+        "discord",
+        "https://discord.com/api/webhooks/1/x",
+        notChecked
+      ).body
+    );
+    assert.strictEqual(
+      discord.embeds[0]?.title,
+      "🟠 monitor Site is not being checked"
+    );
+    assert.deepStrictEqual(discord.allowed_mentions.parse, []);
+    assert.isUndefined(discord.content);
+    for (const kind of ["slack", "discord", "ntfy", "webhook"] as const) {
+      const request = alertRequest(kind, "https://example.com/x", notChecked);
+      assert.notInclude(`${request.url}${request.body}`, "Kanshi");
+    }
     const ntfy = new URL(
       alertRequest("ntfy", "https://ntfy.sh/topic", notChecked).url
     );
@@ -879,6 +905,8 @@ describe("not-being-checked messages", () => {
       incident: null,
       monitor,
       recovered: false,
+      responseExcerpt: null,
+      responseTruncated: false,
       sentAt: t0 + 16 * minute,
       text: "monitor Site is not being checked\nLast check: 16m ago (expected every 5m)\nhttps://example.com/",
       title: "monitor Site is not being checked",

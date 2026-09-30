@@ -114,10 +114,15 @@ const target = (url: URL) =>
     return HttpServerResponse.text(body, { status });
   });
 
-/** A JSON alert body's candidate message fields (Slack, Discord). */
+/**
+ * A JSON alert body's candidate message fields: Slack's `text`, a Discord
+ * embed's title, a generic webhook's `text`.
+ */
 const AlertBody = Schema.fromJsonString(
   Schema.Struct({
-    content: Schema.optionalKey(Schema.Json),
+    embeds: Schema.optionalKey(
+      Schema.Array(Schema.Struct({ title: Schema.optionalKey(Schema.Json) }))
+    ),
     text: Schema.optionalKey(Schema.Json),
   })
 );
@@ -130,7 +135,7 @@ const alertSummary = (url: URL, body: string): string => {
   const text = decodeAlertBody(body).pipe(
     Option.flatMap((parsed) =>
       Option.fromUndefinedOr(
-        [parsed.text, parsed.content].find(Predicate.isString)
+        [parsed.text, parsed.embeds?.[0]?.title].find(Predicate.isString)
       )
     ),
     Option.getOrElse(() => body)

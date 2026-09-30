@@ -98,6 +98,7 @@ import {
   prune,
   readAlertWork,
   readConfig,
+  incidentExcerpt,
   readIncident,
   readOutboxPair,
   readPeriods,
@@ -811,7 +812,9 @@ export const MonitorLive = Monitor.make(
                     cause: incident.cause,
                     id: incident.id,
                     lastHttpStatus: incident.lastHttpStatus,
+                    latencyMs: incident.latencyMs,
                     resolvedAt: incident.resolvedAt,
+                    responseExcerpt: incidentExcerpt(incident),
                     startedAt: incident.startedAt,
                   },
                   monitor: {

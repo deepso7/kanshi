@@ -119,6 +119,8 @@ export const WebhookAlert = Schema.fromJsonString(
     id: Schema.String,
     monitor: Schema.NullOr(Schema.Struct({ id: Schema.String })),
     recovered: Schema.Boolean,
+    responseExcerpt: Schema.NullOr(Schema.String),
+    responseTruncated: Schema.Boolean,
     title: Schema.String,
   })
 );

@@ -32,19 +32,31 @@ const minute = 60_000;
 const t0 = 1_700_000_000_000;
 
 const monitor = { id: "m1", name: "Site", url: "https://example.com/" };
+/** The body a failing health endpoint answers with. */
+const aspenBody =
+  '{"_tag":"ServiceUnavailable","details":{"checkedAt":"2026-09-30T10:00:00.000Z","checks":{"openrouter":"low","x":"ok","supadata":"ok"},"ok":false},"message":"One or more required dependencies are unhealthy"}';
 const incident = {
   cause: "expected 2xx, got 500",
   id: "inc1",
   lastHttpStatus: 500,
+  latencyMs: 412,
   resolvedAt: null,
+  responseExcerpt: { text: aspenBody, truncated: false },
   startedAt: t0,
 };
-const down = AlertMessage.Down({
+const downAlert = {
   idempotencyKey: idempotencyKey("inc1", "down", "c1"),
   incident,
   monitor,
   sentAt: t0 + 1000,
-});
+};
+const down = AlertMessage.Down(downAlert);
+/** A down alert whose excerpt is `text`. */
+const downWith = (text: string, truncated = false) =>
+  AlertMessage.Down({
+    ...downAlert,
+    incident: { ...incident, responseExcerpt: { text, truncated } },
+  });
 const recoveredAlert = {
   idempotencyKey: idempotencyKey("inc1", "up", "c1"),
   incident: { ...incident, resolvedAt: t0 + 12 * minute },
@@ -56,20 +68,75 @@ const downRecovered = AlertMessage.DownRecovered({
   ...recoveredAlert,
   idempotencyKey: idempotencyKey("inc1", "down", "c1"),
 });
+const testAlert = AlertMessage.Test({
+  channelName: "Ops",
+  idempotencyKey: "test:c1:x",
+  sentAt: t0,
+});
 
 const DiscordBody = Schema.fromJsonString(
-  Schema.Struct({ allowed_mentions: Schema.Json, content: Schema.String })
+  Schema.Struct({
+    allowed_mentions: Schema.Struct({ parse: Schema.Array(Schema.String) }),
+    content: Schema.optionalKey(Schema.String),
+    embeds: Schema.Array(
+      Schema.Struct({
+        color: Schema.Number,
+        description: Schema.optionalKey(Schema.String),
+        fields: Schema.optionalKey(
+          Schema.Array(
+            Schema.Struct({
+              inline: Schema.Boolean,
+              name: Schema.String,
+              value: Schema.String,
+            })
+          )
+        ),
+        timestamp: Schema.String,
+        title: Schema.String,
+        url: Schema.optionalKey(Schema.String),
+      })
+    ),
+  })
 );
+const discordOf = (message: AlertMessage) =>
+  Schema.decodeUnknownSync(DiscordBody)(
+    alertRequest("discord", "https://discord.com/api/webhooks/1/x", message)
+      .body
+  );
+const embedOf = (message: AlertMessage) => {
+  const [embed] = discordOf(message).embeds;
+  assert.isDefined(embed);
+  return embed;
+};
+
+const SlackBody = Schema.fromJsonString(
+  Schema.Struct({ blocks: Schema.Array(Schema.Json), text: Schema.String })
+);
+const slackOf = (message: AlertMessage) =>
+  Schema.decodeUnknownSync(SlackBody)(
+    alertRequest("slack", "https://hooks.slack.com/x", message).body
+  );
+
 const WebhookBody = Schema.fromJsonString(
   Schema.Struct({
     event: Schema.String,
     id: Schema.String,
-    incident: Schema.NullOr(Schema.Struct({ durationMs: Schema.Number })),
+    incident: Schema.NullOr(
+      Schema.Struct({ durationMs: Schema.Number, latencyMs: Schema.Json })
+    ),
     monitor: Schema.Json,
     recovered: Schema.Boolean,
+    responseExcerpt: Schema.NullOr(Schema.String),
+    responseTruncated: Schema.Boolean,
+    title: Schema.String,
   })
 );
 const decodeWebhook = Schema.decodeUnknownSync(WebhookBody);
+
+const aspenPretty = JSON.stringify(JSON.parse(aspenBody), null, 2);
+
+/** Occurrences of ``` in `text`. */
+const fences = (text: string) => text.split("```").length - 1;
 
 describe("retry classification and backoff", () => {
   it("treats 2xx as delivered and 4xx other than 408/425/429 as permanent", () => {
@@ -116,37 +183,211 @@ describe("message formatting", () => {
       body: "expected 2xx, got 500\nhttps://example.com/",
       title: "Site is down",
     });
-    assert.strictEqual(
-      alertText(recovered).title,
-      "Site is up again after 12m"
-    );
+    assert.deepStrictEqual(alertText(recovered), {
+      body: "Down for 12m\nhttps://example.com/",
+      title: "Site recovered",
+    });
     assert.strictEqual(
       alertText(downRecovered).title,
       "Site was down for 12m, recovered"
     );
+    assert.strictEqual(
+      alertText(testAlert).title,
+      'Test alert for channel "Ops"'
+    );
   });
 
-  it("builds slack and discord payloads", () => {
-    const slack = alertRequest("slack", "https://hooks.slack.com/x", down);
-    assert.strictEqual(slack.url, "https://hooks.slack.com/x");
-    assert.strictEqual(slack.headers["content-type"], "application/json");
-    assert.deepStrictEqual(JSON.parse(slack.body), {
-      text: "Kanshi: Site is down\nexpected 2xx, got 500\nhttps://example.com/",
+  it("never names Kanshi in an alert", () => {
+    const episode = {
+      id: "w1",
+      intervalSeconds: 300,
+      lastCheckedAt: t0,
+      resolvedAt: null,
+      startedAt: t0 + minute,
+    };
+    const episodeAlert = {
+      episode,
+      idempotencyKey: "w1:down:c1",
+      monitor,
+      sentAt: t0 + 16 * minute,
+    };
+    const messages = [
+      down,
+      recovered,
+      downRecovered,
+      testAlert,
+      AlertMessage.NotChecked(episodeAlert),
+      AlertMessage.NotCheckedResolved(episodeAlert),
+      AlertMessage.CheckedAgain(episodeAlert),
+    ];
+    for (const message of messages) {
+      for (const kind of ["slack", "discord", "ntfy", "webhook"] as const) {
+        const request = alertRequest(kind, "https://example.com/x", message);
+        assert.notInclude(
+          `${request.url}${request.body}`,
+          "Kanshi",
+          `${alertText(message).title} to ${kind}`
+        );
+      }
+    }
+  });
+});
+
+describe("Discord payloads", () => {
+  it("sends a down alert as an embed with @everyone", () => {
+    const body = discordOf(down);
+    assert.strictEqual(body.content, "@everyone");
+    assert.deepStrictEqual(body.allowed_mentions, { parse: ["everyone"] });
+    assert.deepStrictEqual(body.embeds, [
+      {
+        color: 0xed_42_45,
+        description: `\`\`\`json\n${aspenPretty}\n\`\`\``,
+        fields: [
+          { inline: false, name: "Cause", value: "expected 2xx, got 500" },
+          { inline: true, name: "HTTP status", value: "500" },
+          { inline: true, name: "Latency", value: "412 ms" },
+        ],
+        timestamp: new Date(t0).toISOString(),
+        title: "🔴 Site is down",
+        url: "https://example.com/",
+      },
+    ]);
+  });
+
+  it("mentions no one on recovery or test alerts", () => {
+    for (const message of [recovered, downRecovered, testAlert]) {
+      const body = discordOf(message);
+      assert.isUndefined(body.content, alertText(message).title);
+      assert.deepStrictEqual(body.allowed_mentions, { parse: [] });
+    }
+    const up = embedOf(recovered);
+    assert.strictEqual(up.title, "🟢 Site recovered");
+    assert.strictEqual(up.color, 0x57_f2_87);
+    assert.strictEqual(up.url, "https://example.com/");
+    assert.isUndefined(up.description);
+    assert.deepStrictEqual(up.fields?.[0], {
+      inline: true,
+      name: "Down for",
+      value: "12m",
     });
-    assert.isUndefined(slack.headers["idempotency-key"]);
+    assert.strictEqual(up.timestamp, new Date(t0 + 12 * minute).toISOString());
 
-    const discord = alertRequest(
-      "discord",
-      "https://discord.com/api/webhooks/1/x",
-      recovered
+    // The combined alert still shows what the outage looked like.
+    const combined = embedOf(downRecovered);
+    assert.strictEqual(combined.title, "🟢 Site was down for 12m, recovered");
+    assert.strictEqual(
+      combined.description,
+      `\`\`\`json\n${aspenPretty}\n\`\`\``
     );
-    const body = Schema.decodeUnknownSync(DiscordBody)(discord.body);
-    assert.deepStrictEqual(body.allowed_mentions, { parse: [] });
-    assert.isTrue(
-      body.content.startsWith("Kanshi: Site is up again after 12m")
+    assert.deepStrictEqual(
+      combined.fields?.map((field) => field.name),
+      ["Cause", "HTTP status", "Latency", "Down for"]
     );
+
+    const test = embedOf(testAlert);
+    assert.strictEqual(test.title, '🧪 Test alert for channel "Ops"');
+    assert.strictEqual(
+      test.description,
+      "If you can read this, alerts reach this channel."
+    );
+    assert.isUndefined(test.url);
   });
 
+  it("puts a non-JSON excerpt in a plain code block", () => {
+    assert.strictEqual(
+      embedOf(downWith("Service Unavailable")).description,
+      "```\nService Unavailable\n```"
+    );
+    // A JSON scalar is not worth highlighting.
+    assert.strictEqual(embedOf(downWith("42")).description, "```\n42\n```");
+    // A down alert without an excerpt has no description.
+    const bare = AlertMessage.Down({
+      ...downAlert,
+      incident: { ...incident, responseExcerpt: null },
+    });
+    assert.isUndefined(embedOf(bare).description);
+  });
+
+  it("marks an excerpt the probe cut, and cuts one past Discord's limits", () => {
+    assert.strictEqual(
+      embedOf(downWith('{"partial": tru', true)).description,
+      '```\n{"partial": tru\n```\n…(truncated)'
+    );
+    // Pretty-printing can outgrow the 4096-character description.
+    const wide = JSON.stringify(
+      Array.from({ length: 400 }, (_, index) => ({ index }))
+    );
+    const { description = "", fields = [], title } = embedOf(downWith(wide));
+    assert.isAtMost(description.length, 4096);
+    assert.isTrue(description.startsWith("```json\n[\n  {"));
+    assert.isTrue(description.endsWith("\n```\n…(truncated)"));
+    const total =
+      title.length +
+      description.length +
+      fields.reduce((sum, f) => sum + f.name.length + f.value.length, 0);
+    assert.isAtMost(total, 6000);
+  });
+
+  it("keeps backticks in the body from closing the block", () => {
+    const { description = "" } = embedOf(
+      downWith("oops ``` @everyone ```` done")
+    );
+    assert.strictEqual(fences(description), 2);
+    assert.isTrue(description.startsWith("```\noops `\u200B`\u200B` "));
+  });
+});
+
+describe("Slack payloads", () => {
+  it("sends Block Kit with <!channel> on down alerts", () => {
+    const body = slackOf(down);
+    assert.strictEqual(body.text, "<!channel> 🔴 Site is down");
+    assert.deepStrictEqual(body.blocks, [
+      {
+        text: { emoji: true, text: "🔴 Site is down", type: "plain_text" },
+        type: "header",
+      },
+      {
+        text: {
+          text: "<!channel> <https://example.com/|https://example.com/>",
+          type: "mrkdwn",
+        },
+        type: "section",
+      },
+      {
+        fields: [
+          { text: "*Cause*\nexpected 2xx, got 500", type: "mrkdwn" },
+          { text: "*HTTP status*\n500", type: "mrkdwn" },
+          { text: "*Latency*\n412 ms", type: "mrkdwn" },
+        ],
+        type: "section",
+      },
+      {
+        text: { text: `\`\`\`\n${aspenPretty}\n\`\`\``, type: "mrkdwn" },
+        type: "section",
+      },
+      {
+        elements: [
+          {
+            text: `<!date^${t0 / 1000}^{date_short_pretty} at {time}|${new Date(t0).toISOString()}>`,
+            type: "mrkdwn",
+          },
+        ],
+        type: "context",
+      },
+    ]);
+  });
+
+  it("escapes the excerpt and mentions no one on recovery", () => {
+    const html = JSON.stringify(slackOf(downWith("<b>a & b</b> ```")).blocks);
+    assert.include(html, "&lt;b&gt;a &amp; b&lt;/b&gt; `\u200B`\u200B`");
+    const up = slackOf(recovered);
+    assert.strictEqual(up.text, "🟢 Site recovered");
+    assert.notInclude(JSON.stringify(up.blocks), "<!channel>");
+    assert.notInclude(JSON.stringify(slackOf(testAlert)), "<!channel>");
+  });
+});
+
+describe("ntfy and webhook payloads", () => {
   it("gives generic webhooks an Idempotency-Key equal to the body id", () => {
     const request = alertRequest("webhook", "https://example.com/hook", down);
     assert.strictEqual(request.headers["idempotency-key"], "inc1:down:c1");
@@ -154,7 +395,24 @@ describe("message formatting", () => {
     assert.strictEqual(body.id, "inc1:down:c1");
     assert.strictEqual(body.event, "down");
     assert.strictEqual(body.recovered, false);
+    assert.strictEqual(body.title, "Site is down");
     assert.deepStrictEqual(body.monitor, monitor);
+    assert.strictEqual(body.responseExcerpt, aspenBody);
+    assert.isFalse(body.responseTruncated);
+    assert.strictEqual(body.incident?.latencyMs, 412);
+    // The excerpt is top-level only.
+    const raw = Schema.decodeUnknownSync(
+      Schema.fromJsonString(
+        Schema.Struct({ incident: Schema.Record(Schema.String, Schema.Json) })
+      )
+    )(request.body);
+    assert.notProperty(raw.incident, "responseExcerpt");
+    assert.isTrue(
+      decodeWebhook(
+        alertRequest("webhook", "https://example.com/hook", downWith("x", true))
+          .body
+      ).responseTruncated
+    );
 
     const combined = decodeWebhook(
       alertRequest("webhook", "https://example.com/hook", downRecovered).body
@@ -162,11 +420,19 @@ describe("message formatting", () => {
     assert.strictEqual(combined.event, "down");
     assert.strictEqual(combined.recovered, true);
     assert.strictEqual(combined.incident?.durationMs, 12 * minute);
+    assert.strictEqual(combined.responseExcerpt, aspenBody);
     const up = decodeWebhook(
       alertRequest("webhook", "https://example.com/hook", recovered).body
     );
     assert.strictEqual(up.event, "up");
     assert.strictEqual(up.id, "inc1:up:c1");
+    assert.isNull(up.responseExcerpt);
+    const test = decodeWebhook(
+      alertRequest("webhook", "https://example.com/hook", testAlert).body
+    );
+    assert.strictEqual(test.event, "test");
+    assert.strictEqual(test.id, "test:c1:x");
+    assert.isNull(test.responseExcerpt);
   });
 
   it("posts ntfy messages as text with title, priority and tags in the query", () => {
@@ -174,33 +440,22 @@ describe("message formatting", () => {
     const url = new URL(request.url);
     assert.strictEqual(url.pathname, "/topic");
     assert.strictEqual(url.searchParams.get("auth"), "tk");
-    assert.strictEqual(url.searchParams.get("title"), "Kanshi: Site is down");
+    assert.strictEqual(url.searchParams.get("title"), "Site is down");
     assert.strictEqual(url.searchParams.get("priority"), "high");
     assert.strictEqual(url.searchParams.get("tags"), "rotating_light");
+    assert.strictEqual(url.searchParams.get("click"), "https://example.com/");
+    assert.strictEqual(request.body, `expected 2xx, got 500\n\n${aspenPretty}`);
     assert.strictEqual(
-      request.body,
-      "expected 2xx, got 500\nhttps://example.com/"
+      alertRequest("ntfy", "https://ntfy.sh/t", downWith("down", true)).body,
+      "expected 2xx, got 500\n\ndown\n…(truncated)"
     );
-    assert.strictEqual(
-      new URL(
-        alertRequest("ntfy", "https://ntfy.sh/t", recovered).url
-      ).searchParams.get("priority"),
-      "default"
-    );
-  });
 
-  it("formats test messages for every kind", () => {
-    const test = AlertMessage.Test({
-      channelName: "Ops",
-      idempotencyKey: "test:c1:x",
-      sentAt: t0,
-    });
-    assert.strictEqual(alertText(test).title, 'Test alert for channel "Ops"');
-    const body = decodeWebhook(
-      alertRequest("webhook", "https://example.com/hook", test).body
-    );
-    assert.strictEqual(body.event, "test");
-    assert.strictEqual(body.id, "test:c1:x");
+    const up = alertRequest("ntfy", "https://ntfy.sh/t", recovered);
+    const upUrl = new URL(up.url);
+    assert.strictEqual(upUrl.searchParams.get("title"), "Site recovered");
+    assert.strictEqual(upUrl.searchParams.get("priority"), "default");
+    assert.strictEqual(upUrl.searchParams.get("tags"), "white_check_mark");
+    assert.strictEqual(up.body, "Down for 12m");
   });
 });
 
