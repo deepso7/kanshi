@@ -48,6 +48,23 @@ export default defineConfig({
   build: {
     // No inline `data:` scripts or styles under the strict CSP.
     assetsInlineLimit: 0,
+    rolldownOptions: {
+      output: {
+        // Libraries every route needs, in their own long-cached chunks: a
+        // deploy that only changes the app keeps them. Base UI is left to
+        // split with the pages that use each component.
+        codeSplitting: {
+          groups: [
+            {
+              name: "react",
+              test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/u,
+            },
+            { name: "tanstack", test: /node_modules[\\/]@tanstack[\\/]/u },
+            { name: "effect", test: /node_modules[\\/]effect[\\/]/u },
+          ],
+        },
+      },
+    },
   },
   plugins: [
     // Before the React plugin, to keep Fast Refresh.

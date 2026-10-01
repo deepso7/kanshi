@@ -42,8 +42,6 @@ import {
   sessionQuery,
 } from "./api/queries.ts";
 import { isSafeRedirect, redirectTarget } from "./lib/redirect.ts";
-import { ChannelsPage } from "./pages/channels.tsx";
-import { DashboardPage } from "./pages/dashboard.tsx";
 import {
   AppLayout,
   NotFoundPanel,
@@ -53,11 +51,38 @@ import {
   StandalonePending,
   StandaloneRouteError,
 } from "./pages/layout.tsx";
-import { LoginPage } from "./pages/login.tsx";
-import { MonitorDetailPage } from "./pages/monitor-detail.tsx";
-import { EditMonitorPage, NewMonitorPage } from "./pages/monitor-form.tsx";
 import { NotFoundPage } from "./pages/not-found.tsx";
-import { StatusPage } from "./pages/status.tsx";
+
+// Each page is its own chunk, fetched alongside its route's loader (and on
+// hover, with `defaultPreload: "intent"`); the shell stays in the entry.
+const LoginPage = lazyRouteComponent(
+  () => import("./pages/login.tsx"),
+  "LoginPage"
+);
+const StatusPage = lazyRouteComponent(
+  () => import("./pages/status.tsx"),
+  "StatusPage"
+);
+const DashboardPage = lazyRouteComponent(
+  () => import("./pages/dashboard.tsx"),
+  "DashboardPage"
+);
+const MonitorDetailPage = lazyRouteComponent(
+  () => import("./pages/monitor-detail.tsx"),
+  "MonitorDetailPage"
+);
+const NewMonitorPage = lazyRouteComponent(
+  () => import("./pages/monitor-form.tsx"),
+  "NewMonitorPage"
+);
+const EditMonitorPage = lazyRouteComponent(
+  () => import("./pages/monitor-form.tsx"),
+  "EditMonitorPage"
+);
+const ChannelsPage = lazyRouteComponent(
+  () => import("./pages/channels.tsx"),
+  "ChannelsPage"
+);
 
 /** What every route's `loader` / `beforeLoad` receives. */
 export interface RouterContext {
