@@ -75,8 +75,8 @@ You need Node, pnpm, [Bun](https://bun.sh) and a Cloudflare account.
    its local `.alchemy/` state) first. To keep your monitors and history,
    don't upgrade that deployment.
 
-2. **Open the dashboard** at the Worker URL and sign in with the token. The
-   public status page is at `/status`.
+2. **Open the dashboard** at `/manage` on the Worker URL and sign in with
+   the token. The Worker URL itself is the public status page.
 
 3. **Add monitors and channels** in the dashboard (or through the
    [API](#api)).
@@ -149,7 +149,7 @@ derived from the API's spec.
 ## Local development
 
 ```sh
-pnpm dev    # alchemy dev --stage dev, fully offline: open http://localhost:5173
+pnpm dev    # alchemy dev --stage dev, fully offline: open http://localhost:5173/manage
 pnpm build  # build the UI (web/dist), as deploys and integration tests do
 ```
 

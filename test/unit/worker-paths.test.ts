@@ -21,10 +21,10 @@ describe(isWorkerPath, () => {
       "/apis",
       "/api-docs",
       // Client routes.
-      "/login",
-      "/logout",
-      "/monitors/abc/edit",
-      "/channels",
+      "/manage",
+      "/manage/login",
+      "/manage/monitors/abc/edit",
+      "/manage/channels",
     ]) {
       assert.isFalse(isWorkerPath(path), path);
     }

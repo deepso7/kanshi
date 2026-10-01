@@ -70,7 +70,7 @@ const publicNames = publicStatus.pipe(
 test(
   "the SPA is served as static assets, with the Worker's paths first",
   Effect.gen(function* spaTest() {
-    // The shell for the root, the public status page and any client route.
+    // The shell for the root (the public status page) and any client route.
     const home = yield* spaShell("/");
     const csp = home.headers.get("content-security-policy") ?? "";
     expect(csp).toContain("default-src 'none'");
@@ -78,7 +78,6 @@ test(
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).not.toContain("unsafe-inline");
     expect(home.headers.get("x-frame-options")).toBe("DENY");
-    yield* spaShell("/status");
     yield* spaShell("/some/client/route");
 
     // Content-hashed files are cached for good.
@@ -104,14 +103,13 @@ test(
     // The Worker never renders or redirects a page.
     const cookie = yield* signIn;
     for (const path of [
-      "/login",
-      "/login?redirect=%2Fchannels",
-      "/logout",
-      "/monitors",
-      "/monitors/new",
-      "/monitors/some-id",
-      "/monitors/some-id/edit",
-      "/channels",
+      "/manage",
+      "/manage/login",
+      "/manage/login?redirect=%2Fmanage%2Fchannels",
+      "/manage/monitors/new",
+      "/manage/monitors/some-id",
+      "/manage/monitors/some-id/edit",
+      "/manage/channels",
     ]) {
       const shell = yield* spaShell(path);
       expect(shell.text).not.toContain('name="token"');
@@ -120,7 +118,7 @@ test(
       expect(signedIn.text).toContain('<div id="root"></div>');
     }
     // A form POST to a page path signs nobody in.
-    const post = yield* raw("POST", "/login", {
+    const post = yield* raw("POST", "/manage/login", {
       form: { token: apiToken },
       headers: { origin: yield* origin },
     });

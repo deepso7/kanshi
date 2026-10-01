@@ -59,7 +59,7 @@ export const RootLayout = () => (
 
 /** Monitor pages belong to the dashboard's section of the nav. */
 const isDashboardPath = (pathname: string) =>
-  pathname === "/" || pathname.startsWith("/monitors");
+  pathname === "/manage" || pathname.startsWith("/manage/monitors");
 
 /**
  * The signed-in layout: the app shell with the nav, the dev-mode badge,
@@ -93,7 +93,8 @@ export const AppLayout = () => {
             disabled={signOut.isPending}
             onClick={() =>
               signOut.mutate(undefined, {
-                onSuccess: () => navigate({ replace: true, to: "/login" }),
+                onSuccess: () =>
+                  navigate({ replace: true, to: "/manage/login" }),
               })
             }
             size="sm"
@@ -107,15 +108,15 @@ export const AppLayout = () => {
         <>
           <AppShellNavLink
             active={isDashboardPath(pathname)}
-            render={<Link activeOptions={{ exact: true }} to="/" />}
+            render={<Link activeOptions={{ exact: true }} to="/manage" />}
           >
             Dashboard
           </AppShellNavLink>
-          <AppShellNavLink render={<Link to="/channels" />}>
+          <AppShellNavLink render={<Link to="/manage/channels" />}>
             Channels
           </AppShellNavLink>
           <AppShellNavLink
-            render={<Link rel="noopener" target="_blank" to="/status" />}
+            render={<Link rel="noopener" target="_blank" to="/" />}
           >
             Status page
             <span aria-hidden {...stylex.props(styles.external)}>
@@ -148,7 +149,7 @@ export const RouteError = ({ error, reset }: ErrorComponentProps) => {
   return (
     <ErrorPanel
       actions={
-        <Link to="/" {...buttonStyles({ size: "sm", variant: "ghost" })}>
+        <Link to="/manage" {...buttonStyles({ size: "sm", variant: "ghost" })}>
           Dashboard
         </Link>
       }
@@ -174,7 +175,7 @@ export const StandaloneRouteError = (props: ErrorComponentProps) => (
 export const NotFoundPanel = () => (
   <EmptyState
     action={
-      <Link to="/" {...buttonStyles({ variant: "outline" })}>
+      <Link to="/manage" {...buttonStyles({ variant: "outline" })}>
         Back to the dashboard
       </Link>
     }

@@ -7,8 +7,8 @@ export const isSafeRedirect = (target: string): boolean =>
   target.startsWith("/") &&
   !target.startsWith("//") &&
   !target.startsWith("/\\") &&
-  !/^\/login(?:[/?#]|$)/u.test(target);
+  !/^\/manage\/login(?:[/?#]|$)/u.test(target);
 
 /** `target` when it is safe, else the dashboard. */
 export const redirectTarget = (target?: string): string =>
-  target !== undefined && isSafeRedirect(target) ? target : "/";
+  target !== undefined && isSafeRedirect(target) ? target : "/manage";

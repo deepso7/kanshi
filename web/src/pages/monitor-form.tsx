@@ -15,7 +15,7 @@ import { buttonStyles } from "../components/ui/button.tsx";
 import { useToastMutation } from "../lib/use-toast-mutation.ts";
 import { colors } from "../theme/tokens.stylex.ts";
 
-const editRoute = getRouteApi("/_app/monitors/$id/edit");
+const editRoute = getRouteApi("/_app/manage/monitors/$id/edit");
 
 const styles = stylex.create({
   link: {
@@ -29,12 +29,12 @@ const styles = stylex.create({
 });
 
 const ChannelsLink = () => (
-  <Link to="/channels" {...stylex.props(styles.link)}>
+  <Link to="/manage/channels" {...stylex.props(styles.link)}>
     Add a channel
   </Link>
 );
 
-/** `/monitors/new`: add a monitor, then open it. */
+/** `/manage/monitors/new`: add a monitor, then open it. */
 export const NewMonitorPage = () => {
   const navigate = useNavigate();
   const { data: channels } = useSuspenseQuery(channelsQuery);
@@ -52,7 +52,7 @@ export const NewMonitorPage = () => {
       />
       <MonitorForm
         cancel={
-          <Link to="/" {...buttonStyles({ variant: "ghost" })}>
+          <Link to="/manage" {...buttonStyles({ variant: "ghost" })}>
             Cancel
           </Link>
         }
@@ -63,7 +63,7 @@ export const NewMonitorPage = () => {
           const monitor = await create.mutateAsync(payload);
           await navigate({
             params: { id: monitor.id },
-            to: "/monitors/$id",
+            to: "/manage/monitors/$id",
           });
         }}
         onUpdate={() => Promise.resolve()}
@@ -73,7 +73,7 @@ export const NewMonitorPage = () => {
   );
 };
 
-/** `/monitors/$id/edit`: change a monitor; only changed fields are sent. */
+/** `/manage/monitors/$id/edit`: change a monitor; only changed fields are sent. */
 export const EditMonitorPage = () => {
   const { id } = editRoute.useParams();
   const navigate = useNavigate();
@@ -91,7 +91,7 @@ export const EditMonitorPage = () => {
         cancel={
           <Link
             params={{ id }}
-            to="/monitors/$id"
+            to="/manage/monitors/$id"
             {...buttonStyles({ variant: "ghost" })}
           >
             Cancel
@@ -105,7 +105,7 @@ export const EditMonitorPage = () => {
         onCreate={() => Promise.resolve()}
         onUpdate={async (patch) => {
           await update.mutateAsync({ id, patch });
-          await navigate({ params: { id }, to: "/monitors/$id" });
+          await navigate({ params: { id }, to: "/manage/monitors/$id" });
         }}
         rules={meta}
       />

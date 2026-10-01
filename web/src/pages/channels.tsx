@@ -432,7 +432,7 @@ const ChannelRow = ({ channel, now, onDelete, onEdit }: ChannelRowProps) => {
   );
 };
 
-/** `/channels`: where alerts go; add, edit, test and delete channels. */
+/** `/manage/channels`: where alerts go; add, edit, test and delete channels. */
 export const ChannelsPage = () => {
   const { data: channels } = useSuspenseQuery(channelsQuery);
   const { data: meta } = useSuspenseQuery(metaQuery);

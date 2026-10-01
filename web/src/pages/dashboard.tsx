@@ -396,7 +396,7 @@ const NotCheckedBanner = ({
           <li key={episode.id} {...stylex.props(watchStyles.item)}>
             <Link
               params={{ id: episode.monitorId }}
-              to="/monitors/$id"
+              to="/manage/monitors/$id"
               {...stylex.props(watchStyles.link, shared.focusRing)}
             >
               {episode.monitorName}
@@ -596,7 +596,7 @@ const MonitorRow = ({
         <div {...stylex.props(tableStyles.nameLine)}>
           <Link
             params={{ id: monitor.id }}
-            to="/monitors/$id"
+            to="/manage/monitors/$id"
             {...stylex.props(tableStyles.name)}
           >
             {monitor.name}
@@ -851,7 +851,7 @@ const DevEventsPanel = () => {
 // -- page --------------------------------------------------------------------
 
 const newMonitorLink = (
-  <Link to="/monitors/new" {...buttonStyles({})}>
+  <Link to="/manage/monitors/new" {...buttonStyles({})}>
     <PlusIcon /> New monitor
   </Link>
 );

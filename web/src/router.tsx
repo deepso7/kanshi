@@ -4,16 +4,16 @@
 // Refresh can hot-swap them; this module only wires routes: guards,
 // loaders (which warm the query cache) and search validation.
 //
-//   /login                public; `?redirect=` back after signing in
-//   /status               public; no app shell
-//   _app (layout)         the session guard and the app shell
-//     /                   dashboard
-//     /monitors/new
-//     /monitors/$id
-//     /monitors/$id/edit
-//     /channels
-//   /_ui                  dev only: the design-system showcase
-//   anything else         the root's not-found page
+//   /                          public: the status page; no app shell
+//   /manage/login              public; `?redirect=` back after signing in
+//   _app (layout)              the session guard and the app shell
+//     /manage                  dashboard
+//     /manage/monitors/new
+//     /manage/monitors/$id
+//     /manage/monitors/$id/edit
+//     /manage/channels
+//   /_ui                       dev only: the design-system showcase
+//   anything else              the root's not-found page
 import { QueryClient } from "@tanstack/react-query";
 import {
   createRootRouteWithContext,
@@ -137,7 +137,7 @@ const loginRoute = createRoute({
   component: LoginPage,
   errorComponent: StandaloneRouteError,
   getParentRoute: () => rootRoute,
-  path: "/login",
+  path: "/manage/login",
   pendingComponent: StandalonePending,
   validateSearch: (search: { readonly redirect?: unknown }): LoginSearch => {
     const target = search.redirect;
@@ -150,7 +150,7 @@ const loginRoute = createRoute({
   },
 });
 
-/** Public: no session needed (it reads `/api/public/status`). */
+/** Public, at the root: no session needed (it reads `/api/public/status`). */
 const statusRoute = createRoute({
   component: StatusPage,
   // Its own frame, not the app shell's.
@@ -158,7 +158,7 @@ const statusRoute = createRoute({
   getParentRoute: () => rootRoute,
   loader: ({ context: { queryClient: client } }) =>
     client.ensureQueryData(publicStatusQuery),
-  path: "/status",
+  path: "/",
   pendingComponent: StatusPending,
 });
 
@@ -169,7 +169,10 @@ const appRoute = createRoute({
   beforeLoad: async ({ context: { queryClient: client }, location }) => {
     const session = await client.ensureQueryData(sessionQuery);
     if (!session.signedIn) {
-      throw redirect({ search: { redirect: location.href }, to: "/login" });
+      throw redirect({
+        search: { redirect: location.href },
+        to: "/manage/login",
+      });
     }
     // The shell's dev badge; forms read the minimum interval from it.
     void client.prefetchQuery(metaQuery);
@@ -189,7 +192,7 @@ const dashboardRoute = createRoute({
     void prefetchDevEvents(client);
     await client.ensureQueryData(overviewQuery());
   },
-  path: "/",
+  path: "/manage",
 });
 
 const newMonitorRoute = createRoute({
@@ -201,7 +204,7 @@ const newMonitorRoute = createRoute({
       client.ensureQueryData(metaQuery),
     ]);
   },
-  path: "/monitors/new",
+  path: "/manage/monitors/new",
 });
 
 const monitorRoute = createRoute({
@@ -221,7 +224,7 @@ const monitorRoute = createRoute({
   },
   // Set here: a loader's `notFound()` skips the router's default.
   notFoundComponent: NotFoundPanel,
-  path: "/monitors/$id",
+  path: "/manage/monitors/$id",
 });
 
 const editMonitorRoute = createRoute({
@@ -235,7 +238,7 @@ const editMonitorRoute = createRoute({
     ]);
   },
   notFoundComponent: NotFoundPanel,
-  path: "/monitors/$id/edit",
+  path: "/manage/monitors/$id/edit",
 });
 
 const channelsRoute = createRoute({
@@ -248,7 +251,7 @@ const channelsRoute = createRoute({
       client.ensureQueryData(metaQuery),
     ]);
   },
-  path: "/channels",
+  path: "/manage/channels",
 });
 
 // -- dev ---------------------------------------------------------------------
@@ -312,11 +315,11 @@ const signOutOnUnauthorized = (error: Error) => {
   // session fetch when several reads fail with 401 at once.
   queryClient.setQueryData(sessionQuery.queryKey, { signedIn: false });
   const { href, pathname } = router.state.location;
-  if (pathname !== "/login") {
+  if (pathname !== "/manage/login") {
     void router.navigate({
       replace: true,
       search: { redirect: href },
-      to: "/login",
+      to: "/manage/login",
     });
   }
 };

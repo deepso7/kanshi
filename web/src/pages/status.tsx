@@ -214,7 +214,7 @@ const OpenIncidents = ({
 };
 
 /**
- * `/status`: the public status page (no session, no app shell): the
+ * `/`: the public status page (no session, no app shell): the
  * overall status, each public monitor's last 90 days
  * (60 on narrow screens) and its uptime over the same days, and the
  * open incidents (above the monitors while there are any). It

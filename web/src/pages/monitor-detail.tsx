@@ -111,7 +111,7 @@ import {
   space,
 } from "../theme/tokens.stylex.ts";
 
-const route = getRouteApi("/_app/monitors/$id");
+const route = getRouteApi("/_app/manage/monitors/$id");
 
 /** How often each read refreshes while the page is open. */
 const refresh = {
@@ -792,7 +792,7 @@ const SettingsPanel = ({
       <span {...stylex.props(styles.idText)}>ID {monitor.id}</span>
       <Link
         params={{ id: monitor.id }}
-        to="/monitors/$id/edit"
+        to="/manage/monitors/$id/edit"
         {...buttonStyles({ size: "sm", variant: "outline" })}
       >
         Edit settings
@@ -841,7 +841,7 @@ const DeleteMonitor = ({ monitor }: { readonly monitor: MonitorResponse }) => {
               remove.mutate(monitor.id, {
                 onSuccess: () => {
                   setOpen(false);
-                  void navigate({ replace: true, to: "/" });
+                  void navigate({ replace: true, to: "/manage" });
                 },
               });
             }}
@@ -923,7 +923,7 @@ const MonitorActions = ({ monitor }: { readonly monitor: MonitorResponse }) => {
       </Button>
       <Link
         params={{ id: monitor.id }}
-        to="/monitors/$id/edit"
+        to="/manage/monitors/$id/edit"
         {...buttonStyles({ variant: "outline" })}
       >
         Edit
@@ -1010,7 +1010,7 @@ const MonitorHeader = ({ monitor }: { readonly monitor: MonitorResponse }) => (
       </span>
     }
     eyebrow={
-      <Link to="/" {...stylex.props(styles.crumb)}>
+      <Link to="/manage" {...stylex.props(styles.crumb)}>
         Monitors
       </Link>
     }
@@ -1201,7 +1201,7 @@ const HistoryTabs = ({
   );
 };
 
-/** `/monitors/$id`: one monitor's state, history and actions. */
+/** `/manage/monitors/$id`: one monitor's state, history and actions. */
 export const MonitorDetailPage = () => {
   const { id } = route.useParams();
   // The loader warmed these exact keys; each refreshes on its own clock.

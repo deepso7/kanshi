@@ -25,7 +25,7 @@ import {
   tracking,
 } from "../theme/tokens.stylex.ts";
 
-const route = getRouteApi("/login");
+const route = getRouteApi("/manage/login");
 
 const blink = stylex.keyframes({
   "0%, 100%": { opacity: 1 },
@@ -295,7 +295,7 @@ export const LoginPage = () => {
         </div>
         <div {...stylex.props(styles.footer)}>
           <span {...stylex.props(shared.label)}>Public</span>
-          <Link to="/status" {...stylex.props(styles.link)}>
+          <Link to="/" {...stylex.props(styles.link)}>
             Status page →
           </Link>
         </div>
