@@ -125,7 +125,7 @@ const styles = stylex.create({
     gap: { default: space.xs, [media.md]: space.lg },
     justifyContent: "space-between",
     paddingBlock: space.md,
-    paddingInline: space.lg,
+    paddingInline: { default: space.lg, [media.md]: space.xl },
   },
   incidentName: {
     fontWeight: fontWeights.medium,
@@ -205,6 +205,17 @@ const styles = stylex.create({
     color: colors.cardForeground,
     overflow: "hidden",
   },
+  // Mono and muted, on the bar's right: a period or a count.
+  panelAside: {
+    color: colors.mutedForeground,
+    fontFamily: fonts.mono,
+    fontSize: fontSizes.xs,
+    letterSpacing: tracking.wide,
+    textTransform: "uppercase",
+  },
+  panelAsideDanger: {
+    color: colors.dangerForeground,
+  },
   panelBar: {
     alignItems: "center",
     backgroundColor: colors.secondary,
@@ -213,21 +224,20 @@ const styles = stylex.create({
     borderBottomWidth: "1px",
     color: colors.foreground,
     display: "flex",
-    fontFamily: fonts.mono,
-    fontSize: fontSizes.xs,
+    gap: space.md,
     justifyContent: "space-between",
-    letterSpacing: tracking.wider,
     margin: 0,
-    paddingBlock: space.sm,
+    paddingBlock: space.md,
     paddingInline: { default: space.lg, [media.md]: space.xl },
-    textTransform: "uppercase",
   },
-  panelBarDanger: {
-    backgroundColor: colors.dangerSurface,
-    color: colors.dangerForeground,
+  panelEmpty: {
+    color: colors.mutedForeground,
+    margin: 0,
+    paddingBlock: space.lg,
+    paddingInline: { default: space.lg, [media.md]: space.xl },
   },
   panelTitle: {
-    fontSize: "inherit",
+    fontSize: fontSizes.lg,
     fontWeight: fontWeights.medium,
     margin: 0,
   },
@@ -281,49 +291,60 @@ const MonitorRow = ({
   );
 };
 
+/** Down, with the time it went down: one row in the incidents panel. */
+const isOpenIncident = (monitor: PublicMonitor) =>
+  monitor.status === "down" && monitor.downSince !== null;
+
 const OpenIncidents = ({
   monitors,
 }: {
   readonly monitors: readonly PublicMonitor[];
 }) => {
   const now = useNow();
-  const open = monitors.filter(
-    (monitor) => monitor.status === "down" && monitor.downSince !== null
-  );
-  if (open.length === 0) {
-    return null;
-  }
+  const open = monitors.filter(isOpenIncident);
   return (
     <section aria-labelledby="incidents-title" {...stylex.props(styles.panel)}>
-      <div {...stylex.props(styles.panelBar, styles.panelBarDanger)}>
+      <div {...stylex.props(styles.panelBar)}>
         <h2 id="incidents-title" {...stylex.props(styles.panelTitle)}>
           Open incidents
         </h2>
-        <span aria-hidden>[ {String(open.length).padStart(2, "0")} ]</span>
+        {open.length === 0 ? null : (
+          <span
+            aria-hidden
+            {...stylex.props(styles.panelAside, styles.panelAsideDanger)}
+          >
+            {open.length} open
+          </span>
+        )}
       </div>
-      <ul {...stylex.props(styles.list)}>
-        {open.map((monitor) => {
-          const since = monitor.downSince ?? now;
-          return (
-            <li key={monitor.ref} {...stylex.props(styles.incident)}>
-              <span {...stylex.props(styles.incidentName)}>
-                {monitor.name} is down
-              </span>
-              <span {...stylex.props(styles.incidentTime)}>
-                Since {formatDateTime(since)} · {formatDuration(now - since)}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
+      {open.length === 0 ? (
+        <p {...stylex.props(styles.panelEmpty)}>No open incidents.</p>
+      ) : (
+        <ul {...stylex.props(styles.list)}>
+          {open.map((monitor) => {
+            const since = monitor.downSince ?? now;
+            return (
+              <li key={monitor.ref} {...stylex.props(styles.incident)}>
+                <span {...stylex.props(styles.incidentName)}>
+                  {monitor.name} is down
+                </span>
+                <span {...stylex.props(styles.incidentTime)}>
+                  Since {formatDateTime(since)} · {formatDuration(now - since)}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 };
 
 /**
  * `/status`: the public status page (no session, no app shell): the
- * overall status, open incidents and each public monitor's last 90 days
- * (60 on narrow screens), its uptime over the same days. It
+ * overall status, each public monitor's last 90 days
+ * (60 on narrow screens) and its uptime over the same days, and the
+ * open incidents (above the monitors while there are any). It
  * reads `GET /api/public/status` only, which never carries URLs.
  */
 export const StatusPage = () => {
@@ -331,6 +352,7 @@ export const StatusPage = () => {
   const { generatedAt, monitors, overall } = status.data;
   const { title } = statusBannerView(overall, monitors);
   const days = useWide() ? historyDays : narrowDays;
+  const anyDown = monitors.some(isOpenIncident);
 
   useEffect(() => {
     const previous = document.title;
@@ -370,7 +392,8 @@ export const StatusPage = () => {
           monitors={monitors}
           overall={overall}
         />
-        <OpenIncidents monitors={monitors} />
+        {/* First while something is down; a quiet footnote otherwise. */}
+        {anyDown ? <OpenIncidents monitors={monitors} /> : null}
         {monitors.length === 0 ? (
           <EmptyState
             description="Monitors appear here once they are made public."
@@ -385,7 +408,9 @@ export const StatusPage = () => {
               <h2 id="monitors-title" {...stylex.props(styles.panelTitle)}>
                 Monitors
               </h2>
-              <span>Uptime // {days} days</span>
+              <span {...stylex.props(styles.panelAside)}>
+                Uptime // {days} days
+              </span>
             </div>
             <ul {...stylex.props(styles.list)}>
               {monitors.map((monitor) => (
@@ -395,6 +420,9 @@ export const StatusPage = () => {
           </section>
         )}
         {monitors.length === 0 ? null : <UptimeLegend />}
+        {monitors.length === 0 || anyDown ? null : (
+          <OpenIncidents monitors={monitors} />
+        )}
       </main>
       <div {...stylex.props(styles.spacer)} />
       <footer {...stylex.props(styles.column, styles.footer)}>

@@ -66,17 +66,23 @@ describe(StatusBanner, () => {
     expect(screen.getByText("Updated just now")).toBeDefined();
   });
 
-  it("gives each overall status its own look", () => {
-    const classes = (
+  it("gives each overall status its own pill", () => {
+    const pills = (
       ["operational", "partial_outage", "major_outage"] as const
     ).map((overall) => {
       const { unmount } = render(
         <StatusBanner monitors={[]} overall={overall} />
       );
-      const { className } = screen.getByRole("region");
+      const pill = screen.getByRole("region").querySelector("[data-tone]");
+      const look = [pill?.className, pill?.textContent];
       unmount();
-      return className;
+      return look;
     });
-    expect(new Set(classes).size).toBe(3);
+    expect(new Set(pills.map(([className]) => className)).size).toBe(3);
+    expect(pills.map(([, text]) => text)).toStrictEqual([
+      "Operational",
+      "Degraded",
+      "Outage",
+    ]);
   });
 });

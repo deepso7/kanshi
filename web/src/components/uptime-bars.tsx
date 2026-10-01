@@ -95,10 +95,11 @@ const styles = stylex.create({
 const levels = stylex.create({
   degraded: { backgroundColor: colors.warning },
   down: { backgroundColor: colors.danger },
-  none: { backgroundColor: colors.muted },
+  // The border gray: `muted` is the card's own color in the dark theme.
+  none: { backgroundColor: colors.border },
   // The muted pattern: a hatch over the empty color.
   partial: {
-    backgroundColor: colors.muted,
+    backgroundColor: colors.border,
     backgroundImage: `repeating-linear-gradient(135deg, ${colors.unknown} 0 1px, transparent 1px 4px)`,
   },
   up: { backgroundColor: colors.success },

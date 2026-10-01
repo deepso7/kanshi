@@ -13,10 +13,10 @@ import {
   lineHeights,
   media,
   radius,
+  shadows,
   space,
   tracking,
 } from "../theme/tokens.stylex.ts";
-import { shared } from "./ui/shared.ts";
 
 export type BannerTone = "success" | "warning" | "danger";
 
@@ -66,40 +66,54 @@ export const statusBannerView = (
 };
 
 const styles = stylex.create({
-  // The status square, framed: a filled core in the tone's color.
-  mark: {
-    "::after": {
-      backgroundColor: "currentColor",
-      content: '""',
-      flexGrow: 1,
-    },
-    borderColor: "currentColor",
-    borderStyle: "solid",
-    borderWidth: "2px",
-    display: "inline-flex",
-    flexShrink: 0,
-    height: { default: "1.5rem", [media.md]: "1.875rem" },
-    padding: "3px",
-    width: { default: "1.5rem", [media.md]: "1.875rem" },
-  },
-  meta: {
+  eyebrow: {
     color: colors.mutedForeground,
     fontFamily: fonts.mono,
     fontSize: fontSizes.xs,
-    letterSpacing: tracking.wide,
-    margin: 0,
+    letterSpacing: tracking.wider,
     textTransform: "uppercase",
   },
-  root: {
+  meta: {
+    color: colors.mutedForeground,
+    fontSize: fontSizes.sm,
+    margin: 0,
+  },
+  // The one colored element: the tone as a tag under the title.
+  pill: {
     alignItems: "center",
-    borderLeftWidth: "4px",
     borderRadius: radius.md,
     borderStyle: "solid",
     borderWidth: "1px",
+    display: "inline-flex",
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.medium,
+    gap: space.sm,
+    paddingBlock: space.xs,
+    paddingInline: space.md,
+  },
+  // A small square in the tone's color, like the status dots.
+  pillDot: {
+    backgroundColor: "currentColor",
+    flexShrink: 0,
+    height: "0.5rem",
+    width: "0.5rem",
+  },
+  // Neutral and centered: the title carries the message, not a fill.
+  root: {
+    alignItems: "center",
+    backgroundColor: colors.card,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderStyle: "solid",
+    borderWidth: "1px",
+    boxShadow: shadows.sm,
+    color: colors.cardForeground,
     display: "flex",
-    gap: { default: space.lg, [media.md]: space.xl },
-    paddingBlock: { default: space.lg, [media.md]: space.xl },
-    paddingInline: { default: space.lg, [media.md]: space.xl },
+    flexDirection: "column",
+    gap: space.lg,
+    paddingBlock: { default: space.xxl, [media.md]: space.xxxl },
+    paddingInline: space.lg,
+    textAlign: "center",
   },
   summary: {
     color: colors.foreground,
@@ -111,15 +125,14 @@ const styles = stylex.create({
     display: "flex",
     flexDirection: "column",
     gap: space.xs,
-    minWidth: 0,
   },
   title: {
-    fontSize: { default: fontSizes.xl, [media.md]: fontSizes.xxl },
-    fontWeight: fontWeights.semibold,
-    letterSpacing: tracking.wide,
+    fontSize: { default: fontSizes.xxl, [media.md]: fontSizes.xxxl },
+    fontWeight: fontWeights.medium,
+    letterSpacing: "-0.01em",
     lineHeight: lineHeights.tight,
     margin: 0,
-    textTransform: "uppercase",
+    textWrap: "balance",
   },
 });
 
@@ -141,10 +154,17 @@ const tones = stylex.create({
   },
 });
 
+/** The pill's word for each tone. */
+const toneLabels = {
+  danger: "Outage",
+  success: "Operational",
+  warning: "Degraded",
+} satisfies Record<BannerTone, string>;
+
 export interface StatusBannerProps {
   readonly overall: OverallStatus;
   readonly monitors: readonly { readonly status: PublicMonitorStatus }[];
-  /** A small mono line under the summary ("Updated 12s ago"). */
+  /** A small line under the summary ("Updated 12s ago"). */
   readonly meta?: ReactNode;
   readonly style?: stylex.StyleXStyles;
 }
@@ -161,12 +181,18 @@ export const StatusBanner = ({
     <section
       aria-label="Overall status"
       data-overall={overall}
-      {...stylex.props(styles.root, tones[view.tone], style)}
+      {...stylex.props(styles.root, style)}
     >
-      <span aria-hidden {...stylex.props(styles.mark)} />
+      <span {...stylex.props(styles.eyebrow)}>Current status</span>
+      <h2 {...stylex.props(styles.title)}>{view.title}</h2>
+      <span
+        data-tone={view.tone}
+        {...stylex.props(styles.pill, tones[view.tone])}
+      >
+        <span aria-hidden {...stylex.props(styles.pillDot)} />
+        {toneLabels[view.tone]}
+      </span>
       <div {...stylex.props(styles.text)}>
-        <span {...stylex.props(shared.label)}>System status</span>
-        <h2 {...stylex.props(styles.title)}>{view.title}</h2>
         <p {...stylex.props(styles.summary)}>{view.summary}</p>
         {meta === undefined ? null : (
           <p {...stylex.props(styles.meta)}>{meta}</p>

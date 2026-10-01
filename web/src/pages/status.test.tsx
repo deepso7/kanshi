@@ -204,7 +204,7 @@ describe(StatusPage, () => {
     expect(document.body.textContent).not.toMatch(/https?:\/\//u);
   });
 
-  it("drops the incidents panel when nothing is down", () => {
+  it("says so when nothing is down", () => {
     renderPage({
       ...status,
       monitors: status.monitors.filter((monitor) => monitor.status !== "down"),
@@ -213,7 +213,8 @@ describe(StatusPage, () => {
     expect(
       screen.getByRole("heading", { name: "All systems operational" })
     ).toBeDefined();
-    expect(screen.queryByRole("region", { name: "Open incidents" })).toBeNull();
+    const incidents = screen.getByRole("region", { name: "Open incidents" });
+    expect(within(incidents).getByText("No open incidents.")).toBeDefined();
   });
 
   it("explains an empty page", () => {
