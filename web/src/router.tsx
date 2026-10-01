@@ -50,6 +50,7 @@ import {
   RoutePending,
   StandalonePending,
   StandaloneRouteError,
+  StatusPending,
 } from "./pages/layout.tsx";
 import { NotFoundPage } from "./pages/not-found.tsx";
 
@@ -158,7 +159,7 @@ const statusRoute = createRoute({
   loader: ({ context: { queryClient: client } }) =>
     client.ensureQueryData(publicStatusQuery),
   path: "/status",
-  pendingComponent: StandalonePending,
+  pendingComponent: StatusPending,
 });
 
 // -- signed in ---------------------------------------------------------------

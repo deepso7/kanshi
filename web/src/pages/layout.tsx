@@ -18,6 +18,7 @@ import { CenteredScreen } from "../components/centered-screen.tsx";
 import { EmptyState } from "../components/empty-state.tsx";
 import { ErrorPanel } from "../components/error-panel.tsx";
 import { PageSkeleton } from "../components/page-skeleton.tsx";
+import { StatusSkeleton } from "../components/status-frame.tsx";
 import { ThemeToggle } from "../components/theme-toggle.tsx";
 import { Badge } from "../components/ui/badge.tsx";
 import { Button, buttonStyles } from "../components/ui/button.tsx";
@@ -182,6 +183,9 @@ export const NotFoundPanel = () => (
     title="Not found"
   />
 );
+
+/** The public status page loading, in its own frame. */
+export const StatusPending = () => <StatusSkeleton />;
 
 /** A route outside the shell loading (the session check). */
 export const StandalonePending = () => (

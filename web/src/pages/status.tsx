@@ -11,8 +11,8 @@ import {
   StatusBanner,
   statusBannerView,
 } from "../components/status-banner.tsx";
+import { StatusFrame, panelStyles } from "../components/status-frame.tsx";
 import { StatusBadge } from "../components/status.tsx";
-import { ThemeToggle } from "../components/theme-toggle.tsx";
 import { shared } from "../components/ui/shared.ts";
 import { UptimeBars, UptimeLegend } from "../components/uptime-bars.tsx";
 import {
@@ -28,10 +28,7 @@ import {
   fonts,
   lineHeights,
   media,
-  radius,
-  shadows,
   space,
-  tracking,
 } from "../theme/tokens.stylex.ts";
 
 /** Days of history per monitor (the API's default). */
@@ -64,57 +61,7 @@ const styles = stylex.create({
     fontSize: fontSizes.sm,
     fontVariantNumeric: "tabular-nums",
   },
-  bar: {
-    alignItems: "center",
-    display: "flex",
-    flexDirection: "row",
-    gap: space.md,
-    justifyContent: "space-between",
-    minHeight: "3.75rem",
-    paddingBlock: space.sm,
-  },
-  brand: {
-    alignItems: "center",
-    color: colors.foreground,
-    display: "flex",
-    fontSize: fontSizes.lg,
-    fontWeight: fontWeights.semibold,
-    gap: space.sm,
-  },
 
-  brandSection: {
-    borderLeftColor: colors.border,
-    borderLeftStyle: "solid",
-    borderLeftWidth: "1px",
-    color: colors.mutedForeground,
-    fontWeight: fontWeights.medium,
-    marginLeft: space.xs,
-    paddingLeft: space.md,
-  },
-  column: {
-    display: "flex",
-    flexDirection: "column",
-    marginInline: "auto",
-    maxWidth: "52rem",
-    paddingInline: { default: space.lg, [media.md]: space.xl },
-    width: "100%",
-  },
-  footer: {
-    color: colors.mutedForeground,
-    fontFamily: fonts.mono,
-    fontSize: fontSizes.xs,
-    letterSpacing: tracking.wide,
-    paddingBlock: space.xl,
-    textAlign: "center",
-    textTransform: "uppercase",
-  },
-  // Full width, like the app's top bar; its row lines up with the column.
-  header: {
-    backgroundColor: colors.background,
-    borderBottomColor: colors.border,
-    borderBottomStyle: "solid",
-    borderBottomWidth: "1px",
-  },
   incident: {
     alignItems: { default: "flex-start", [media.md]: "center" },
     borderTopColor: colors.border,
@@ -143,30 +90,6 @@ const styles = stylex.create({
     margin: 0,
     padding: 0,
   },
-  main: {
-    display: "flex",
-    flexDirection: "column",
-    gap: space.xl,
-    paddingBlock: space.xl,
-  },
-  // The app shell's mark: a frame with a filled core.
-  mark: {
-    "::after": {
-      backgroundColor: "currentColor",
-      borderRadius: "1px",
-      content: '""',
-      flexGrow: 1,
-    },
-    borderColor: "currentColor",
-    borderRadius: radius.sm,
-    borderStyle: "solid",
-    borderWidth: "1.5px",
-    color: colors.primary,
-    display: "inline-flex",
-    height: "1rem",
-    padding: "3px",
-    width: "1rem",
-  },
   metaError: {
     color: colors.dangerForeground,
   },
@@ -194,67 +117,14 @@ const styles = stylex.create({
     minWidth: 0,
     overflowWrap: "anywhere",
   },
-  // A panel on the grid: the card surface with a raised title bar.
-  panel: {
-    backgroundColor: colors.card,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    borderStyle: "solid",
-    borderWidth: "1px",
-    boxShadow: shadows.sm,
-    color: colors.cardForeground,
-    overflow: "hidden",
-  },
-  // Mono and muted, on the bar's right: a period or a count.
-  panelAside: {
-    color: colors.mutedForeground,
-    fontFamily: fonts.mono,
-    fontSize: fontSizes.xs,
-    letterSpacing: tracking.wide,
-    textTransform: "uppercase",
-  },
   panelAsideDanger: {
     color: colors.dangerForeground,
-  },
-  panelBar: {
-    alignItems: "center",
-    backgroundColor: colors.secondary,
-    borderBottomColor: colors.border,
-    borderBottomStyle: "solid",
-    borderBottomWidth: "1px",
-    color: colors.foreground,
-    display: "flex",
-    gap: space.md,
-    justifyContent: "space-between",
-    margin: 0,
-    paddingBlock: space.md,
-    paddingInline: { default: space.lg, [media.md]: space.xl },
   },
   panelEmpty: {
     color: colors.mutedForeground,
     margin: 0,
     paddingBlock: space.lg,
     paddingInline: { default: space.lg, [media.md]: space.xl },
-  },
-  panelTitle: {
-    fontSize: fontSizes.lg,
-    fontWeight: fontWeights.medium,
-    margin: 0,
-  },
-  // The canvas with a faint survey grid, like the other public screens.
-  root: {
-    backgroundColor: colors.background,
-    backgroundImage: `linear-gradient(to right, color-mix(in srgb, ${colors.border} 35%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, ${colors.border} 35%, transparent) 1px, transparent 1px)`,
-    backgroundPosition: "center top",
-    backgroundSize: "2rem 2rem",
-    color: colors.foreground,
-    display: "flex",
-    flexDirection: "column",
-    fontSize: fontSizes.md,
-    minHeight: "100dvh",
-  },
-  spacer: {
-    flexGrow: 1,
   },
 });
 
@@ -303,15 +173,18 @@ const OpenIncidents = ({
   const now = useNow();
   const open = monitors.filter(isOpenIncident);
   return (
-    <section aria-labelledby="incidents-title" {...stylex.props(styles.panel)}>
-      <div {...stylex.props(styles.panelBar)}>
-        <h2 id="incidents-title" {...stylex.props(styles.panelTitle)}>
+    <section
+      aria-labelledby="incidents-title"
+      {...stylex.props(panelStyles.panel)}
+    >
+      <div {...stylex.props(panelStyles.bar)}>
+        <h2 id="incidents-title" {...stylex.props(panelStyles.title)}>
           Open incidents
         </h2>
         {open.length === 0 ? null : (
           <span
             aria-hidden
-            {...stylex.props(styles.panelAside, styles.panelAsideDanger)}
+            {...stylex.props(panelStyles.aside, styles.panelAsideDanger)}
           >
             {open.length} open
           </span>
@@ -363,71 +236,54 @@ export const StatusPage = () => {
   }, [title]);
 
   return (
-    <div {...stylex.props(styles.root)}>
-      <header {...stylex.props(styles.header)}>
-        <div {...stylex.props(styles.column, styles.bar)}>
-          <span {...stylex.props(styles.brand)}>
-            <span aria-hidden {...stylex.props(styles.mark)} />
-            Kanshi
-            <span {...stylex.props(styles.brandSection)}>Status</span>
-          </span>
-          <ThemeToggle />
-        </div>
-      </header>
-      <main {...stylex.props(styles.column, styles.main)}>
-        <h1 {...stylex.props(shared.srOnly)}>Service status</h1>
-        <StatusBanner
-          meta={
-            status.isRefetchError ? (
-              <span {...stylex.props(styles.metaError)}>
-                Could not refresh · last updated{" "}
-                <RelativeTime at={generatedAt} />
-              </span>
-            ) : (
-              <>
-                Updated <RelativeTime at={generatedAt} /> · {refreshEvery}
-              </>
-            )
-          }
-          monitors={monitors}
-          overall={overall}
+    <StatusFrame>
+      <h1 {...stylex.props(shared.srOnly)}>Service status</h1>
+      <StatusBanner
+        meta={
+          status.isRefetchError ? (
+            <span {...stylex.props(styles.metaError)}>
+              Could not refresh · last updated <RelativeTime at={generatedAt} />
+            </span>
+          ) : (
+            <>
+              Updated <RelativeTime at={generatedAt} /> · {refreshEvery}
+            </>
+          )
+        }
+        monitors={monitors}
+        overall={overall}
+      />
+      {/* First while something is down; a quiet footnote otherwise. */}
+      {anyDown ? <OpenIncidents monitors={monitors} /> : null}
+      {monitors.length === 0 ? (
+        <EmptyState
+          description="Monitors appear here once they are made public."
+          title="Nothing to report yet"
         />
-        {/* First while something is down; a quiet footnote otherwise. */}
-        {anyDown ? <OpenIncidents monitors={monitors} /> : null}
-        {monitors.length === 0 ? (
-          <EmptyState
-            description="Monitors appear here once they are made public."
-            title="Nothing to report yet"
-          />
-        ) : (
-          <section
-            aria-labelledby="monitors-title"
-            {...stylex.props(styles.panel)}
-          >
-            <div {...stylex.props(styles.panelBar)}>
-              <h2 id="monitors-title" {...stylex.props(styles.panelTitle)}>
-                Monitors
-              </h2>
-              <span {...stylex.props(styles.panelAside)}>
-                Uptime // {days} days
-              </span>
-            </div>
-            <ul {...stylex.props(styles.list)}>
-              {monitors.map((monitor) => (
-                <MonitorRow days={days} key={monitor.ref} monitor={monitor} />
-              ))}
-            </ul>
-          </section>
-        )}
-        {monitors.length === 0 ? null : <UptimeLegend />}
-        {monitors.length === 0 || anyDown ? null : (
-          <OpenIncidents monitors={monitors} />
-        )}
-      </main>
-      <div {...stylex.props(styles.spacer)} />
-      <footer {...stylex.props(styles.column, styles.footer)}>
-        Kanshi // uptime monitor
-      </footer>
-    </div>
+      ) : (
+        <section
+          aria-labelledby="monitors-title"
+          {...stylex.props(panelStyles.panel)}
+        >
+          <div {...stylex.props(panelStyles.bar)}>
+            <h2 id="monitors-title" {...stylex.props(panelStyles.title)}>
+              Monitors
+            </h2>
+            <span {...stylex.props(panelStyles.aside)}>
+              Uptime // {days} days
+            </span>
+          </div>
+          <ul {...stylex.props(styles.list)}>
+            {monitors.map((monitor) => (
+              <MonitorRow days={days} key={monitor.ref} monitor={monitor} />
+            ))}
+          </ul>
+        </section>
+      )}
+      {monitors.length === 0 ? null : <UptimeLegend />}
+      {monitors.length === 0 || anyDown ? null : (
+        <OpenIncidents monitors={monitors} />
+      )}
+    </StatusFrame>
   );
 };
