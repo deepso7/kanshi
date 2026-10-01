@@ -14,7 +14,7 @@ import {
 } from "../../theme/tokens.stylex.ts";
 
 export const shared = stylex.create({
-  /** A thin ink outline, offset like the game's selection frame. */
+  /** A thin accent outline, offset from the control. */
   focusRing: {
     outlineColor: colors.ring,
     outlineOffset: "2px",

@@ -64,7 +64,7 @@ const styles = stylex.create({
     rowGap: space.xs,
   },
   title: {
-    // The small square marker of the game's panel titles.
+    // The small square marker of panel titles.
     "::before": {
       backgroundColor: "currentColor",
       content: '""',

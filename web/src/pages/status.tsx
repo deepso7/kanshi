@@ -67,20 +67,21 @@ const styles = stylex.create({
   bar: {
     alignItems: "center",
     display: "flex",
+    flexDirection: "row",
     gap: space.md,
     justifyContent: "space-between",
-    paddingBlock: space.lg,
+    minHeight: "3.75rem",
+    paddingBlock: space.sm,
   },
   brand: {
     alignItems: "center",
     color: colors.foreground,
     display: "flex",
-    fontSize: fontSizes.sm,
+    fontSize: fontSizes.lg,
     fontWeight: fontWeights.semibold,
     gap: space.sm,
-    letterSpacing: tracking.wider,
-    textTransform: "uppercase",
   },
+
   brandSection: {
     borderLeftColor: colors.border,
     borderLeftStyle: "solid",
@@ -106,6 +107,13 @@ const styles = stylex.create({
     paddingBlock: space.xl,
     textAlign: "center",
     textTransform: "uppercase",
+  },
+  // Full width, like the app's top bar; its row lines up with the column.
+  header: {
+    backgroundColor: colors.background,
+    borderBottomColor: colors.border,
+    borderBottomStyle: "solid",
+    borderBottomWidth: "1px",
   },
   incident: {
     alignItems: { default: "flex-start", [media.md]: "center" },
@@ -139,18 +147,21 @@ const styles = stylex.create({
     display: "flex",
     flexDirection: "column",
     gap: space.xl,
-    paddingBlock: { default: space.md, [media.md]: space.xl },
+    paddingBlock: space.xl,
   },
   // The app shell's mark: a frame with a filled core.
   mark: {
     "::after": {
       backgroundColor: "currentColor",
+      borderRadius: "1px",
       content: '""',
       flexGrow: 1,
     },
     borderColor: "currentColor",
+    borderRadius: radius.sm,
     borderStyle: "solid",
-    borderWidth: "1px",
+    borderWidth: "1.5px",
+    color: colors.primary,
     display: "inline-flex",
     height: "1rem",
     padding: "3px",
@@ -183,7 +194,7 @@ const styles = stylex.create({
     minWidth: 0,
     overflowWrap: "anywhere",
   },
-  // A panel on the grid: the card surface with the ink title bar.
+  // A panel on the grid: the card surface with a raised title bar.
   panel: {
     backgroundColor: colors.card,
     borderColor: colors.border,
@@ -196,8 +207,11 @@ const styles = stylex.create({
   },
   panelBar: {
     alignItems: "center",
-    backgroundColor: colors.primary,
-    color: colors.primaryForeground,
+    backgroundColor: colors.secondary,
+    borderBottomColor: colors.border,
+    borderBottomStyle: "solid",
+    borderBottomWidth: "1px",
+    color: colors.foreground,
     display: "flex",
     fontFamily: fonts.mono,
     fontSize: fontSizes.xs,
@@ -209,15 +223,15 @@ const styles = stylex.create({
     textTransform: "uppercase",
   },
   panelBarDanger: {
-    backgroundColor: colors.destructive,
-    color: colors.destructiveForeground,
+    backgroundColor: colors.dangerSurface,
+    color: colors.dangerForeground,
   },
   panelTitle: {
     fontSize: "inherit",
     fontWeight: fontWeights.medium,
     margin: 0,
   },
-  // Parchment with a faint survey grid, like the other public screens.
+  // The canvas with a faint survey grid, like the other public screens.
   root: {
     backgroundColor: colors.background,
     backgroundImage: `linear-gradient(to right, color-mix(in srgb, ${colors.border} 35%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, ${colors.border} 35%, transparent) 1px, transparent 1px)`,
@@ -328,8 +342,8 @@ export const StatusPage = () => {
 
   return (
     <div {...stylex.props(styles.root)}>
-      <header {...stylex.props(styles.column)}>
-        <div {...stylex.props(styles.bar)}>
+      <header {...stylex.props(styles.header)}>
+        <div {...stylex.props(styles.column, styles.bar)}>
           <span {...stylex.props(styles.brand)}>
             <span aria-hidden {...stylex.props(styles.mark)} />
             Kanshi

@@ -85,7 +85,7 @@ export const AppLayout = () => {
           </Badge>
         ) : null
       }
-      footer={
+      actions={
         <>
           <ThemeToggle />
           <Button

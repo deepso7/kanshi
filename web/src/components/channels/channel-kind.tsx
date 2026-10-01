@@ -80,7 +80,7 @@ const styles = stylex.create({
     position: "relative",
     width: "2.25rem",
   },
-  // A notch in the corner, like the game's item frames.
+  // A notch in the corner, like an item frame.
   notch: {
     backgroundColor: colors.foreground,
     bottom: "-1px",

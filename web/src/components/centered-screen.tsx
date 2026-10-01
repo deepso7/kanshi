@@ -61,7 +61,7 @@ const styles = stylex.create({
     padding: "3px",
     width: "1rem",
   },
-  // Parchment with a faint survey grid, like the game's menus.
+  // The canvas with a faint survey grid.
   root: {
     backgroundColor: colors.background,
     backgroundImage: `linear-gradient(to right, color-mix(in srgb, ${colors.border} 35%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, ${colors.border} 35%, transparent) 1px, transparent 1px)`,

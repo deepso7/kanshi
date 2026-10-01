@@ -17,9 +17,9 @@ type Styled<T> = Omit<T, "className" | "style"> & {
 
 const styles = stylex.create({
   popup: {
-    backgroundColor: colors.primary,
+    backgroundColor: colors.foreground,
     borderRadius: radius.sm,
-    color: colors.primaryForeground,
+    color: colors.background,
     fontSize: fontSizes.xs,
     lineHeight: 1.4,
     maxWidth: "18rem",
@@ -54,7 +54,7 @@ export type TooltipContentProps = Styled<
     "align" | "side" | "sideOffset"
   >;
 
-/** The inverted (ink) label, in a portal. */
+/** The inverted label, in a portal. */
 export const TooltipContent = ({
   align,
   side = "top",

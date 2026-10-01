@@ -211,8 +211,8 @@ const swatchColors = stylex.create({
   popover: { backgroundColor: colors.popover },
   primary: { backgroundColor: colors.primary },
   secondary: { backgroundColor: colors.secondary },
-  sidebar: { backgroundColor: colors.sidebar },
   success: { backgroundColor: colors.success },
+  toolbar: { backgroundColor: colors.toolbar },
   unknown: { backgroundColor: colors.unknown },
   warning: { backgroundColor: colors.warning },
 });
@@ -227,7 +227,7 @@ const swatchNames = [
   "accent",
   "destructive",
   "border",
-  "sidebar",
+  "toolbar",
   "success",
   "warning",
   "danger",
@@ -649,7 +649,7 @@ const Layout = () => (
     />
     <div {...stylex.props(styles.shellFrame)}>
       <AppShell
-        footer={
+        actions={
           <>
             <ThemeToggle />
             <Button size="sm" variant="ghost">

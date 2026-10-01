@@ -60,8 +60,11 @@ const styles = stylex.create({
   },
   bar: {
     alignItems: "center",
-    backgroundColor: colors.primary,
-    color: colors.primaryForeground,
+    backgroundColor: colors.secondary,
+    borderBottomColor: colors.border,
+    borderBottomStyle: "solid",
+    borderBottomWidth: "1px",
+    color: colors.foreground,
     display: "flex",
     fontFamily: fonts.mono,
     fontSize: fontSizes.xs,

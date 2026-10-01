@@ -5,108 +5,105 @@
 // (the compiler evaluates them statically). Import the groups anywhere and
 // use them as values in `stylex.create`.
 //
-// The defaults are the light theme ("NieR: Automata", parchment and ink,
-// see `nier-automata.json` next to this file). The dark variant is a
-// `createTheme` in `themes.ts`, applied to `<html>` by the theme provider.
+// The defaults are the dark theme ("Vesper": near-black, white text,
+// orange accent, see `vesper.json` next to this file). The light variant is
+// a `createTheme` in `themes.ts`, applied to `<html>` by the theme provider.
 import * as stylex from "@stylexjs/stylex";
 
 const REDUCED_MOTION = "@media (prefers-reduced-motion: reduce)";
 
 /**
- * Colors, shadcn's semantic names. The comment above a value names the
- * reference theme's key it comes from.
+ * Colors, shadcn's semantic names, in oklch. The comment above a value
+ * names the reference theme's key it comes from (the reference is hex).
  *
  * Status colors come in threes: the solid color (dots, bars), a
  * `...Surface` (badges, banners) and a `...Foreground` (text on that
- * surface). `success` (up) is not in the reference: a muted olive (hue
- * ~85°, the parchment's own saturation) that reads as "fine" next to the
- * mustard warning and the rust error without introducing a bright green.
- * `up`/`down`/`paused` map to `success`/`danger`/`unknown`.
+ * surface). `success` (up) is not in the reference: Vesper's peppermint
+ * (`#99ffe4`, its editor theme's string color), with a surface made like
+ * the reference's `errorSurface`. `up`/`down`/`paused` map to
+ * `success`/`danger`/`unknown`.
  *
- * Charts: ink, then the status hues, then a neutral.
+ * Charts: the accent, then the status hues, then a neutral.
  */
 export const colors = stylex.defineVars({
   // toolbarControlHover
-  accent: "#b8b49c",
-  accentForeground: "#211f1b",
+  accent: "oklch(0.277 0 0)",
+  accentForeground: "oklch(1 0 0)",
   // canvas
-  background: "#ccc8b1",
-  // border
-  border: "#a29e89",
+  background: "oklch(0.173 0 0)",
+  // sidebarRowActive: the reference's `border` (#1c1c1c) vanishes on cards.
+  border: "oklch(0.256 0 0)",
   // surfaceRaised
-  card: "#d1cdb7",
-  cardForeground: "#211f1b",
-  chart1: "#4d4b3f",
-  chart2: "#56683d",
-  chart3: "#95402f",
-  chart4: "#8c7a2e",
-  chart5: "#7a7560",
+  card: "oklch(0.2 0 0)",
+  cardForeground: "oklch(1 0 0)",
+  chart1: "oklch(0.869 0.088 60.7)",
+  chart2: "oklch(0.93 0.103 175.1)",
+  chart3: "oklch(0.744 0.155 21.5)",
+  chart4: "oklch(0.706 0 0)",
+  chart5: "oklch(0.431 0 0)",
   // error (down)
-  danger: "#a94a38",
+  danger: "oklch(0.744 0.155 21.5)",
   // errorForeground
-  dangerForeground: "#7d3427",
+  dangerForeground: "oklch(0.744 0.155 21.5)",
   // errorSurface
-  dangerSurface: "#cfb7a2",
-  // Destructive actions: `error`, darkened for 4.8:1 with its text.
-  destructive: "#95402f",
-  destructiveForeground: "#dcd8c2",
+  dangerSurface: "oklch(0.225 0.035 20.1)",
+  destructive: "oklch(0.744 0.155 21.5)",
+  destructiveForeground: "oklch(0 0 0)",
   // text
-  foreground: "#211f1b",
-  // input
-  input: "#928e7a",
+  foreground: "oklch(1 0 0)",
+  // Control borders: iconMuted, lifted to 3:1 on the canvas.
+  input: "oklch(0.528 0 0)",
   // muted
-  muted: "#c1bda5",
+  muted: "oklch(0.2 0 0)",
   // mutedForeground
-  mutedForeground: "#4d4b3f",
-  overlay: "rgb(33 31 27 / 0.35)",
-  // placeholder
-  placeholder: "#4d4b40",
+  mutedForeground: "oklch(0.706 0 0)",
+  overlay: "oklch(0 0 0 / 0.6)",
+  // The reference's `placeholder` (#505050) is 2.4:1; Vesper's comment gray.
+  placeholder: "oklch(0.637 0 0)",
   // surfaceOverlay
-  popover: "#d7d3bf",
-  popoverForeground: "#211f1b",
+  popover: "oklch(0.226 0 0)",
+  popoverForeground: "oklch(1 0 0)",
   // accent
-  primary: "#211f1b",
+  primary: "oklch(0.869 0.088 60.7)",
   // accentForeground
-  primaryForeground: "#dcd8c2",
+  primaryForeground: "oklch(0 0 0)",
   // messageActionHover
-  primaryHover: "#5a5647",
+  primaryHover: "oklch(0.887 0.075 60.7)",
   // focus
-  ring: "#211f1b",
-  // secondary
-  secondary: "#c1bda5",
-  secondaryForeground: "#211f1b",
+  ring: "oklch(0.869 0.088 60.7)",
+  // toolbarControl
+  secondary: "oklch(0.226 0 0)",
+  secondaryForeground: "oklch(1 0 0)",
   // toolbarControlHover
-  secondaryHover: "#b8b49c",
-  // sidebar
-  sidebar: "#bfbba4",
-  // sidebarRowHover
-  sidebarAccent: "#b8b49d",
-  sidebarAccentForeground: "#211f1b",
-  // sidebarBorder
-  sidebarBorder: "#95917d",
-  // sidebarForeground
-  sidebarForeground: "#211f1b",
+  secondaryHover: "oklch(0.277 0 0)",
+  // derived peppermint (up)
+  success: "oklch(0.93 0.103 175.1)",
+  successForeground: "oklch(0.93 0.103 175.1)",
+  successSurface: "oklch(0.265 0.030 173.7)",
+  // toolbar
+  toolbar: "oklch(0.173 0 0)",
+  // toolbarControlHover
+  toolbarAccent: "oklch(0.277 0 0)",
+  // sidebarRowActive
+  toolbarActive: "oklch(0.256 0 0)",
+  // toolbarBorder, as `border`
+  toolbarBorder: "oklch(0.256 0 0)",
+  // toolbarForeground
+  toolbarForeground: "oklch(1 0 0)",
   // sidebarMutedForeground
-  sidebarMutedForeground: "#4d4b3f",
-  sidebarPrimary: "#211f1b",
-  sidebarPrimaryForeground: "#dcd8c2",
-  sidebarRing: "#211f1b",
-  // derived olive (up)
-  success: "#56683d",
-  successForeground: "#3d4a28",
-  successSurface: "#bcc3a0",
+  toolbarMutedForeground: "oklch(0.706 0 0)",
   // unknown and paused
-  unknown: "#6f6b59",
+  unknown: "oklch(0.58 0 0)",
   // mutedForeground
-  unknownForeground: "#4d4b3f",
-  // muted
-  unknownSurface: "#c1bda5",
-  // warning, deepened for bars on parchment
-  warning: "#8c7a2e",
+  unknownForeground: "oklch(0.706 0 0)",
+  // surfaceOverlay
+  unknownSurface: "oklch(0.226 0 0)",
+  // warning
+  warning: "oklch(0.869 0.088 60.7)",
   // warningForeground
-  warningForeground: "#5c5022",
+  warningForeground: "oklch(0.869 0.088 60.7)",
   // warningSurface
-  warningSurface: "#ccc49e",
+  warningSurface: "oklch(0.252 0.025 69)",
 });
 
 export const fonts = stylex.defineVars({
@@ -142,7 +139,7 @@ export const lineHeights = stylex.defineVars({
 
 export const tracking = stylex.defineVars({
   normal: "0",
-  /** Uppercase labels and headings (the YoRHa look). */
+  /** Uppercase labels and headings. */
   wide: "0.08em",
   wider: "0.14em",
 });
@@ -158,19 +155,19 @@ export const space = stylex.defineVars({
   xxxl: "3rem",
 });
 
-/** Square-ish, like the game's panels. */
+/** Small radii: crisp panels, softened corners. */
 export const radius = stylex.defineVars({
   full: "9999px",
-  lg: "4px",
-  md: "2px",
+  lg: "8px",
+  md: "6px",
   none: "0",
-  sm: "1px",
+  sm: "4px",
 });
 
 export const shadows = stylex.defineVars({
-  lg: "0 8px 24px rgb(33 31 27 / 0.18), 0 1px 3px rgb(33 31 27 / 0.12)",
-  md: "0 2px 6px rgb(33 31 27 / 0.12)",
-  sm: "0 1px 0 rgb(33 31 27 / 0.06)",
+  lg: "0 10px 30px oklch(0 0 0 / 0.5), 0 1px 3px oklch(0 0 0 / 0.4)",
+  md: "0 2px 8px oklch(0 0 0 / 0.35)",
+  sm: "0 1px 0 oklch(0 0 0 / 0.2)",
 });
 
 /** Durations drop to zero when the user asks for reduced motion. */

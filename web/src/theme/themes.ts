@@ -6,69 +6,70 @@ import * as stylex from "@stylexjs/stylex";
 
 import { colors, shadows } from "./tokens.stylex.ts";
 
-/** The charcoal variant of the reference theme (`variants.dark`). */
-const darkColors = stylex.createTheme(colors, {
-  accent: "#45433a",
-  accentForeground: "#d1cdb7",
-  background: "#2f2d26",
-  border: "#4f4d45",
-  // surface: a step above the canvas
-  card: "#36342c",
-  cardForeground: "#d1cdb7",
-  chart1: "#d1cdb7",
-  chart2: "#95ab6e",
-  chart3: "#c96b57",
-  chart4: "#c2b169",
-  chart5: "#9a988a",
-  danger: "#c96b57",
-  dangerForeground: "#d98a77",
-  dangerSurface: "#45302a",
-  destructive: "#d98a77",
-  destructiveForeground: "#2f2d26",
-  foreground: "#d1cdb7",
-  input: "#5a584e",
-  muted: "#3d3b33",
-  mutedForeground: "#a8a593",
-  overlay: "rgb(0 0 0 / 0.5)",
-  placeholder: "#9a988a",
-  popover: "#403e35",
-  popoverForeground: "#d1cdb7",
-  primary: "#d1cdb7",
-  primaryForeground: "#2f2d26",
-  primaryHover: "#c4bfa6",
-  ring: "#d1cdb7",
-  secondary: "#3d3b33",
-  secondaryForeground: "#d1cdb7",
-  secondaryHover: "#45433a",
-  sidebar: "#282620",
-  sidebarAccent: "#33312a",
-  sidebarAccentForeground: "#d1cdb7",
-  sidebarBorder: "#49473f",
-  sidebarForeground: "#d1cdb7",
-  sidebarMutedForeground: "#9d9986",
-  sidebarPrimary: "#d1cdb7",
-  sidebarPrimaryForeground: "#2f2d26",
-  sidebarRing: "#d1cdb7",
-  success: "#95ab6e",
-  successForeground: "#b4c48c",
-  successSurface: "#363b29",
-  unknown: "#9a988a",
-  unknownForeground: "#a8a593",
-  unknownSurface: "#3d3b33",
-  warning: "#c2b169",
-  warningForeground: "#d3c47e",
-  warningSurface: "#403a24",
+/**
+ * A light counterpart to the reference (it has none): the same neutral
+ * grays inverted, the orange accent kept for fills, and the status hues
+ * deepened to read on white.
+ */
+const lightColors = stylex.createTheme(colors, {
+  accent: "oklch(0.946 0 0)",
+  accentForeground: "oklch(0.173 0 0)",
+  background: "oklch(0.985 0 0)",
+  border: "oklch(0.919 0 0)",
+  card: "oklch(1 0 0)",
+  cardForeground: "oklch(0.173 0 0)",
+  chart1: "oklch(0.6 0.148 52.8)",
+  chart2: "oklch(0.564 0.111 168.7)",
+  chart3: "oklch(0.575 0.186 25.2)",
+  chart4: "oklch(0.528 0 0)",
+  chart5: "oklch(0.757 0 0)",
+  danger: "oklch(0.575 0.186 25.2)",
+  dangerForeground: "oklch(0.5 0.171 25.9)",
+  dangerSurface: "oklch(0.957 0.018 17.5)",
+  destructive: "oklch(0.544 0.186 26)",
+  destructiveForeground: "oklch(1 0 0)",
+  foreground: "oklch(0.173 0 0)",
+  input: "oklch(0.65 0 0)",
+  muted: "oklch(0.964 0 0)",
+  mutedForeground: "oklch(0.475 0 0)",
+  overlay: "oklch(0.173 0 0 / 0.35)",
+  placeholder: "oklch(0.556 0 0)",
+  popover: "oklch(1 0 0)",
+  popoverForeground: "oklch(0.173 0 0)",
+  primary: "oklch(0.869 0.088 60.7)",
+  primaryForeground: "oklch(0 0 0)",
+  primaryHover: "oklch(0.836 0.114 61.4)",
+  // The accent is 1.4:1 on white: a burnt orange for focus.
+  ring: "oklch(0.6 0.148 52.8)",
+  secondary: "oklch(0.964 0 0)",
+  secondaryForeground: "oklch(0.173 0 0)",
+  secondaryHover: "oklch(0.931 0 0)",
+  success: "oklch(0.564 0.111 168.7)",
+  successForeground: "oklch(0.47 0.091 169)",
+  successSurface: "oklch(0.957 0.022 176)",
+  toolbar: "oklch(0.985 0 0)",
+  toolbarAccent: "oklch(0.946 0 0)",
+  toolbarActive: "oklch(0.931 0 0)",
+  toolbarBorder: "oklch(0.919 0 0)",
+  toolbarForeground: "oklch(0.173 0 0)",
+  toolbarMutedForeground: "oklch(0.475 0 0)",
+  unknown: "oklch(0.65 0 0)",
+  unknownForeground: "oklch(0.475 0 0)",
+  unknownSurface: "oklch(0.955 0 0)",
+  warning: "oklch(0.629 0.138 62.7)",
+  warningForeground: "oklch(0.487 0.109 62.1)",
+  warningSurface: "oklch(0.964 0.023 71.8)",
 });
 
-const darkShadows = stylex.createTheme(shadows, {
-  lg: "0 10px 30px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.4)",
-  md: "0 2px 8px rgb(0 0 0 / 0.35)",
-  sm: "0 1px 0 rgb(0 0 0 / 0.2)",
+const lightShadows = stylex.createTheme(shadows, {
+  lg: "0 8px 24px oklch(0.173 0 0 / 0.12), 0 1px 3px oklch(0.173 0 0 / 0.08)",
+  md: "0 2px 6px oklch(0.173 0 0 / 0.08)",
+  sm: "0 1px 0 oklch(0.173 0 0 / 0.04)",
 });
 
-/** Empty themes reset a subtree to the defaults (the light theme). */
-const lightColors = stylex.createTheme(colors, {});
-const lightShadows = stylex.createTheme(shadows, {});
+/** Empty themes reset a subtree to the defaults (the dark theme). */
+const darkColors = stylex.createTheme(colors, {});
+const darkShadows = stylex.createTheme(shadows, {});
 
 const schemes = stylex.create({
   dark: { colorScheme: "dark" },

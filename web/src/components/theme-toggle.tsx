@@ -24,14 +24,14 @@ const styles = stylex.create({
     alignItems: "center",
     backgroundColor: {
       ":hover": colors.accent,
-      ":is([data-pressed])": colors.primary,
+      ":is([data-pressed])": colors.secondaryHover,
       default: "transparent",
     },
     borderRadius: radius.sm,
     borderStyle: "none",
     color: {
       ":hover": colors.foreground,
-      ":is([data-pressed])": colors.primaryForeground,
+      ":is([data-pressed])": colors.foreground,
       default: colors.mutedForeground,
     },
     cursor: "pointer",

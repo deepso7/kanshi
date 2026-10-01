@@ -200,10 +200,10 @@ const styles = stylex.create({
     width: "100%",
   },
   tooltip: {
-    backgroundColor: colors.primary,
+    backgroundColor: colors.foreground,
     borderRadius: radius.sm,
     boxShadow: shadows.md,
-    color: colors.primaryForeground,
+    color: colors.background,
     display: "flex",
     flexDirection: "column",
     fontSize: fontSizes.xs,

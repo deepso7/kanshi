@@ -27,7 +27,7 @@ const styles = stylex.create({
     display: "flex",
     marginBottom: space.sm,
   },
-  // A hollow square with a filled core: the game's "no signal" marker.
+  // A hollow square with a filled core: a "no signal" marker.
   marker: {
     "::after": {
       backgroundColor: colors.mutedForeground,

@@ -11,98 +11,94 @@ import {
   motion,
   radius,
   space,
-  tracking,
 } from "../theme/tokens.stylex.ts";
 import { shared } from "./ui/shared.ts";
 
-const styles = stylex.create({
-  brand: {
-    alignItems: "center",
-    display: "flex",
-    // Narrow: pushes the footer to the end of the top bar.
-    flexGrow: { default: 1, [media.md]: 0 },
-    flexShrink: 0,
-    fontSize: fontSizes.sm,
-    fontWeight: fontWeights.semibold,
-    gap: space.sm,
-    letterSpacing: tracking.wider,
-    paddingInline: { default: 0, [media.md]: space.sm },
-    textTransform: "uppercase",
-  },
-  content: {
+/** The page column; the bar's row lines up with it. */
+const column = stylex.create({
+  column: {
     marginInline: "auto",
     maxWidth: "72rem",
+    paddingInline: { default: space.lg, [media.md]: space.xxl },
+    width: "100%",
   },
-  footer: {
+});
+
+const styles = stylex.create({
+  actions: {
     alignItems: "center",
-    borderTopColor: colors.sidebarBorder,
-    borderTopStyle: "solid",
-    borderTopWidth: { default: 0, [media.md]: "1px" },
     display: "flex",
     flexShrink: 0,
     gap: space.sm,
-    justifyContent: "space-between",
-    // Narrow: the footer sits beside the brand, the nav wraps below.
-    order: { default: 1, [media.md]: 3 },
-    paddingTop: { default: 0, [media.md]: space.md },
+    marginLeft: "auto",
+    // Narrow: beside the brand, the nav wraps below.
+    order: { default: 1, [media.md]: 2 },
+  },
+  bar: {
+    alignItems: "center",
+    columnGap: { default: space.md, [media.md]: space.xl },
+    display: "flex",
+    flexWrap: { default: "wrap", [media.md]: "nowrap" },
+    minHeight: "3.75rem",
+    paddingBlock: space.sm,
+    rowGap: space.xs,
+  },
+  brand: {
+    alignItems: "center",
+    color: colors.toolbarForeground,
+    display: "flex",
+    flexShrink: 0,
+    fontSize: fontSizes.lg,
+    fontWeight: fontWeights.semibold,
+    gap: space.sm,
+  },
+  header: {
+    backgroundColor: colors.toolbar,
+    borderBottomColor: colors.toolbarBorder,
+    borderBottomStyle: "solid",
+    borderBottomWidth: "1px",
+    color: colors.toolbarForeground,
+    position: "sticky",
+    top: 0,
+    zIndex: 10,
   },
   main: {
+    flexGrow: 1,
     minWidth: 0,
     paddingBlock: { default: space.xl, [media.md]: space.xxl },
-    paddingInline: { default: space.lg, [media.md]: space.xxl },
   },
   nav: {
     display: "flex",
     // Narrow: its own full-width row under the brand, scrolling sideways.
     flexBasis: { default: "100%", [media.md]: "auto" },
-    flexDirection: { default: "row", [media.md]: "column" },
-    flexGrow: 1,
-    gap: "1px",
-    marginInline: { default: `calc(-1 * ${space.md})`, [media.md]: 0 },
+    gap: space.xxs,
+    marginInline: { default: `calc(-1 * ${space.sm})`, [media.md]: 0 },
     minWidth: 0,
-    order: 2,
-    overflowX: { default: "auto", [media.md]: "visible" },
-    paddingInline: { default: space.md, [media.md]: 0 },
+    order: { default: 2, [media.md]: 1 },
+    overflowX: "auto",
+    paddingInline: { default: space.sm, [media.md]: 0 },
     scrollbarWidth: "none",
   },
-  navLabel: {
-    display: { default: "none", [media.md]: "block" },
-    paddingBottom: space.xs,
-    paddingInline: space.sm,
-  },
   navLink: {
-    // The square marker: hollow, filled on the current page.
-    "::before": {
-      backgroundColor: {
-        ":is([aria-current=page])": "currentColor",
-        default: "transparent",
-      },
-      borderColor: "currentColor",
-      borderStyle: "solid",
-      borderWidth: "1px",
-      content: '""',
-      flexShrink: 0,
-      height: "0.4375rem",
-      opacity: { ":is([aria-current=page])": 1, default: 0.6 },
-      width: "0.4375rem",
-    },
     alignItems: "center",
     backgroundColor: {
-      ":hover": colors.sidebarAccent,
-      ":is([aria-current=page])": colors.sidebarPrimary,
+      ":hover": colors.toolbarAccent,
+      ":is([aria-current=page])": colors.toolbarActive,
       default: "transparent",
     },
-    borderRadius: radius.sm,
+    borderRadius: radius.md,
     color: {
-      ":is([aria-current=page])": colors.sidebarPrimaryForeground,
-      default: colors.sidebarForeground,
+      ":hover": colors.toolbarForeground,
+      ":is([aria-current=page])": colors.toolbarForeground,
+      default: colors.toolbarMutedForeground,
     },
     display: "flex",
     flexShrink: 0,
-    fontSize: fontSizes.sm,
-    gap: space.sm,
+    fontSize: fontSizes.md,
+    fontWeight: fontWeights.medium,
+    gap: space.xs,
     height: "2rem",
-    paddingInline: space.sm,
+    paddingInline: space.md,
     textDecoration: "none",
     transitionDuration: motion.fast,
     transitionProperty: "background-color, color",
@@ -111,46 +107,12 @@ const styles = stylex.create({
   shell: {
     backgroundColor: colors.background,
     color: colors.foreground,
-    display: "grid",
+    display: "flex",
+    flexDirection: "column",
     fontSize: fontSizes.md,
-    // minmax(0, ...): a wide child (a table, the nav) must not widen the
-    // column past the viewport.
-    gridTemplateColumns: {
-      default: "minmax(0, 1fr)",
-      [media.md]: "15rem minmax(0, 1fr)",
-    },
-    // minmax: the sidebar's own height must not size the row.
-    gridTemplateRows: {
-      default: "auto minmax(0, 1fr)",
-      [media.md]: "minmax(0, 1fr)",
-    },
     minHeight: "100dvh",
   },
-  sidebar: {
-    alignItems: { default: "center", [media.md]: "stretch" },
-    backgroundColor: colors.sidebar,
-    borderBottomColor: colors.sidebarBorder,
-    borderBottomStyle: "solid",
-    borderBottomWidth: { default: "1px", [media.md]: 0 },
-    borderRightColor: colors.sidebarBorder,
-    borderRightStyle: "solid",
-    borderRightWidth: { default: 0, [media.md]: "1px" },
-    color: colors.sidebarForeground,
-    display: "flex",
-    flexDirection: { default: "row", [media.md]: "column" },
-    flexWrap: { default: "wrap", [media.md]: "nowrap" },
-    gap: { default: space.sm, [media.md]: space.lg },
-    // The viewport's height, or less inside a shorter container.
-    height: { default: "auto", [media.md]: "100dvh" },
-    maxHeight: "100%",
-    minWidth: 0,
-    paddingBlock: { default: space.sm, [media.md]: space.lg },
-    paddingInline: { default: space.md, [media.md]: space.md },
-    position: "sticky",
-    top: 0,
-    zIndex: 10,
-  },
-  // Off screen until focused: the first Tab stop, past the sidebar.
+  // Off screen until focused: the first Tab stop, past the top bar.
   skip: {
     backgroundColor: colors.primary,
     borderRadius: radius.sm,
@@ -171,12 +133,15 @@ const logo = stylex.create({
   mark: {
     "::after": {
       backgroundColor: "currentColor",
+      borderRadius: "1px",
       content: '""',
       flexGrow: 1,
     },
     borderColor: "currentColor",
+    borderRadius: radius.sm,
     borderStyle: "solid",
-    borderWidth: "1px",
+    borderWidth: "1.5px",
+    color: colors.primary,
     display: "inline-flex",
     height: "1rem",
     padding: "3px",
@@ -185,27 +150,27 @@ const logo = stylex.create({
 });
 
 export interface AppShellProps {
-  /** Top of the sidebar. Default: the Kanshi mark and name. */
+  /** Start of the top bar. Default: the Kanshi mark and name. */
   readonly brand?: ReactNode;
   /** After the brand: a small tag such as a "Dev" badge. */
   readonly brandBadge?: ReactNode;
   /** `AppShellNavLink`s. */
   readonly nav: ReactNode;
-  /** Bottom of the sidebar: the theme toggle, a sign-out button. */
-  readonly footer?: ReactNode;
+  /** End of the top bar: the theme toggle, a sign-out button. */
+  readonly actions?: ReactNode;
   readonly children: ReactNode;
   readonly style?: stylex.StyleXStyles;
 }
 
 /**
- * The signed-in layout: a sidebar (brand, navigation, footer) beside the
- * page on wide screens, a top bar on narrow ones.
+ * The signed-in layout: a top bar (brand, navigation, actions) over the
+ * page. On narrow screens the navigation wraps to a second row.
  */
 export const AppShell = ({
+  actions,
   brand,
   brandBadge,
   children,
-  footer,
   nav,
   style,
 }: AppShellProps) => (
@@ -213,26 +178,27 @@ export const AppShell = ({
     <a href="#main" {...stylex.props(styles.skip, shared.focusRing)}>
       Skip to content
     </a>
-    <aside {...stylex.props(styles.sidebar)}>
-      <div {...stylex.props(styles.brand)}>
-        {brand ?? (
-          <>
-            <span aria-hidden {...stylex.props(logo.mark)} />
-            Kanshi
-          </>
+    <header {...stylex.props(styles.header)}>
+      <div {...stylex.props(column.column, styles.bar)}>
+        <div {...stylex.props(styles.brand)}>
+          {brand ?? (
+            <>
+              <span aria-hidden {...stylex.props(logo.mark)} />
+              Kanshi
+            </>
+          )}
+          {brandBadge}
+        </div>
+        <nav aria-label="Main" {...stylex.props(styles.nav)}>
+          {nav}
+        </nav>
+        {actions === undefined ? null : (
+          <div {...stylex.props(styles.actions)}>{actions}</div>
         )}
-        {brandBadge}
       </div>
-      <nav aria-label="Main" {...stylex.props(styles.nav)}>
-        <span {...stylex.props(shared.label, styles.navLabel)}>Navigation</span>
-        {nav}
-      </nav>
-      {footer === undefined ? null : (
-        <div {...stylex.props(styles.footer)}>{footer}</div>
-      )}
-    </aside>
+    </header>
     <main id="main" tabIndex={-1} {...stylex.props(styles.main)}>
-      <div {...stylex.props(styles.content)}>{children}</div>
+      <div {...stylex.props(column.column)}>{children}</div>
     </main>
   </div>
 );
@@ -243,7 +209,7 @@ export interface AppShellNavLinkProps extends useRender.ComponentProps<"a"> {
 }
 
 /**
- * A sidebar link. Pass a router link as `render` (TanStack's `<Link>` sets
+ * A top bar link. Pass a router link as `render` (TanStack's `<Link>` sets
  * `aria-current="page"` when active); `active` sets it by hand.
  */
 export const AppShellNavLink = ({

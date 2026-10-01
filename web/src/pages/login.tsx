@@ -32,7 +32,7 @@ const blink = stylex.keyframes({
   "50%": { opacity: 0.25 },
 });
 
-// Corner brackets: an L of ink at two opposite corners of the card.
+// Corner brackets: an L at two opposite corners of the card.
 const bracket = {
   borderColor: colors.foreground,
   borderStyle: "solid",
@@ -47,8 +47,11 @@ const bracket = {
 const styles = stylex.create({
   bar: {
     alignItems: "center",
-    backgroundColor: colors.primary,
-    color: colors.primaryForeground,
+    backgroundColor: colors.secondary,
+    borderBottomColor: colors.border,
+    borderBottomStyle: "solid",
+    borderBottomWidth: "1px",
+    color: colors.foreground,
     display: "flex",
     fontFamily: fonts.mono,
     fontSize: fontSizes.xs,

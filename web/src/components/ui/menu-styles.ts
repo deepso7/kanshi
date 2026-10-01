@@ -1,5 +1,5 @@
-// Rows of floating lists (DropdownMenu, Select): the highlighted row is
-// inverted to ink with a filled square marker, like the game's menus.
+// Rows of floating lists (DropdownMenu, Select): the highlighted row gets
+// the hover surface and a small accent marker.
 import * as stylex from "@stylexjs/stylex";
 
 import {
@@ -23,7 +23,8 @@ export const menuStyles = stylex.create({
   },
   item: {
     "::before": {
-      backgroundColor: "currentColor",
+      backgroundColor: colors.primary,
+      borderRadius: "1px",
       content: '""',
       flexShrink: 0,
       height: "0.375rem",
@@ -32,12 +33,12 @@ export const menuStyles = stylex.create({
     },
     alignItems: "center",
     backgroundColor: {
-      ":is([data-highlighted])": colors.primary,
+      ":is([data-highlighted])": colors.accent,
       default: "transparent",
     },
     borderRadius: radius.sm,
     color: {
-      ":is([data-highlighted])": colors.primaryForeground,
+      ":is([data-highlighted])": colors.accentForeground,
       default: colors.popoverForeground,
     },
     cursor: "default",
