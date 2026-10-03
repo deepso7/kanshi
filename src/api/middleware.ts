@@ -4,9 +4,9 @@
 // Worker-only code. The implementation is `ApiAuthLive` in `./auth.ts`.
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
-import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
-import * as HttpApiMiddleware from "effect/unstable/httpapi/HttpApiMiddleware";
-import * as HttpApiSecurity from "effect/unstable/httpapi/HttpApiSecurity";
+import * as HttpApiError from "effect/http-api/HttpApiError";
+import * as HttpApiMiddleware from "effect/http-api/HttpApiMiddleware";
+import * as HttpApiSecurity from "effect/http-api/HttpApiSecurity";
 
 import { sessionCookieName } from "../auth/session.ts";
 

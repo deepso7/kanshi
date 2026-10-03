@@ -1,9 +1,9 @@
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as HttpApiError from "effect/http-api/HttpApiError";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
-import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
 
 import { isSameOrigin, verifySession } from "../auth/session.ts";
 import { ApiAuth, CredentialValidator } from "./middleware.ts";

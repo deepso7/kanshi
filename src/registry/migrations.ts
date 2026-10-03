@@ -1,6 +1,6 @@
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { watchdogMigration } from "./watchdog-store.ts";
 

@@ -6,8 +6,8 @@ import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import * as SqliteClient from "@effect/sql-sqlite-do/SqliteClient";
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator";
 import * as Effect from "effect/Effect";
+import type * as SqlClient from "effect/sql/SqlClient";
 import * as String from "effect/String";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
 
 type Storage = NonNullable<SqliteClient.SqliteClientConfig["storage"]>;
 

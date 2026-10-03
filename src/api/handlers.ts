@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import { MonitorService } from "../service/monitors.ts";
 import {

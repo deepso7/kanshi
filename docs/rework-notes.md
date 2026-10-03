@@ -5,23 +5,23 @@
 ### Versions
 
 - `effect`, `@effect/platform-node`, `@effect/platform-bun`, `@effect/vitest`,
-  `@effect/sql-d1`, `@effect/sql-pg`: `4.0.0-rc.117`, pinned for transitive
+  `@effect/sql-d1`, `@effect/sql-pg`: `4.0.0` (stable), pinned for transitive
   deps too via `overrides` in `pnpm-workspace.yaml`.
-  - **Not rc.118.** rc.118 moved `effect/unstable/*` to `effect/*` and
-    removed the old paths, but `alchemy@2.0.0-beta.79` (and alchemy `main`)
-    still imports `effect/unstable/*`, so it breaks at load time. Move to
-    rc.118+ (and `effect/http`, `effect/http-api`, ...) when an alchemy
-    release adopts it.
-- `alchemy`: `2.0.0-beta.79` (peer `effect >=4.0.0-rc.115`).
-- `vitest` `5.0.2`, `@cloudflare/workers-types` `5.20260928.1`,
-  `@types/bun` `1.4.2`, `@types/node` `26.6.3`, `oxlint` `1.86.0`,
-  `oxfmt` `0.71.0`, `ultracite` `7.12.1`, `@effect/language-service`
+  - Moved from `4.0.0-rc.117` once `alchemy@2.0.0-beta.80` adopted the new
+    paths: `effect/unstable/http` is now `effect/http`, `unstable/httpapi`
+    is `effect/http-api`, and `unstable/sql` is `effect/sql`.
+  - `@effect/platform-bun` is a direct devDependency: it's only an optional
+    peer of alchemy, and the bun integration tests fail to load without it.
+- `alchemy`: `2.0.0-beta.80` (peer `effect ^4.0.0`).
+- `vitest` `5.0.3`, `@cloudflare/workers-types` `5.20261003.1`,
+  `@types/bun` `1.4.2`, `@types/node` `26.6.4`, `oxlint` `1.86.0`,
+  `oxfmt` `0.71.0`, `ultracite` `7.12.2`, `@effect/language-service`
   `0.87.3`. `typescript` is already the latest (`7.0.2`).
 - `drizzle-orm` / `drizzle-kit`: `1.0.0-rc.5-ab785fc`, alchemy's peer
   version. Bumped only because `1.0.0-rc.4` calls the removed
   `Schema.TaggedErrorClass`. `@tinybirdco/sdk` is unchanged.
-- Vendored clones: `.repos/effect` at `effect@4.0.0-rc.117`,
-  `.repos/alchemy` at `v2.0.0-beta.79`.
+- Vendored clones: `.repos/effect` at `effect@4.0.0`,
+  `.repos/alchemy` at `v2.0.0-beta.80`.
 
 ### Integration tests
 
@@ -244,7 +244,7 @@ hand to `4.0.0-rc.117(effect@4.0.0-rc.117)`.
 ```ts
 import * as SqliteClient from "@effect/sql-sqlite-do/SqliteClient";
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 const migrations = SqliteMigrator.fromRecord({
   "1_init": Effect.gen(function* () {

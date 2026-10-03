@@ -1,9 +1,9 @@
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import type * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import { errorCause, exchange, readPrefix, userAgent } from "../http/client.ts";
 import type { AlertRequest } from "./message.ts";

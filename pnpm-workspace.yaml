@@ -7,14 +7,14 @@ saveExact: true
 # Keep every Effect package, including the ones alchemy pulls in as
 # (optional) peers, on the same version as `effect`.
 overrides:
-  effect: 4.0.0-rc.117
-  "@effect/platform-bun": 4.0.0-rc.117
-  "@effect/platform-node": 4.0.0-rc.117
-  "@effect/platform-node-shared": 4.0.0-rc.117
-  "@effect/sql-d1": 4.0.0-rc.117
-  "@effect/sql-pg": 4.0.0-rc.117
-  "@effect/sql-sqlite-do": 4.0.0-rc.117
-  "@effect/vitest": 4.0.0-rc.117
+  effect: 4.0.0
+  "@effect/platform-bun": 4.0.0
+  "@effect/platform-node": 4.0.0
+  "@effect/platform-node-shared": 4.0.0
+  "@effect/sql-d1": 4.0.0
+  "@effect/sql-pg": 4.0.0
+  "@effect/sql-sqlite-do": 4.0.0
+  "@effect/vitest": 4.0.0
 minimumReleaseAgeExclude:
   - "@cloudflare/workers-types@5.20260929.1"
   - "@effect/language-service@0.87.3"

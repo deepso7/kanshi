@@ -3,10 +3,10 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { DeliveryResult, deliver } from "../alerts/delivery.ts";
 import type { WatchdogMessageTag } from "../alerts/message.ts";

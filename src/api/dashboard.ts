@@ -1,7 +1,7 @@
 // The dashboard's reads beyond the monitor and channel resources: the
 // overview, the watchdog's open episodes, dev events and meta.
 import * as Effect from "effect/Effect";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import { minIntervalSeconds } from "../domain/monitor-input.ts";
 import { DevService } from "../service/dev.ts";

@@ -1,10 +1,10 @@
+import * as HttpClientError from "effect/http/HttpClientError";
 // What a failed API call means to the user. `callApi` rejects with the
 // typed error itself: the spec's `NotFound` / `BadRequest` / `Conflict` /
 // `Unavailable` (each with the server's `message`), the auth middleware's
 // `Unauthorized` / `Forbidden`, or the client's `HttpClientError` (the
 // network, or a reply that did not decode).
 import * as Predicate from "effect/Predicate";
-import * as HttpClientError from "effect/unstable/http/HttpClientError";
 
 /** A failure, ready to show: a short title and a sentence. */
 export interface ErrorView {

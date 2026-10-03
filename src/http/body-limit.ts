@@ -1,10 +1,10 @@
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import type { HttpServerError } from "effect/http/HttpServerError";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Latch from "effect/Latch";
 import * as Stream from "effect/Stream";
-import type { HttpServerError } from "effect/unstable/http/HttpServerError";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import { requestIsSameOrigin } from "../api/auth.ts";
 

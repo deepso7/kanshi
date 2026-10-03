@@ -1,9 +1,9 @@
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
-import * as HttpClient from "effect/unstable/http/HttpClient";
 
 import { DeliveryResult, deliver } from "../alerts/delivery.ts";
 import { AlertMessage, alertRequest } from "../alerts/message.ts";
